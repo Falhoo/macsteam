@@ -1,6 +1,5 @@
 build/
 .build/
-vendor/dobby/
 *.dylib
 *.o
 *.a
@@ -12,7 +11,6 @@ scratch/
 .scratch/
 signatures_generated.json
 out/
-/tests/
 lua-tools-auth.json
 
 xcuserdata/
@@ -21,7 +19,7 @@ DerivedData/
 release/
 lua-tools-auth.json
 
-notproton/
 onlinefix/.build/
 !onlinefix/vendor/onlinefix.dylib
 dist/
+vendor/cloudredirect/build-macos/
