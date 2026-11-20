@@ -1,0 +1,59 @@
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g. 0.8.1)"
+        required: true
+      release_notes:
+        description: "Release notes"
+        required: false
+        default: ""
+
+jobs:
+  release:
+    runs-on: macos-26
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Steam compatibility tests
+        # Fails the build when Valve's current Steam client breaks a macSteam patch
+        # (signatures, Cloud-error / shared-library UI patches, Store cards).
+        if: hashFiles('scripts/tests/steam_compat.py') != ''
+        run: python3 scripts/tests/steam_compat.py
+
+      - name: NotProton 1.2.6
+        # build.sh merges NotProton's prebuilt parts into the app.
+        run: curl -fL --retry 3 -o NotProton.zip https://github.com/NotProtonNot/NotProton/releases/download/v1.2.6/NotProton.zip
+
+      - name: Build the app
+        run: ./build.sh --notproton-app NotProton.zip
+
+      - name: Test the packages
+        run: |
+          (cd onlinefix && swift test)
+          (cd macsteam-app && swift test)
+          (cd notproton/app && swift test)
+
+      - name: Package DMG
+        run: |
+          APP="dist/macSteam.app"
+          DMG="macSteam-${{ inputs.version }}.dmg"
+          hdiutil create -volname "macSteam" -srcfolder "$APP" -ov -format UDZO "$DMG"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DMG="macSteam-${{ inputs.version }}.dmg"
+          NOTES="${{ inputs.release_notes }}"
+          if [ -z "$NOTES" ]; then
+            NOTES="macSteam v${{ inputs.version }}"
+          fi
+          gh release create "v${{ inputs.version }}" "$DMG" \
+            --title "v${{ inputs.version }}" \
+            --notes "$NOTES"

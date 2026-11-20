@@ -1,0 +1,361 @@
+diff --git a/app/Package.swift b/app/Package.swift
+index 729319d..e227127 100644
+--- a/app/Package.swift
++++ b/app/Package.swift
+@@ -16,11 +16,14 @@ let package = Package(
+     name: "NotProtonApp",
+     defaultLocalization: "en",
+     platforms: [.macOS("15.0")],
++    products: [
++        .library(name: "NotProtonApp", targets: ["NotProtonApp"]),
++    ],
+     dependencies: [
+         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
+     ],
+     targets: [
+-        .executableTarget(
++        .target(
+             name: "NotProtonApp",
+             dependencies: [.product(name: "Sparkle", package: "Sparkle")],
+             path: "Sources/NotProtonApp",
+diff --git a/app/Sources/NotProtonApp/Embed.swift b/app/Sources/NotProtonApp/Embed.swift
+new file mode 100644
+index 0000000..9cccc14
+--- /dev/null
++++ b/app/Sources/NotProtonApp/Embed.swift
+@@ -0,0 +1,119 @@
++// macSteam + NotProton: the small public surface the combined app uses to host NotProton.
++//
++// Everything else in this module stays internal and unchanged. The combined app shows these
++// screens as pages in its sidebar and calls installIntoSteam() from its own Install button.
++
++import AppKit
++import SwiftUI
++
++// NotProton's window toolbar items (Refresh, the prefix action strip) need a toolbar that
++// NotProton owns. The combined app owns the window toolbar, so the same buttons are shown in
++// a bar at the top of the page instead.
++struct EmbeddedBar<Content: View>: View {
++    private let content: Content
++
++    init(@ViewBuilder _ content: () -> Content) {
++        self.content = content()
++    }
++
++    var body: some View {
++        VStack(spacing: 0) {
++            HStack(spacing: 8) {
++                Spacer()
++                content
++            }
++            .padding(.horizontal, 12)
++            .padding(.vertical, 6)
++            Divider()
++        }
++        .background(.bar)
++    }
++}
++
++public enum NotProtonEmbed {
++
++    public enum Screen: String, CaseIterable, Hashable, Sendable {
++        case status
++        case prefixes
++        case backups
++
++        public var title: String { Pane(rawValue: rawValue)?.label ?? rawValue }
++        public var symbol: String { Pane(rawValue: rawValue)?.symbol ?? "questionmark" }
++    }
++
++    public struct InstallResult: Sendable {
++        public let succeeded: Bool
++        public let message: String
++    }
++
++    @MainActor private static let status = SystemStatus()
++    @MainActor private static let prefixes = PrefixesModel()
++    @MainActor private static var controllers: [Screen: NSViewController] = [:]
++    @MainActor private static var started = false
++
++    // Call once when the app launches.
++    @MainActor
++    public static func start() {
++        guard !started else { return }
++        started = true
++        AppLog.start()
++    }
++
++    // One view controller per screen, created on first use and then reused.
++    @MainActor
++    public static func viewController(for screen: Screen) -> NSViewController {
++        if let existing = controllers[screen] { return existing }
++        start()
++        let controller: NSHostingController<AnyView>
++        switch screen {
++        case .status: controller = NSHostingController(rootView: wrap(StatusView()))
++        case .prefixes: controller = NSHostingController(rootView: wrap(PrefixesView()))
++        case .backups: controller = NSHostingController(rootView: wrap(BackupsView()))
++        }
++        // The hosting controller must not drive the window's size or toolbar.
++        controller.sizingOptions = []
++        controller.sceneBridgingOptions = []
++        controllers[screen] = controller
++        return controller
++    }
++
++    // Same bookkeeping NotProton's own window did when its sidebar selection moved away from a page.
++    @MainActor
++    public static func didLeave(_ screen: Screen) {
++        if screen != .status { prefixes.forgetOutcome() }
++    }
++
++    // Runs NotProton's normal Install: stages the components, installs notproton.dylib into
++    // Steam next to any macSteam dylib, and sets up the CrossOver compatibility tool when
++    // CrossOver is installed and activated. Progress also shows on NotProton's Status page.
++    @MainActor
++    public static func installIntoSteam() async -> InstallResult {
++        start()
++        if status.isBusy {
++            return InstallResult(
++                succeeded: false,
++                message: "NotProton is busy with another task. Wait for it to finish, then try again."
++            )
++        }
++        // The install reads which CrossOver copies exist from the latest status snapshot.
++        await status.refresh()
++        await status.installIntoSteam()
++        if let failure = status.failure {
++            return InstallResult(succeeded: false, message: failure)
++        }
++        return InstallResult(succeeded: true, message: status.outcome ?? "")
++    }
++
++    @MainActor
++    private static func wrap<V: View>(_ view: V) -> AnyView {
++        AnyView(
++            view
++                .environment(status)
++                .environment(prefixes)
++                // Mirrors NotProton's own window: keep the prefix list in step with the runners.
++                .onChange(of: status.snapshot?.installedRunners.map(\.id)) {
++                    if prefixes.hasLoaded { Task { await prefixes.load() } }
++                }
++        )
++    }
++}
+diff --git a/app/Sources/NotProtonApp/Model/SteamBundle.swift b/app/Sources/NotProtonApp/Model/SteamBundle.swift
+index ed2793b..bde5a56 100644
+--- a/app/Sources/NotProtonApp/Model/SteamBundle.swift
++++ b/app/Sources/NotProtonApp/Model/SteamBundle.swift
+@@ -18,6 +18,14 @@ enum SteamBundle {
+     static let controllerBlockKey = "SDL_JOYSTICK_BLACKLIST_DEVICES"
+     static let controllerBlockValue = "0x05ac/0x0004"
+ 
++    // macSteam + NotProton: the combined app's dylibs are allowed to share the injection list
++    // with ours: macSteam's own, CloudRedirect's cloud runtime, and OnlineFix's routing dylib.
++    static let coexistingDylibNames = ["macsteam.dylib", "cloud_redirect.dylib", "onlinefix.dylib"]
++
++    static func isCoexisting(_ path: String) -> Bool {
++        coexistingDylibNames.contains(URL(filePath: path).lastPathComponent)
++    }
++
+     static let plistBackupName = "Info.plist.before-notproton"
+     static let environmentKey = "LSEnvironment"
+ 
+@@ -46,7 +54,9 @@ enum SteamBundle {
+         let components = insert.split(separator: ":").map(String.init)
+         guard components.contains(deployedDylib) else {
+             // Our dylib at another path means Steam.app moved after install. Installing again rewrites it.
+-            let others = components.filter { URL(filePath: $0).lastPathComponent != SupportPaths.dylibName }
++            let others = components.filter {
++                URL(filePath: $0).lastPathComponent != SupportPaths.dylibName && !isCoexisting($0)
++            }
+             return others.isEmpty ? .notInstalled : .foreign(insert: insert)
+         }
+ 
+diff --git a/app/Sources/NotProtonApp/Model/SteamInstaller.swift b/app/Sources/NotProtonApp/Model/SteamInstaller.swift
+index bb9655b..1b32e1b 100644
+--- a/app/Sources/NotProtonApp/Model/SteamInstaller.swift
++++ b/app/Sources/NotProtonApp/Model/SteamInstaller.swift
+@@ -184,7 +184,7 @@ enum SteamInstaller {
+         GameTiles.refresh(launchers: support.appending(path: "launchers"), run: payload.run)
+ 
+         let landed = SteamBundle.currentInsert(at: plist)
+-        guard landed == dylib.path(percentEncoded: false) else {
++        guard insertList(at: plist).contains(dylib.path(percentEncoded: false)) else {
+             AppLog.note("install: bundle declares \(landed ?? "no insert")")
+             throw StepFailure(
+                 step: step,
+@@ -266,6 +266,7 @@ enum SteamInstaller {
+         let deployed = dylib.path(percentEncoded: false)
+         let foreign = insert.split(separator: ":").map(String.init).filter {
+             $0 != deployed && URL(filePath: $0).lastPathComponent != SupportPaths.dylibName
++                && !SteamBundle.isCoexisting($0)
+         }
+         guard foreign.isEmpty else {
+             throw StepFailure(
+@@ -275,8 +276,12 @@ enum SteamInstaller {
+         }
+     }
+ 
++    static func insertList(at plist: URL) -> [String] {
++        (SteamBundle.currentInsert(at: plist) ?? "").split(separator: ":").map(String.init)
++    }
++
+     static func needsPatching(plist: URL, dylib: URL, shipping: URL, app: URL) throws -> Bool {
+-        let deployed = SteamBundle.currentInsert(at: plist) == dylib.path(percentEncoded: false)
++        let deployed = insertList(at: plist).contains(dylib.path(percentEncoded: false))
+             && SteamBundle.currentControllerBlock(at: plist) == SteamBundle.controllerBlockValue
+         let file = DeploymentContent.File(source: shipping, destination: dylib, name: "notproton.dylib", allowsResigning: true)
+         if deployed, try file.matches() {
+@@ -357,7 +362,14 @@ enum SteamInstaller {
+         }
+ 
+         var environment = dict[SteamBundle.environmentKey] as? [String: Any] ?? [:]
+-        environment[SteamBundle.insertKey] = dylib.path(percentEncoded: false)
++        // macSteam + NotProton: keep macSteam's dylib in the list (in its existing position)
++        // instead of overwriting the whole list with ours.
++        let ours = dylib.path(percentEncoded: false)
++        var list = (environment[SteamBundle.insertKey] as? String ?? "")
++            .split(separator: ":").map(String.init)
++            .filter { $0 == ours || SteamBundle.isCoexisting($0) }
++        if !list.contains(ours) { list.append(ours) }
++        environment[SteamBundle.insertKey] = list.joined(separator: ":")
+         environment[SteamBundle.controllerBlockKey] = SteamBundle.controllerBlockValue
+         dict[SteamBundle.environmentKey] = environment
+         try SteamBundle.writeInfoPlist(dict, at: plist)
+diff --git a/app/Sources/NotProtonApp/Support/Launch.swift b/app/Sources/NotProtonApp/Support/Launch.swift
+index 48ee491..6ec9ae0 100644
+--- a/app/Sources/NotProtonApp/Support/Launch.swift
++++ b/app/Sources/NotProtonApp/Support/Launch.swift
+@@ -1,8 +1,10 @@
+ import Foundation
+ 
+-@main
+-enum Launch {
+-    static func main() {
++// macSteam + NotProton: this used to be the program entry point (@main). The combined app owns
++// the entry point now and calls this first. If the process was started with one of the
++// command-line modes (rebuild a prefix, remove everything) it handles it and exits; otherwise it returns.
++public enum NotProtonLaunch {
++    public static func handleCommandLineModes() {
+         if CommandLine.arguments.dropFirst().first == RebuildPrefixCommand.flag {
+             // Out of the launching process group, so stopping the game in Steam cannot take
+             // the rebuild with it.
+@@ -20,7 +22,6 @@ enum Launch {
+         if CommandLine.arguments.dropFirst().contains(RemoveEverythingCommand.flag) {
+             RemoveEverythingCommand.run()
+         }
+-        NotProtonApp.main()
+     }
+ }
+ 
+diff --git a/app/Sources/NotProtonApp/SystemStatus.swift b/app/Sources/NotProtonApp/SystemStatus.swift
+index 15dc87a..f1a2537 100644
+--- a/app/Sources/NotProtonApp/SystemStatus.swift
++++ b/app/Sources/NotProtonApp/SystemStatus.swift
+@@ -9,7 +9,11 @@ enum AppVersion {
+     static let fallback = "0.1.0-dev"
+ 
+     static var bundled: String {
+-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? fallback
++        // macSteam + NotProton: the combined app has its own CFBundleShortVersionString, so the
++        // NotProton version is carried in its own key.
++        (Bundle.main.object(forInfoDictionaryKey: "NotProtonVersion") as? String)
++            ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
++            ?? fallback
+     }
+ }
+ 
+diff --git a/app/Sources/NotProtonApp/Views/BackupsView.swift b/app/Sources/NotProtonApp/Views/BackupsView.swift
+index 18c47dc..b4af7f4 100644
+--- a/app/Sources/NotProtonApp/Views/BackupsView.swift
++++ b/app/Sources/NotProtonApp/Views/BackupsView.swift
+@@ -38,14 +38,8 @@ struct BackupsView: View {
+                 report(StatusRow(title: String(localized: "Done"), value: outcome, tone: .ok))
+             }
+         }
+-        .toolbar {
+-            if #available(macOS 26.1, *) {
+-                ToolbarItemGroup(placement: .primaryAction) { strip }
+-                    .visibilityPriority(.high)
+-            } else {
+-                ToolbarItemGroup(placement: .primaryAction) { strip }
+-            }
+-        }
++        // macSteam + NotProton: shown as a bar inside the pane (was a window toolbar)
++        .safeAreaInset(edge: .top, spacing: 0) { EmbeddedBar { strip } }
+         .task { if model.prefixes.isEmpty { await model.load() } }
+         .onChange(of: model.backups) { _, kept in
+             selection = selection.filter { id in kept.contains { $0.id == id } }
+diff --git a/app/Sources/NotProtonApp/Views/PrefixesView.swift b/app/Sources/NotProtonApp/Views/PrefixesView.swift
+index 0393964..6b29827 100644
+--- a/app/Sources/NotProtonApp/Views/PrefixesView.swift
++++ b/app/Sources/NotProtonApp/Views/PrefixesView.swift
+@@ -50,14 +50,8 @@ struct PrefixesView: View {
+                 )
+             }
+         }
+-        .toolbar {
+-            if #available(macOS 26.1, *) {
+-                ToolbarItemGroup(placement: .primaryAction) { strip }
+-                    .visibilityPriority(.high)
+-            } else {
+-                ToolbarItemGroup(placement: .primaryAction) { strip }
+-            }
+-        }
++        // macSteam + NotProton: shown as a bar inside the pane (was a window toolbar)
++        .safeAreaInset(edge: .top, spacing: 0) { EmbeddedBar { strip } }
+         .task { await model.load() }
+         .confirmationDialog(
+             PrefixPrompt.deleteTitle(deleting),
+diff --git a/app/Sources/NotProtonApp/Views/StatusView.swift b/app/Sources/NotProtonApp/Views/StatusView.swift
+index 7981919..13147f8 100644
+--- a/app/Sources/NotProtonApp/Views/StatusView.swift
++++ b/app/Sources/NotProtonApp/Views/StatusView.swift
+@@ -174,14 +174,8 @@ struct StatusView: View {
+             }
+         }
+         .navigationTitle("Status")
+-        .toolbar {
+-            if #available(macOS 26.1, *) {
+-                ToolbarItem(placement: .primaryAction) { refreshButton }
+-                    .visibilityPriority(.high)
+-            } else {
+-                ToolbarItem(placement: .primaryAction) { refreshButton }
+-            }
+-        }
++        // macSteam + NotProton: shown as a bar inside the pane (was a window toolbar)
++        .safeAreaInset(edge: .top, spacing: 0) { EmbeddedBar { refreshButton } }
+         .confirmationDialog(
+             String(localized: "Block Steam client updates?"),
+             isPresented: asking(.blockUpdates),
+diff --git a/app/Tests/NotProtonAppTests/SteamBundleTests.swift b/app/Tests/NotProtonAppTests/SteamBundleTests.swift
+index 3584389..fecf88d 100644
+--- a/app/Tests/NotProtonAppTests/SteamBundleTests.swift
++++ b/app/Tests/NotProtonAppTests/SteamBundleTests.swift
+@@ -40,6 +40,24 @@ struct SteamBundleTests {
+         #expect(patterns == [#"/tmp/A\.app/"#])
+     }
+ 
++    // The combined app installs macSteam's dylib, CloudRedirect's runtime and OnlineFix's
++    // dylib next to NotProton's; none may read as somebody else's patch.
++    @Test("The combined app's dylibs are allowed in the injection list beside ours")
++    func coexistingDylibs() {
++        #expect(SteamBundle.isCoexisting("/Applications/Steam.app/Contents/MacOS/macsteam.dylib"))
++        #expect(SteamBundle.isCoexisting("/Applications/Steam.app/Contents/MacOS/cloud_redirect.dylib"))
++        #expect(SteamBundle.isCoexisting("/Applications/Steam.app/Contents/MacOS/onlinefix.dylib"))
++        #expect(!SteamBundle.isCoexisting("/Applications/Steam.app/Contents/MacOS/other.dylib"))
++    }
++
++    @Test("An injection list holding only the combined app's dylibs reads as not installed")
++    func combinedDylibsOnly() throws {
++        let insert = "/Applications/Steam.app/Contents/MacOS/macsteam.dylib"
++            + ":/Applications/Steam.app/Contents/MacOS/cloud_redirect.dylib"
++            + ":/Applications/Steam.app/Contents/MacOS/onlinefix.dylib"
++        #expect(try deployment(insert: .other(insert), dylib: true, version: "0.2.0") == .notInstalled)
++    }
++
+     @Test("pkill gets the path with regular expression characters escaped")
+     func patternsAreEscaped() {
+         let patterns = SteamBundle.sweepPatterns(app: URL(filePath: "/Volumes/Games (SSD)+/Steam.app"), helpers: [])

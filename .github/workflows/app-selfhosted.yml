@@ -1,0 +1,55 @@
+name: Build (self-hosted)
+# Same build as app.yml, on your own Mac. The runner needs the labels
+# self-hosted, macOS, ARM64 and Xcode (swift + clang) installed.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: build-selfhosted-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          clean: true
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Steam compatibility tests
+        # Fails the build when Valve's current Steam client breaks a macSteam patch
+        # (signatures, Cloud-error / shared-library UI patches, Store cards).
+        if: hashFiles('scripts/tests/steam_compat.py') != ''
+        run: python3 scripts/tests/steam_compat.py
+
+      - name: Build the app
+        # build.sh takes NotProton 1.2.6 from /Applications or ~/Downloads on this Mac;
+        # pass --notproton-app PATH to use another copy or the release zip.
+        run: ./build.sh
+
+      - name: Test the packages
+        run: |
+          (cd onlinefix && swift test)
+          (cd macsteam-app && swift test)
+          (cd notproton/app && swift test)
+
+      - name: Package app
+        run: |
+          rm -f macSteam.zip
+          ditto -c -k --keepParent "dist/macSteam.app" macSteam.zip
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macSteam-${{ github.sha }}
+          path: |
+            macSteam.zip
+            out/macsteam.dylib
+          if-no-files-found: error
