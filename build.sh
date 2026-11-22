@@ -52,7 +52,9 @@ fi
 
 # ---------------------------------------------------------------- 2. NotProton source
 say "Getting NotProton $NP_VERSION source"
-if [ ! -d "$NP_DIR/.git" ]; then
+# The sources ship with this repository; a bare checkout from before they were
+# added still fetches them, so both kinds of working copy build.
+if [ ! -d "$NP_DIR" ]; then
     git clone --depth 1 --branch "$NP_TAG" "$NP_REPO" "$NP_DIR"
 fi
 if [ ! -f "$NP_DIR/app/Sources/NotProtonApp/Embed.swift" ]; then

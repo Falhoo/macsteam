@@ -1,5 +1,6 @@
 build/
 .build/
+vendor/dobby/
 *.dylib
 *.o
 *.a
