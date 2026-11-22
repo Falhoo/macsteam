@@ -2741,6 +2741,14 @@ if [ -d "$bridge_src" ] && [ -n "$WINEPREFIX" ]; then
       *) rm -f "$f" && echo "=== pruned stale $base ===" >> "$log" 2>&1 ;;
     esac
   done
+  # Steam's overlay loader takes Steam's path from the prefix registry and loads
+  # GameOverlayRenderer64.dll from there. The prune above would delete a copy an
+  # OnlineFix put there, so the compatibility layer stages its own.
+  overlay_renderer="$np_support/bridge/legacycompat/GameOverlayRenderer64.dll"
+  [ -f "$overlay_renderer" ] || overlay_renderer="$HOME/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/legacycompat/GameOverlayRenderer64.dll"
+  if [ -f "$overlay_renderer" ] && [ ! -f "$prefix_steam/GameOverlayRenderer64.dll" ]; then
+    cp -fp "$overlay_renderer" "$prefix_steam/GameOverlayRenderer64.dll" 2>> "$log" || true
+  fi
   # Needed for CEG 'platform survey'.
   mkdir -p "$WINEPREFIX/drive_c/windows/system32/config" 2>/dev/null || true
   verify_runner

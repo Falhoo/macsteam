@@ -45,4 +45,68 @@ struct SteamNetworkingTests {
         try write("SteamNetworkingSockets", to: root.appendingPathComponent("Content/Game.pak"))
         #expect(!SteamNetworking.scan(folder: root))
     }
+
+    /// The OnlineFix's own Steam API DLL contains the entry point names because it
+    /// emulates Steam networking. Reading it says nothing about the game.
+    @Test
+    func theFixesOwnDllIsNotTheGamesCode() throws {
+        let root = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write("SteamNetworkingSockets",
+                  to: root.appendingPathComponent("Plugins/x86_64/steam_api64.dll"))
+        try write("SteamUserStats", to: root.appendingPathComponent("Game.exe"))
+        #expect(!SteamNetworking.scan(folder: root))
+    }
+
+    /// RV There Yet? imports SteamNetworkingSockets and has an OnlineFix. The answer
+    /// comes from the game's own code, not from the fix's files, which sit deep in
+    /// the game's tree: that is where the walk has to look.
+    @Test
+    func aFixedGameStillCountsAsARelayGame() throws {
+        let root = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write("SteamNetworkingSockets",
+                  to: root.appendingPathComponent("Ride/Binaries/Win64/Ride-Win64-Shipping.exe"))
+        try write("SteamNetworkingSockets",
+                  to: root.appendingPathComponent("Ride/Ride/Binaries/Win64/OnlineFix64.dll"))
+
+        #expect(SteamNetworking.hasFix(in: root))
+        #expect(SteamNetworking.uses(appID: 3949040, gameFolder: root))
+    }
+
+    /// The game's executables are read at the same depth as the fix, or a game
+    /// inside an engine tree would look like it never uses Steam networking.
+    @Test
+    func aDeepExecutableIsStillRead() throws {
+        let root = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write("SteamNetworkingSockets",
+                  to: root.appendingPathComponent("Ride/Ride/Binaries/Win64/Game-Win64-Shipping.exe"))
+
+        #expect(SteamNetworking.scan(folder: root))
+    }
+
+    /// With no fix in the folder, the game's own code is all that is left to ask.
+    @Test
+    func anUnfixedGameWithItsOwnRelayCodeNeedsItsAppID() throws {
+        let root = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write("SteamNetworkingSockets",
+                  to: root.appendingPathComponent("Game.exe"))
+
+        #expect(SteamNetworking.uses(appID: 1, gameFolder: root))
+    }
+
+    /// RV There Yet? works as Spacewar, host and joiner. Its own code uses Steam's
+    /// relay, but the fix is the Steam API that code calls, and its matching is
+    /// what fills the lobby; as its own AppID it cannot create a lobby at all.
+    @Test
+    func aFixedRelayGameMustRunAsSpacewar() {
+        #expect(SteamNetworking.spacewarRequired(usesSteamNetworking: true, fixInstalled: true))
+        // Without a fix there is nothing matching players as Spacewar, so the real
+        // AppID is the only identity left.
+        #expect(!SteamNetworking.spacewarRequired(usesSteamNetworking: true, fixInstalled: false))
+        // A game that does not use the relay never has to be itself.
+        #expect(!SteamNetworking.spacewarRequired(usesSteamNetworking: false, fixInstalled: true))
+    }
 }

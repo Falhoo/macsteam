@@ -77,6 +77,9 @@ else
             [ -e "$c" ] && { NP_SOURCE_APP="$c"; break; }
         done
     fi
+    if [ -z "$NP_SOURCE_APP" ] && [ -f "$PAYLOAD_DEST/notproton.dylib" ]; then
+        echo "No NotProton $NP_VERSION app found; reusing the components already in $PAYLOAD_DEST."
+    else
     [ -n "$NP_SOURCE_APP" ] || die "I couldn't find NotProton $NP_VERSION. Download NotProton.zip from https://github.com/NotProtonNot/NotProton/releases (version $NP_VERSION), then run: ./build.sh --notproton-app ~/Downloads/NotProton.zip"
     case "$NP_SOURCE_APP" in
         *.zip) ditto -x -k "$NP_SOURCE_APP" "$TMP/x"; NP_SOURCE_APP="$(find "$TMP/x" -maxdepth 2 -name '*.app' | head -1)" ;;
@@ -89,6 +92,7 @@ else
     mkdir -p "$PAYLOAD_DEST"
     rsync -a --delete "$SRC_PAYLOAD/" "$PAYLOAD_DEST/"
     echo "Copied components from: $NP_SOURCE_APP"
+    fi
 fi
 [ -f "$PAYLOAD_DEST/notproton.dylib" ] || die "NotProton's components are incomplete (notproton.dylib missing)."
 
@@ -167,7 +171,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key> <string>$MS_VERSION</string>
     <key>CFBundleVersion</key>            <string>14</string>
     <key>NotProtonVersion</key>           <string>$NP_APP_VERSION</string>
-    <key>LSMinimumSystemVersion</key>     <string>15.0</string>
+    <key>LSMinimumSystemVersion</key>     <string>26.0</string>
     <key>LSApplicationCategoryType</key>  <string>public.app-category.utilities</string>
     <key>NSHumanReadableCopyright</key>   <string>macSteam/CloudRedirect © 2026 Selectively11/ElfariaKensington. NotProton © NotProtonNot. Achievements, merging and others by Falhoo.</string>
     <key>NSHighResolutionCapable</key>    <true/>
@@ -196,7 +200,7 @@ echo "APPL????" > "$APP/Contents/PkgInfo"
 
 # Copy the license files that go with the code that's inside
 mkdir -p "$APP/Contents/Resources/Licenses"
-cp LICENSE "$APP/Contents/Resources/Licenses/LICENSE.macsteam"
+[ -f LICENSE ] && cp LICENSE "$APP/Contents/Resources/Licenses/LICENSE.macsteam" || echo "Note: no LICENSE file at the top of the project; skipped."
 for f in LICENSE NOTICE LICENSE.lsteamclient LICENSE.steam-shim LICENSE.fonts; do
     [ -f "$NP_DIR/$f" ] && cp "$NP_DIR/$f" "$APP/Contents/Resources/Licenses/${f}.notproton"
 done

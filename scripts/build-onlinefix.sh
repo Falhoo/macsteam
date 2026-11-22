@@ -35,3 +35,13 @@ chmod +x "$RES/7zz" 2>/dev/null || true
 if [ -d "$SRC/runtime" ]; then
     cp "$SRC"/runtime/*.json "$RES/runtime/" 2>/dev/null || true
 fi
+
+# OnlineFix's Photon patch (Custom.dll, BepInEx's preloader and the winmm doorway).
+# The app adds it to a Photon game whose fix stops at the Steam API DLL.
+if [ -d "$SRC/photon" ]; then
+    mkdir -p "$RES/photon/BepInEx/core"
+    cp "$SRC/photon/winmm.dll" "$RES/photon/" 2>/dev/null || true
+    cp "$SRC/photon/Custom.dll" "$RES/photon/" 2>/dev/null || true
+    cp "$SRC/photon/BepInEx/core/BepInEx.Preloader.dll" "$RES/photon/BepInEx/core/" 2>/dev/null || true
+    echo "installed OnlineFix Photon patch"
+fi

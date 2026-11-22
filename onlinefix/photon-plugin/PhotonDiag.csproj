@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Photon Diagnostics, a BepInEx 5 plugin. It only reads and logs, so it is safe
+    to leave in a game while a fix is being worked out.
+
+    Build:
+      dotnet build -c Release -o bin
+    (net472 builds on macOS through the reference-assemblies package below.)
+  -->
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>PhotonDiag</AssemblyName>
+    <RootNamespace>PhotonDiag</RootNamespace>
+    <LangVersion>7.3</LangVersion>
+    <Version>1.0.0</Version>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <RestoreAdditionalProjectSources>https://nuget.bepinex.dev/v3/index.json</RestoreAdditionalProjectSources>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BepInEx.Core" Version="5.4.21" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

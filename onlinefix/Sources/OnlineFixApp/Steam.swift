@@ -57,6 +57,20 @@ enum Steam {
         return nil
     }
 
+    /// The newest NotProton compatibility tool installed for Steam, e.g.
+    /// "notproton-26.3". Empty when NotProton is not installed.
+    static func notProtonTool() -> String? {
+        let dir = Paths.steamSupport.appendingPathComponent("compatibilitytools.d", isDirectory: true)
+        let names = (try? Paths.fm.contentsOfDirectory(atPath: dir.path)) ?? []
+        return names
+            .filter { name in
+                name.lowercased().hasPrefix("notproton")
+                    && Paths.fm.fileExists(atPath: dir.appendingPathComponent(name).path)
+            }
+            .sorted()
+            .last
+    }
+
     // MARK: - Resources
 
     static func bundledResource(_ name: String) -> URL? {

@@ -15,17 +15,22 @@ let hasPayload = FileManager.default.fileExists(
 let package = Package(
     name: "NotProtonApp",
     defaultLocalization: "en",
-    platforms: [.macOS("15.0")],
+    platforms: [.macOS(.v26)],   // macSteam: Liquid Glass pages need macOS 26
     products: [
         .library(name: "NotProtonApp", targets: ["NotProtonApp"]),
     ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
+        // macSteam: shared Liquid Glass components (../../glass-ui in the macSteam tree).
+        .package(path: "../../glass-ui"),
     ],
     targets: [
         .target(
             name: "NotProtonApp",
-            dependencies: [.product(name: "Sparkle", package: "Sparkle")],
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle"),
+                .product(name: "GlassUI", package: "glass-ui"),
+            ],
             path: "Sources/NotProtonApp",
             resources: (hasPayload ? [.copy("Resources/payload")] : []) + [
                 .process("Resources/Localization"),

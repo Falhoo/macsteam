@@ -5,8 +5,9 @@ import Foundation
 public struct RoutingEntry: Sendable, Equatable {
     public let appID: Int
     public let name: String
-    /// Only a game with an OnlineFix installed is routed through AppID 480; a
-    /// game that is merely in My Games keeps its own identity.
+    /// Whether the fix's own files are still in the game folder. A recorded fix
+    /// whose files Steam has put back is not passed at all, so the game starts as
+    /// itself instead of as Spacewar without a fix.
     public let hasFix: Bool
     public let keepRealAppID: Bool
     public let startupAppID: Bool

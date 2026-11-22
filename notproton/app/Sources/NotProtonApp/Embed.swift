@@ -6,30 +6,6 @@
 import AppKit
 import SwiftUI
 
-// NotProton's window toolbar items (Refresh, the prefix action strip) need a toolbar that
-// NotProton owns. The combined app owns the window toolbar, so the same buttons are shown in
-// a bar at the top of the page instead.
-struct EmbeddedBar<Content: View>: View {
-    private let content: Content
-
-    init(@ViewBuilder _ content: () -> Content) {
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Spacer()
-                content
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            Divider()
-        }
-        .background(.bar)
-    }
-}
-
 public enum NotProtonEmbed {
 
     public enum Screen: String, CaseIterable, Hashable, Sendable {
@@ -59,17 +35,29 @@ public enum NotProtonEmbed {
         AppLog.start()
     }
 
-    // One view controller per screen, created on first use and then reused.
+    // The page itself, for hosts that show it directly in SwiftUI. Every page shares the same
+    // SystemStatus and PrefixesModel, so their state survives switching between pages.
+    // Its Refresh / Tools / Reveal / Delete buttons are SwiftUI toolbar items, which the host's
+    // NavigationSplitView puts in the window toolbar.
+    @MainActor
+    public static func view(for screen: Screen) -> AnyView {
+        start()
+        switch screen {
+        case .status: return wrap(StatusView())
+        case .prefixes: return wrap(PrefixesView())
+        case .backups: return wrap(BackupsView())
+        }
+    }
+
+    // One view controller per screen, created on first use and then reused. It hosts
+    // view(for:), with the toolbar buttons shown in a glass bar at the top of the page,
+    // because the hosting controller does not bridge toolbar items into the window.
     @MainActor
     public static func viewController(for screen: Screen) -> NSViewController {
         if let existing = controllers[screen] { return existing }
-        start()
-        let controller: NSHostingController<AnyView>
-        switch screen {
-        case .status: controller = NSHostingController(rootView: wrap(StatusView()))
-        case .prefixes: controller = NSHostingController(rootView: wrap(PrefixesView()))
-        case .backups: controller = NSHostingController(rootView: wrap(BackupsView()))
-        }
+        let controller = NSHostingController(
+            rootView: AnyView(view(for: screen).environment(\.notProtonInlineToolbar, true))
+        )
         // The hosting controller must not drive the window's size or toolbar.
         controller.sizingOptions = []
         controller.sceneBridgingOptions = []

@@ -1,4 +1,5 @@
 import AppKit
+import GlassUI
 import SwiftUI
 
 // MARK: - Sidebar model
@@ -169,51 +170,9 @@ struct StatusFooter: View {
 
 // MARK: - Shared bits
 
-struct ArtworkView: View {
-    let url: URL?
-    var width: CGFloat = 157
-    var height: CGFloat = 74
-    var corner: CGFloat = 6
-
-    var body: some View {
-        AsyncImage(url: url) { phase in
-            switch phase {
-            case .success(let image):
-                image.resizable().aspectRatio(contentMode: .fill)
-            default:
-                ZStack {
-                    Rectangle().fill(Color.white.opacity(0.06))
-                    Image(systemName: "gamecontroller")
-                        .font(.system(size: 18))
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .frame(width: width, height: height)
-        .clipShape(RoundedRectangle(cornerRadius: corner))
-        .overlay(
-            RoundedRectangle(cornerRadius: corner)
-                .stroke(Color.white.opacity(0.06))
-        )
-    }
-}
-
-struct PageHeader: View {
-    let title: String
-    let subtitle: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title)
-                .font(.system(size: 17, weight: .bold))
-            Text(subtitle)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-}
-
+/// The large glass search field on Add Games. Like GlassUI's `GlassSearchField`, plus
+/// a spinner while Steam is searched, a clear button that resets the search, and
+/// focus on appear.
 struct SearchField: View {
     @Binding var text: String
     var placeholder: String
@@ -223,38 +182,84 @@ struct SearchField: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(focused ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                .symbolEffect(.bounce, value: focused)
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 13))
                 .focused($focused)
                 .onSubmit(onSubmit)
             if busy {
-                ProgressView().controlSize(.small)
+                ProgressView()
+                    .controlSize(.small)
+                    .transition(.opacity)
             }
             if !text.isEmpty {
                 Button(action: onClear) {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .foregroundStyle(.tertiary)
+                .transition(.scale.combined(with: .opacity))
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.white.opacity(0.05))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.white.opacity(0.08))
-        )
+        .font(.title3)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .glassEffect(.regular.tint(focused ? Color.accentColor.opacity(0.12) : nil).interactive(),
+                     in: .capsule)
+        .overlay(Capsule().strokeBorder(Color.accentColor.opacity(focused ? 0.45 : 0), lineWidth: 1))
+        .scaleEffect(focused ? 1.005 : 1)
+        .animation(.smooth(duration: 0.25), value: focused)
+        .animation(.snappy(duration: 0.2), value: text.isEmpty)
+        .animation(.snappy(duration: 0.2), value: busy)
         .onAppear { focused = true }
     }
+}
+
+/// GlassUI's `InsetField` look for a password, for use inside a glass card.
+struct InsetSecureField: View {
+    let prompt: String
+    @Binding var text: String
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        SecureField(prompt, text: $text)
+            .textFieldStyle(.plain)
+            .focused($focused)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.primary.opacity(focused ? 0.09 : 0.06), in: .capsule)
+            .overlay(
+                Capsule().strokeBorder(
+                    focused ? AnyShapeStyle(Color.accentColor.opacity(0.6)) : AnyShapeStyle(.primary.opacity(0.08)),
+                    lineWidth: focused ? 1.2 : 1
+                )
+            )
+            .animation(.smooth(duration: 0.2), value: focused)
+    }
+}
+
+/// Caption above a group of glass rows, styled like a `GlassSection` title.
+private struct GroupTitle: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .textCase(.uppercase)
+            .tracking(0.7)
+            .foregroundStyle(.secondary)
+            .padding(.leading, 8)
+            .padding(.top, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private func headerArtURL(for game: ManagedGame) -> URL? {
+    if let raw = game.imageURL, let url = URL(string: raw) { return url }
+    return SteamCatalog.headerImageURL(for: game.id)
 }
 
 // MARK: - Add Games
@@ -270,13 +275,16 @@ struct AddGamesView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                PageHeader(
-                    title: "Find your game",
-                    subtitle: "Search Steam or enter an AppID. The game doesn't need to be installed."
-                )
+        let matches = libraryMatches
+        let showsEmptyState = model.searchResults.isEmpty && matches.isEmpty && !model.searching
 
+        PageScroll(maxWidth: 820) {
+            PageHeader(
+                title: "Find your game",
+                subtitle: "Search Steam or enter an AppID. The game doesn't need to be installed."
+            )
+
+            VStack(alignment: .leading, spacing: 10) {
                 SearchField(
                     text: $model.searchQuery,
                     placeholder: "Game name or AppID",
@@ -287,126 +295,118 @@ struct AddGamesView: View {
 
                 if let message = model.searchMessage {
                     Text(message)
-                        .font(.system(size: 11))
+                        .font(.callout)
                         .foregroundStyle(.secondary)
+                        .padding(.horizontal, 20)
+                        .transition(.blurReplace)
                 }
-
-                if model.searchResults.isEmpty && libraryMatches.isEmpty && !model.searching {
-                    ContentUnavailableView {
-                        Label("Search for a game", systemImage: "magnifyingglass")
-                    } description: {
-                        Text("Find a game by name, or add it using its Steam AppID.")
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 90)
-                } else {
-                    LazyVStack(spacing: 8) {
-                        if !libraryMatches.isEmpty {
-                            sectionTitle("In your Steam library")
-                            ForEach(libraryMatches.prefix(25)) { app in
-                                resultRow(
-                                    name: app.name,
-                                    appID: app.id,
-                                    art: SteamCatalog.headerImageURL(for: app.id),
-                                    added: model.alreadyAdded(app.id),
-                                    action: { model.addLibraryGame(app) }
-                                )
-                            }
-                        }
-                        if !model.searchResults.isEmpty {
-                            if !libraryMatches.isEmpty {
-                                sectionTitle("Steam store")
-                            }
-                            ForEach(model.searchResults) { result in
-                                resultRow(
-                                    name: result.name,
-                                    appID: result.id,
-                                    art: result.imageURL ?? SteamCatalog.headerImageURL(for: result.id),
-                                    added: model.alreadyAdded(result.id),
-                                    action: { model.add(result) }
-                                )
-                            }
-                        }
-                    }
-                    .padding(.vertical, 2)
-                }
-
-                Divider().padding(.vertical, 6)
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Add by AppID")
-                        .font(.system(size: 12, weight: .semibold))
-                    Text("If the search does not find it, enter the Steam AppID directly (the name is optional).")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                    HStack(spacing: 8) {
-                        TextField("AppID", text: $model.newAppID)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 120)
-                        TextField("Name (optional)", text: $model.newName)
-                            .textFieldStyle(.roundedBorder)
-                        Button("Add Game") { model.addManualGame() }
-                            .disabled(model.busy
-                                || model.newAppID.trimmingCharacters(in: .whitespaces).isEmpty)
-                    }
-                }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 9)
-                        .fill(Color.white.opacity(0.045))
-                )
             }
-            .padding(.horizontal, 22)
-            .padding(.vertical, 18)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .animation(.smooth(duration: 0.25), value: model.searchMessage)
+
+            Group {
+                if showsEmptyState {
+                    GlassEmptyState(
+                        symbol: "magnifyingglass",
+                        title: "Search for a game",
+                        message: "Find a game by name, or add it using its Steam AppID."
+                    )
+                    .frame(height: 260)
+                    .transition(.blurReplace)
+                } else {
+                    results(matches)
+                        .transition(.blurReplace)
+                }
+            }
+            .animation(.smooth(duration: 0.3), value: showsEmptyState)
+
+            GlassSection(
+                title: "Add by AppID",
+                footer: "If the search does not find it, enter the Steam AppID directly (the name is optional)."
+            ) {
+                HStack(spacing: 10) {
+                    InsetField(prompt: "AppID", text: $model.newAppID)
+                        .frame(width: 140)
+                    InsetField(prompt: "Name (optional)", text: $model.newName)
+                    Button("Add Game") { model.addManualGame() }
+                        .buttonStyle(.glassProminent)
+                        .disabled(model.busy
+                            || model.newAppID.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .padding(16)
+            }
         }
-        .navigationTitle("Add Games")
         .onChange(of: model.searchQuery) { _, newValue in
             scheduleSearch(for: newValue)
         }
         .onDisappear { searchTask?.cancel() }
     }
 
-    private func sectionTitle(_ text: String) -> some View {
-        HStack {
-            Text(text.uppercased())
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.tertiary)
-            Spacer()
+    private func results(_ matches: [LibraryApp]) -> some View {
+        LazyVStack(spacing: 10) {
+            if !matches.isEmpty {
+                GroupTitle(text: "In your Steam library")
+                ForEach(matches.prefix(25)) { app in
+                    resultRow(
+                        name: app.name,
+                        appID: app.id,
+                        art: SteamCatalog.headerImageURL(for: app.id),
+                        added: model.alreadyAdded(app.id),
+                        action: { model.addLibraryGame(app) }
+                    )
+                    .transition(.blurReplace)
+                }
+            }
+            if !model.searchResults.isEmpty {
+                if !matches.isEmpty {
+                    GroupTitle(text: "Steam store")
+                }
+                ForEach(model.searchResults) { result in
+                    resultRow(
+                        name: result.name,
+                        appID: result.id,
+                        art: result.imageURL ?? SteamCatalog.headerImageURL(for: result.id),
+                        added: model.alreadyAdded(result.id),
+                        action: { model.add(result) }
+                    )
+                    .transition(.blurReplace)
+                }
+            }
         }
-        .padding(.top, 6)
-        .padding(.bottom, 2)
+        .animation(.snappy, value: model.searchResults.map(\.id))
+        .animation(.snappy, value: matches.map(\.id))
     }
 
-    private func resultRow(name: String, appID: Int, art: URL?, added: Bool, action: @escaping () -> Void) -> some View {
-        HStack(spacing: 14) {
-            ArtworkView(url: art)
+    private func resultRow(name: String, appID: Int, art: URL?, added: Bool,
+                           action: @escaping () -> Void) -> some View {
+        HStack(spacing: 16) {
+            Artwork(url: art, width: 120)
             VStack(alignment: .leading, spacing: 3) {
                 Text(name)
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(.headline)
                     .lineLimit(1)
                 Text("AppID \(appID)")
-                    .font(.system(size: 11))
+                    .font(.callout)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
-            if added {
-                Text("Added")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            } else {
-                Button("Add Game", action: action)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+            Group {
+                if added {
+                    Label("Added", systemImage: "checkmark.circle.fill")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.green)
+                        .padding(.horizontal, 8)
+                } else {
+                    Button("Add Game", action: action)
+                        .buttonStyle(.glassProminent)
+                }
             }
+            .transition(.blurReplace)
         }
-        .padding(8)
-        .background(
-            RoundedRectangle(cornerRadius: 9)
-                .fill(Color.white.opacity(0.045))
-        )
+        .padding(12)
+        .glassEffect(.regular, in: .rect(cornerRadius: 24))
+        .hoverLift()
+        .animation(.snappy, value: added)
     }
 
     private func scheduleSearch(for raw: String) {
@@ -430,123 +430,136 @@ struct AddGamesView: View {
 struct MyGamesView: View {
     @EnvironmentObject private var model: AppModel
 
-    private func artURL(for game: ManagedGame) -> URL? {
-        if let raw = game.imageURL, let url = URL(string: raw) { return url }
-        return SteamCatalog.headerImageURL(for: game.id)
-    }
-
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                PageHeader(
-                    title: "My Games",
-                    subtitle: "Games OnlineFix routes on launch. Patches apply per game."
-                )
-
-                if model.games.isEmpty {
-                    ContentUnavailableView {
-                        Label("No games yet", systemImage: "gamecontroller")
-                    } description: {
-                        Text("Add a game from the Add Games page — search it by name.")
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 90)
-                } else {
-                    LazyVStack(spacing: 8) {
-                        ForEach($model.games) { $game in
-                            gameCard($game)
+        Group {
+            if model.games.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    header
+                        .padding(.horizontal, 32)
+                        .padding(.top, 28)
+                    GlassEmptyState(
+                        symbol: "gamecontroller",
+                        title: "No games yet",
+                        message: "Add a game from the Add Games page — search it by name."
+                    )
+                }
+                .transition(.blurReplace)
+            } else {
+                PageScroll(maxWidth: 860) {
+                    header
+                    LazyVStack(spacing: 12) {
+                        ForEach(model.games) { game in
+                            gameRow(game)
+                                .transition(.blurReplace)
                         }
                     }
-                    .padding(.vertical, 2)
                 }
+                .transition(.blurReplace)
             }
-            .padding(.horizontal, 22)
-            .padding(.vertical, 18)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .navigationTitle("My Games")
+        .animation(.smooth(duration: 0.3), value: model.games.isEmpty)
+        .animation(.snappy, value: model.games.map(\.id))
     }
 
-    private func gameCard(_ game: Binding<ManagedGame>) -> some View {
-        let value = game.wrappedValue
-
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 14) {
-                Button {
-                    model.openPatch(value.id)
-                } label: {
-                    HStack(spacing: 14) {
-                        ArtworkView(url: artURL(for: value))
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(value.name)
-                                .font(.system(size: 12.5, weight: .semibold))
-                                .lineLimit(1)
-                            Text("AppID \(value.id)")
-                                .font(.system(size: 11))
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                            Text(patchSummary(value.patches))
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
-                                .lineLimit(1)
-                            if let state = model.fixState(value.id), case .missing = state {
-                                Text("Fix files are missing, reinstall in settings")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.orange)
-                                    .lineLimit(1)
-                            }
-                        }
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Game settings")
-
-                Spacer(minLength: 8)
-
-                Button {
-                    model.openPatch(value.id)
-                } label: {
-                    Image(systemName: "slider.horizontal.3")
-                }
-                .buttonStyle(.borderless)
-                .help("Game settings")
-
-                Button(role: .destructive) {
-                    model.removeGame(id: value.id)
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .buttonStyle(.borderless)
-                .help("Remove")
+    private var header: some View {
+        PageHeader(
+            title: "My Games",
+            subtitle: "Games OnlineFix routes on launch. Patches apply per game."
+        ) {
+            if !model.games.isEmpty {
+                Text(model.games.count == 1 ? "1 game" : "\(model.games.count) games")
+                    .font(.callout.weight(.medium))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .contentTransition(.numericText(value: Double(model.games.count)))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .glassEffect(.regular, in: .capsule)
+                    .transition(.opacity)
             }
-
         }
-        .padding(9)
-        .background(
-            RoundedRectangle(cornerRadius: 9)
-                .fill(Color.white.opacity(0.045))
-        )
+    }
+
+    private func gameRow(_ game: ManagedGame) -> some View {
+        HStack(spacing: 18) {
+            Button {
+                model.openPatch(game.id)
+            } label: {
+                HStack(spacing: 18) {
+                    Artwork(url: headerArtURL(for: game), width: 160, cornerRadius: 16)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(game.name)
+                            .font(.headline)
+                            .lineLimit(1)
+                        Text("AppID \(game.id)")
+                            .font(.callout)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                        Text(patchSummary(game.patches))
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .contentTransition(.opacity)
+                        fixWarning(game)
+                    }
+                }
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .help("Game settings")
+
+            Spacer(minLength: 12)
+
+            GlassEffectContainer(spacing: 8) {
+                HStack(spacing: 8) {
+                    Button("Game settings", systemImage: "slider.horizontal.3") {
+                        model.openPatch(game.id)
+                    }
+                    .help("Game settings")
+
+                    Button("Remove", systemImage: "trash", role: .destructive) {
+                        model.removeGame(id: game.id)
+                    }
+                    .help("Remove")
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.glass)
+                .buttonBorderShape(.circle)
+                .controlSize(.large)
+            }
+        }
+        .padding(14)
+        .glassEffect(.regular, in: .rect(cornerRadius: 28))
+        .hoverLift()
         .contextMenu {
-            Button("Game settings…") { model.openPatch(value.id) }
-            if model.fixes.contains(where: { $0.id == value.id }) {
+            Button("Game settings…") { model.openPatch(game.id) }
+            if model.fixes.contains(where: { $0.id == game.id }) {
                 Button("Uninstall OnlineFix", role: .destructive) {
-                    model.uninstallFix(appID: value.id)
+                    model.uninstallFix(appID: game.id)
                 }
             }
             Button("Remove from My Games", role: .destructive) {
-                model.removeGame(id: value.id)
+                model.removeGame(id: game.id)
             }
         }
     }
 
-    private func toggle(_ title: String, _ binding: Binding<Bool>) -> some View {
-        Toggle(title, isOn: Binding(
-            get: { binding.wrappedValue },
-            set: { binding.wrappedValue = $0; model.persist() }
-        ))
-        .toggleStyle(.checkbox)
-        .font(.system(size: 11))
+    @ViewBuilder
+    private func fixWarning(_ game: ManagedGame) -> some View {
+        if let state = model.fixState(game.id), case .missing = state {
+            Label("Fix files are missing or were replaced, reinstall it",
+                  systemImage: "exclamationmark.triangle.fill")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+                .padding(.top, 2)
+        } else if let issue = model.fixIssue(game.id) {
+            Label(issue, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.orange)
+                .lineLimit(2)
+                .padding(.top, 2)
+        }
     }
 
     private func patchSummary(_ p: PatchFlags) -> String {
@@ -560,8 +573,6 @@ struct MyGamesView: View {
     }
 }
 
-// MARK: - Fix
-
 // MARK: - Patch sheet (shown after adding a game, and from My Games)
 
 struct PatchSheetView: View {
@@ -574,39 +585,43 @@ struct PatchSheetView: View {
 
     private var installedFix: FixRecord? { model.fixes.first { $0.id == gameID } }
 
+    private var showsStatus: Bool { !model.fixMessage.isEmpty || model.busy }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if let game {
-                header(game)
-                Divider().opacity(0.4)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        patchesSection(game)
-                        fixSource
-                        if !model.fixMessage.isEmpty || model.busy {
-                            statusLine
+            Group {
+                if let game {
+                    VStack(alignment: .leading, spacing: 0) {
+                        header(game)
+                        Divider().opacity(0.4)
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 20) {
+                                patchesSection(game)
+                                fixSource
+                                if showsStatus {
+                                    statusLine
+                                        .transition(.blurReplace)
+                                }
+                                if let installedFix {
+                                    installedSection(installedFix)
+                                        .transition(.blurReplace)
+                                }
+                            }
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 18)
+                            .animation(.smooth(duration: 0.3), value: showsStatus)
+                            .animation(.smooth(duration: 0.3), value: installedFix)
                         }
-                        if let installedFix {
-                            installedSection(installedFix)
-                        }
+                        .scrollContentBackground(.hidden)
                     }
-                    .padding(18)
+                    .transition(.opacity)
+                } else {
+                    missingGame
+                        .transition(.blurReplace)
                 }
-            } else {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("That game is no longer in your list.")
-                        .foregroundStyle(.secondary)
-                    // Uninstalling takes the game out of the list, so its result is
-                    // reported here rather than in the sheet's status line.
-                    if !model.fixMessage.isEmpty {
-                        Text(model.fixMessage)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                }
-                .padding(30)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .animation(.smooth(duration: 0.3), value: game == nil)
 
             Divider().opacity(0.4)
             HStack {
@@ -614,84 +629,214 @@ struct PatchSheetView: View {
                     model.removeGame(id: gameID)
                     dismiss()
                 }
+                .buttonStyle(.glass)
                 .disabled(game == nil)
                 Spacer()
                 Button("Done") { dismiss() }
+                    .buttonStyle(.glassProminent)
                     .keyboardShortcut(.defaultAction)
             }
-            .padding(14)
+            .controlSize(.large)
+            .padding(16)
         }
         .frame(width: 560, height: 620)
         .sheet(isPresented: $model.showFolderChoice) {
             FolderChoiceView()
                 .environmentObject(model)
         }
+        .alert(item: $model.fixCompatibilityPrompt) { prompt in
+            Alert(title: Text(prompt.title),
+                  message: Text(prompt.reason),
+                  primaryButton: .default(Text("Install anyway")) {
+                      Task { @MainActor in prompt.proceed() }
+                  },
+                  secondaryButton: .cancel())
+        }
         .onAppear { model.fixGameID = gameID }
+    }
+
+    private var missingGame: some View {
+        VStack(spacing: 14) {
+            GlassIcon(symbol: "gamecontroller", size: 64)
+            Text("That game is no longer in your list.")
+                .foregroundStyle(.secondary)
+            // Uninstalling takes the game out of the list, so its result is
+            // reported here rather than in the sheet's status line.
+            if !model.fixMessage.isEmpty {
+                Text(model.fixMessage)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: 420)
+            }
+        }
+        .padding(30)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: Header
 
     private func header(_ game: ManagedGame) -> some View {
-        HStack(spacing: 14) {
-            ArtworkView(url: artURL(game))
-            VStack(alignment: .leading, spacing: 3) {
+        HStack(spacing: 16) {
+            Artwork(url: headerArtURL(for: game), width: 150, cornerRadius: 14)
+            VStack(alignment: .leading, spacing: 4) {
                 Text(game.name)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.title3.weight(.semibold))
+                    .lineLimit(2)
                 Text("AppID \(game.id)")
-                    .font(.system(size: 11))
+                    .font(.callout)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                 Text("Added to My Games — choose what to patch below.")
-                    .font(.system(size: 10))
+                    .font(.caption)
                     .foregroundStyle(.tertiary)
             }
             Spacer(minLength: 8)
         }
-        .padding(16)
-    }
-
-    private func artURL(_ game: ManagedGame) -> URL? {
-        if let raw = game.imageURL, let url = URL(string: raw) { return url }
-        return SteamCatalog.headerImageURL(for: game.id)
+        .padding(20)
     }
 
     // MARK: Patches
 
+    @ViewBuilder
     private func patchesSection(_ game: ManagedGame) -> some View {
-        GroupBox {
-            if let index {
-                let binding = $model.games[index]
-                VStack(alignment: .leading, spacing: 8) {
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 6) {
-                        persistToggle("Startup AppID", binding.patches.startupAppID)
-                        persistToggle("Overlay AppID", binding.patches.overlayAppID)
-                        persistToggle("Input AppID", binding.patches.inputAppID)
-                        persistToggle("Stats AppID", binding.patches.statsAppID)
-                    }
-                    Divider().opacity(0.3)
-                    persistToggle("Keep real AppID", binding.keepRealAppID)
-                    if usesSteamRelayNetwork(game) {
-                        Text("In order to use OnlineFix for this game, we recommend you use "
-                             + "Keep real AppID, because the game uses the Steam relay servers, "
-                             + "which aren't compatible with Spacewar (AppID 480).")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.orange)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.leading, 18)
-                    }
-                    Text("Starts the game as its own AppID instead of Spacewar (480). "
-                         + "Turn this on for games whose online play uses Steam's relay "
-                         + "servers: remapped, they never get a relay and multiplayer waits forever.")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.leading, 18)
+        if let index {
+            let binding = $model.games[index]
+            GlassSection(title: "What to patch") {
+                HStack(spacing: 0) {
+                    patchCell("Startup AppID", binding.patches.startupAppID)
+                    patchCell("Overlay AppID", binding.patches.overlayAppID)
                 }
-                .padding(4)
+                RowDivider()
+                HStack(spacing: 0) {
+                    patchCell("Input AppID", binding.patches.inputAppID)
+                    patchCell("Stats AppID", binding.patches.statsAppID)
+                }
+                RowDivider()
+                keepRealAppIDRow(game, binding)
+                // A Mac build takes no fix files at all; the routing above is the
+                // whole fix for it, so say so where the choice is.
+                if let mac = model.macAppStatus(game.id) {
+                    RowDivider()
+                    macBuildRow(mac)
+                }
+                if game.id == 3241660 {
+                    RowDivider()
+                    repoPhotonRow(game, binding)
+                }
             }
-        } label: {
-            Label("What to patch", systemImage: "slider.horizontal.3")
         }
+    }
+
+    private func patchCell(_ title: String, _ binding: Binding<Bool>) -> some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.body.weight(.medium))
+            Spacer(minLength: 8)
+            persistToggle(title, binding)
+                .labelsHidden()
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 13)
+        .frame(maxWidth: .infinity)
+    }
+
+    private func keepRealAppIDRow(_ game: ManagedGame, _ binding: Binding<ManagedGame>) -> some View {
+        let relay = usesSteamRelayNetwork(game)
+        let required = spacewarRequired(game, usesSteamRelay: relay)
+        let keepReal = binding.keepRealAppID.wrappedValue
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Keep real AppID")
+                        .font(.body.weight(.medium))
+                    Text(required
+                         ? "Starts the game as its own AppID instead of Spacewar (480). "
+                           + "This game's OnlineFix needs Spacewar to match players, so leave it off."
+                         : "Starts the game as its own AppID instead of Spacewar (480). "
+                           + "Turn this on for games whose online play uses Steam's relay "
+                           + "servers: remapped, they never get a relay and multiplayer waits forever.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(1.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 16)
+                persistToggle("Keep real AppID", binding.keepRealAppID)
+                    .labelsHidden()
+            }
+            if required {
+                note(keepReal
+                     ? "This game's OnlineFix matches players as Spacewar (480). "
+                       + "Keep real AppID is on, so it will not connect: turn it off "
+                       + "and launch the game again."
+                     : "Runs as Spacewar (480), which is what this game's OnlineFix "
+                       + "needs. Leave Keep real AppID off for it to connect.",
+                     warning: keepReal)
+                    .transition(.blurReplace)
+            } else if relay {
+                note("In order to use OnlineFix for this game, we recommend you use "
+                     + "Keep real AppID, because the game uses the Steam relay servers, "
+                     + "which aren't compatible with Spacewar (AppID 480).",
+                     warning: true)
+                    .transition(.blurReplace)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 15)
+        .animation(.smooth(duration: 0.25), value: keepReal)
+    }
+
+    /// A Mac build takes no fix files at all: the routing is the whole fix for it.
+    private func macBuildRow(_ mac: MacAppFix.Status) -> some View {
+        note(mac.summary, warning: !mac.hasSteamAPI)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 15)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func repoPhotonRow(_ game: ManagedGame, _ binding: Binding<ManagedGame>) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("R.E.P.O. Photon app IDs")
+                .font(.body.weight(.medium))
+            InsetField(prompt: "Realtime app ID", text: binding.repoPhoton.realtime)
+                .font(.system(.callout, design: .monospaced))
+            InsetField(prompt: "Voice app ID (optional)", text: binding.repoPhoton.voice)
+                .font(.system(.callout, design: .monospaced))
+            HStack(spacing: 8) {
+                Button("Apply to game files") { model.applyRepoPhotonIDs(game) }
+                    .buttonStyle(.glassProminent)
+                Button("Restore defaults") { model.clearRepoPhotonIDs(game) }
+                    .buttonStyle(.glass)
+            }
+            .controlSize(.small)
+            Text("Replaces the Photon app R.E.P.O. connects to, as the original "
+                 + "OnlineFix Manager does. The untouched file is kept beside it "
+                 + "for Restore defaults.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 15)
+    }
+
+    /// A note under a setting: orange with a warning sign, or secondary with an info sign.
+    private func note(_ text: String, warning: Bool) -> some View {
+        Label {
+            Text(text)
+                .fixedSize(horizontal: false, vertical: true)
+        } icon: {
+            Image(systemName: warning ? "exclamationmark.triangle.fill" : "info.circle")
+        }
+        .font(.callout)
+        .foregroundStyle(warning ? Color.orange : Color.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background((warning ? Color.orange : Color.primary).opacity(0.08), in: .rect(cornerRadius: 12))
     }
 
     private func usesSteamRelayNetwork(_ game: ManagedGame) -> Bool {
@@ -699,55 +844,82 @@ struct PatchSheetView: View {
                              gameFolder: Store.gameFolder(for: game.id, name: game.name))
     }
 
+    /// A fixed game matches players as Spacewar, whatever its own code uses.
+    private func spacewarRequired(_ game: ManagedGame, usesSteamRelay: Bool) -> Bool {
+        SteamNetworking.spacewarRequired(usesSteamNetworking: usesSteamRelay,
+                                         fixInstalled: model.fixIsInstalled(game.id))
+    }
+
     private func persistToggle(_ title: String, _ binding: Binding<Bool>) -> some View {
         Toggle(title, isOn: Binding(
             get: { binding.wrappedValue },
             set: { binding.wrappedValue = $0; model.persist() }
         ))
-        .toggleStyle(.checkbox)
-        .font(.system(size: 11))
+        .toggleStyle(.switch)
+        .controlSize(.small)
     }
 
     // MARK: Fix source
 
     private var fixSource: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Button("Fetch fix automatically") { model.fetchFix() }
-                        .disabled(model.busy)
-                    Button("Open online-fix.me") { model.openFixSite() }
-                    Spacer()
-                }
-                Divider().opacity(0.4)
-                HStack {
+        GlassSection(title: "Fix source") {
+            HStack(spacing: 10) {
+                Button("Fetch fix automatically") { model.fetchFix() }
+                    .buttonStyle(.glassProminent)
+                    .disabled(model.busy)
+                Button("Open online-fix.me") { model.openFixSite() }
+                    .buttonStyle(.glass)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 15)
+
+            RowDivider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
                     Button("Choose archive…") { model.chooseArchive() }
+                        .buttonStyle(.glass)
                     Text(model.archiveURL?.lastPathComponent ?? "No archive selected")
-                        .font(.system(size: 11))
+                        .font(.callout)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Spacer()
+                        .contentTransition(.opacity)
+                    Spacer(minLength: 0)
                 }
-                SecureField("Archive password (default: online-fix.me)", text: $model.archivePassword)
-                    .textFieldStyle(.roundedBorder)
+                .animation(.smooth(duration: 0.25), value: model.archiveURL)
+                InsetSecureField(prompt: "Archive password (default: online-fix.me)",
+                                 text: $model.archivePassword)
                 Button("Install from archive") { model.importFix() }
+                    .buttonStyle(.glass)
                     .disabled(model.busy || model.archiveURL == nil)
             }
-            .padding(4)
-        } label: {
-            Label("Fix source", systemImage: "shippingbox")
+            .padding(.horizontal, 20)
+            .padding(.vertical, 15)
         }
     }
 
     private var statusLine: some View {
-        HStack(spacing: 8) {
-            if model.busy { ProgressView().controlSize(.small) }
+        HStack(spacing: 10) {
+            if model.busy {
+                ProgressView()
+                    .controlSize(.small)
+                    .transition(.opacity)
+            }
             Text(model.fixMessage.isEmpty ? "Working…" : model.fixMessage)
-                .font(.system(size: 11))
+                .font(.callout)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .contentTransition(.opacity)
+            Spacer(minLength: 0)
         }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .glassEffect(.regular, in: .rect(cornerRadius: 20))
+        .animation(.smooth(duration: 0.25), value: model.busy)
+        .animation(.smooth(duration: 0.25), value: model.fixMessage)
     }
 
     // MARK: Installed
@@ -756,32 +928,50 @@ struct PatchSheetView: View {
         var missing: [String] = []
         if case .missing(let files) = FixInstaller.state(of: fix) { missing = files }
         let names = missing.map { ($0 as NSString).lastPathComponent }
-        return GroupBox {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(missing.isEmpty ? "Fix installed" : "Fix files are missing")
-                        .font(.system(size: 12, weight: .semibold))
+        return GlassCard {
+            HStack(alignment: .top, spacing: 12) {
+                StatusDot(kind: missing.isEmpty ? .ok : .warning)
+                    .padding(.top, 6)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(missing.isEmpty ? "Fix installed" : "Fix files are missing or were replaced")
+                        .font(.body.weight(.semibold))
                         .foregroundStyle(missing.isEmpty ? Color.primary : Color.orange)
                     if missing.isEmpty {
                         Text("\(fix.files.count) file(s) written into the game folder.")
-                            .font(.system(size: 11))
+                            .font(.callout)
                             .foregroundStyle(.secondary)
+                            .contentTransition(.numericText(value: Double(fix.files.count)))
+                        if let issue = model.fixIssue(fix.id) {
+                            Label(issue, systemImage: "exclamationmark.triangle.fill")
+                                .font(.callout)
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     } else {
                         Text(removedFixDetail(names))
-                            .font(.system(size: 11))
+                            .font(.callout)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Spacer()
-                Button("Uninstall", role: .destructive) {
-                    model.removeFix(id: fix.id)
+                Spacer(minLength: 12)
+                HStack(spacing: 8) {
+                    Button("Repair") {
+                        model.repairFix(appID: fix.id)
+                    }
+                    .help("Copy the fix's files where the game loads them, so its loader starts. "
+                          + "Run this when the game crashes after the fix was installed.")
+                    Button("Uninstall", role: .destructive) {
+                        model.removeFix(id: fix.id)
+                    }
+                    .help("Delete the files this fix added and take the game out of My Games "
+                          + "so it stops running as AppID 480")
                 }
+                .buttonStyle(.glass)
                 .controlSize(.small)
-                .help("Delete the files this fix added and take the game out of My Games "
-                      + "so it stops running as AppID 480")
             }
-            .padding(4)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 15)
         }
     }
 
@@ -810,68 +1000,76 @@ struct FolderChoiceView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Which one is \(gameName)?")
-                    .font(.system(size: 14, weight: .semibold))
-                Text("online-fix.me has no folder under that exact name. "
-                     + "These look similar — pick the one for this game.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 14) {
+                GlassIcon(symbol: "folder.badge.questionmark", size: 44)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Which one is \(gameName)?")
+                        .font(.title3.weight(.semibold))
+                    Text("online-fix.me has no folder under that exact name. "
+                         + "These look similar — pick the one for this game.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             ScrollView {
-                VStack(spacing: 6) {
+                LazyVStack(spacing: 8) {
                     ForEach(model.folderChoices) { match in
                         Button {
                             model.chooseFolder(match)
                             dismiss()
                         } label: {
-                            HStack(spacing: 10) {
+                            HStack(spacing: 12) {
                                 Image(systemName: "folder")
+                                    .font(.title3)
                                     .foregroundStyle(.secondary)
-                                VStack(alignment: .leading, spacing: 1) {
+                                VStack(alignment: .leading, spacing: 2) {
                                     Text(match.name)
-                                        .font(.system(size: 12, weight: .medium))
+                                        .font(.body.weight(.medium))
                                         .lineLimit(1)
                                         .truncationMode(.middle)
                                     Text("\(match.percent)% name match")
-                                        .font(.system(size: 10))
+                                        .font(.caption)
+                                        .monospacedDigit()
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer(minLength: 8)
                                 Image(systemName: "chevron.right")
-                                    .font(.system(size: 10, weight: .semibold))
+                                    .font(.caption.weight(.semibold))
                                     .foregroundStyle(.tertiary)
                             }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 8)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 11)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(RoundedRectangle(cornerRadius: 8)
-                                .fill(Color.secondary.opacity(0.15)))
-                            .contentShape(Rectangle())
+                            .contentShape(.rect)
+                            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 18))
                         }
                         .buttonStyle(.plain)
+                        .hoverLift()
                     }
                 }
-                .padding(.vertical, 2)
+                .padding(4)
             }
+            .scrollContentBackground(.hidden)
 
-            HStack {
+            HStack(spacing: 12) {
                 Text("None of these? Download the fix from online-fix.me "
                      + "and use “Choose archive…”.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
                 Button("None of these") {
                     model.cancelFolderChoice()
                     dismiss()
                 }
+                .buttonStyle(.glass)
+                .controlSize(.large)
             }
         }
-        .padding(18)
+        .padding(20)
         .frame(width: 520, height: 400)
     }
 }
@@ -901,67 +1099,69 @@ struct InstallationView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                PageHeader(
-                    title: "Installation",
-                    subtitle: "Set up the Steam patch for \(model.steamBuild ?? "your Steam build")."
-                )
+        PageScroll {
+            PageHeader(
+                title: "Installation",
+                subtitle: "Set up the Steam patch for \(model.steamBuild ?? "your Steam build")."
+            )
 
-                GroupBox("Steam") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        row("Location", Paths.steamApp.path)
-                        row("Build", model.steamBuild ?? "not detected")
-                        row("Manifest", model.manifestPath?.path ?? "—")
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(model.steamRunning ? Color.orange : Color.green)
-                                .frame(width: 8, height: 8)
-                            Text(model.steamRunning ? "Steam is running — quit it before installing" : "Steam is not running")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(6)
+            GlassSection(title: "Steam") {
+                row("Location", Paths.steamApp.path)
+                RowDivider()
+                row("Build", model.steamBuild ?? "not detected")
+                RowDivider()
+                row("Manifest", model.manifestPath?.path ?? "—")
+                RowDivider()
+                GlassRow(title: model.steamRunning
+                         ? "Steam is running — quit it before installing"
+                         : "Steam is not running",
+                         status: model.steamRunning ? .warning : .ok)
+            }
+
+            GlassSection(title: "OnlineFix") {
+                GlassRow(title: "State") {
+                    Text(phaseText)
+                        .foregroundStyle(phaseColor)
+                        .fontWeight(.semibold)
+                        .contentTransition(.opacity)
                 }
-
-                GroupBox("OnlineFix") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 8) {
-                            Text("State").foregroundStyle(.secondary).frame(width: 74, alignment: .leading)
-                            Text(phaseText).foregroundStyle(phaseColor).fontWeight(.semibold)
-                        }
-                        row("Runtime", Paths.runtimeDir.path)
-                        row("Log", Paths.logFile.path)
-                        Text(model.profile.note)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                        if !model.profile.bundledProfiles.isEmpty {
-                            Text("Bundled profiles: " + model.profile.bundledProfiles.joined(separator: ", "))
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                        }
+                RowDivider()
+                row("Runtime", Paths.runtimeDir.path)
+                RowDivider()
+                row("Log", Paths.logFile.path)
+                RowDivider()
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(model.profile.note)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    if !model.profile.bundledProfiles.isEmpty {
+                        Text("Bundled profiles: " + model.profile.bundledProfiles.joined(separator: ", "))
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(6)
                 }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 15)
+            }
 
-                HStack(spacing: 10) {
-                    Button(model.phase.needsRepair ? "Repair install" : "Install") {
-                        model.install()
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(model.busy || Steam.isRunning() || !model.steamPresent)
-                    Button("Uninstall") { model.uninstall() }
-                        .disabled(model.busy || Steam.isRunning())
-                    Button("Deploy profiles") { model.deployProfiles() }
-                        .disabled(model.busy)
-                    Spacer()
-                    Button("Open Steam") { model.openSteam() }
-                    Button("Support folder") { model.openSupportFolder() }
+            HStack(spacing: 10) {
+                Button(model.phase.needsRepair ? "Repair install" : "Install") {
+                    model.install()
                 }
+                .buttonStyle(.glassProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(model.busy || Steam.isRunning() || !model.steamPresent)
+                Button("Uninstall") { model.uninstall() }
+                    .disabled(model.busy || Steam.isRunning())
+                Button("Deploy profiles") { model.deployProfiles() }
+                    .disabled(model.busy)
+                Spacer()
+                Button("Open Steam") { model.openSteam() }
+                Button("Support folder") { model.openSupportFolder() }
+            }
+            .buttonStyle(.glass)
 
+            Group {
                 if model.busy {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
@@ -974,16 +1174,19 @@ struct InstallationView: View {
                         .textSelection(.enabled)
                 }
             }
-            .padding(.horizontal, 22)
-            .padding(.vertical, 18)
+            .transition(.opacity)
+            .animation(.smooth(duration: 0.25), value: model.busy)
         }
         .navigationTitle("Installation")
     }
 
     private func row(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(label).foregroundStyle(.secondary).frame(width: 74, alignment: .leading)
-            Text(value).textSelection(.enabled).lineLimit(1).truncationMode(.middle)
+        GlassRow(title: label) {
+            Text(value)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
     }
 }
@@ -994,7 +1197,7 @@ struct LogView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 20) {
             PageHeader(
                 title: "Logs",
                 subtitle: "What the injected dylib reports at Steam launch."
@@ -1004,15 +1207,13 @@ struct LogView: View {
                     .font(.system(size: 11, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.white.opacity(0.035))
-                    )
+                    .padding(16)
             }
+            .scrollContentBackground(.hidden)
+            .glassEffect(.regular, in: .rect(cornerRadius: 22))
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 18)
+        .padding(.horizontal, 32)
+        .padding(.vertical, 28)
         .navigationTitle("Logs")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {

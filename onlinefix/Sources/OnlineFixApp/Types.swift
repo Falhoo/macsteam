@@ -85,14 +85,19 @@ struct FixRecord: Codable, Identifiable, Equatable {
     var gameName: String
     var installedAt: Date
     var files: [String]
+    /// Size of each written file at install time. A path alone does not prove the
+    /// fix is still in place: a Steam verify downloads the game's own file over it.
+    var sizes: [String: Int64] = [:]
 
-    enum CodingKeys: String, CodingKey { case id, gameName, installedAt, files }
+    enum CodingKeys: String, CodingKey { case id, gameName, installedAt, files, sizes }
 
-    init(id: Int, gameName: String, installedAt: Date = Date(), files: [String]) {
+    init(id: Int, gameName: String, installedAt: Date = Date(), files: [String],
+         sizes: [String: Int64] = [:]) {
         self.id = id
         self.gameName = gameName
         self.installedAt = installedAt
         self.files = files
+        self.sizes = sizes
     }
 
     init(from decoder: Decoder) throws {
@@ -101,6 +106,8 @@ struct FixRecord: Codable, Identifiable, Equatable {
         gameName = try c.decodeIfPresent(String.self, forKey: .gameName) ?? "App \(id)"
         installedAt = try c.decodeIfPresent(Date.self, forKey: .installedAt) ?? Date()
         files = try c.decodeIfPresent([String].self, forKey: .files) ?? []
+        // An older record has no sizes; its files are still checked for existence.
+        sizes = try c.decodeIfPresent([String: Int64].self, forKey: .sizes) ?? [:]
     }
 }
 

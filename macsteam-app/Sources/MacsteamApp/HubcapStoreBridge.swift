@@ -36,32 +36,30 @@ final class HubcapStoreBridge {
         return UInt64(info.pbi_start_tvsec) &* 1_000_000 &+ UInt64(info.pbi_start_tvusec)
     }
 
-    private static func executablePath(of pid: Int32) -> String? {
-        var buffer = [CChar](repeating: 0, count: 4096)
-        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
-        return String(cString: buffer)
-    }
-
     /// A helper from an earlier launch keeps the bridge lock and serves Store
     /// pages with its own, older code — a newer card's requests are then
-    /// silently dropped, which looks like a click that never answers. So the
-    /// newest app terminates the helper the previous one left behind.
+    /// silently dropped, and the Store keeps showing the old advice and the old
+    /// OnlineFix state. The helper may live under another bundle path (a Sparkle
+    /// backup such as macSteam.app.previous, or a copy kept beside the app), so
+    /// match it by the command it runs, not by this app's executable path.
     static func stopStaleHelper() {
-        guard let text = try? String(contentsOf: helperPidFile, encoding: .utf8) else { return }
-        let parts = text.split(separator: " ")
-        guard parts.count == 2, let pid = Int32(parts[0]), let started = UInt64(parts[1]),
-              pid != getpid(), processStart(pid: pid) == started,
-              executablePath(of: pid) == Bundle.main.executableURL?.path else {
-            try? FileManager.default.removeItem(at: helperPidFile)
-            return
-        }
-        kill(pid, SIGTERM)
-        for _ in 0..<20 {
-            if processStart(pid: pid) == nil { break }
-            usleep(100_000)
-        }
-        if processStart(pid: pid) != nil { kill(pid, SIGKILL) }
         try? FileManager.default.removeItem(at: helperPidFile)
+        let me = getpid()
+        let exe = Bundle.main.executableURL?.lastPathComponent ?? "MacsteamApp"
+        // pgrep matches the whole command line, which is what tells a helper apart
+        // from the windowed app (same executable, no argument).
+        let found = Subprocess.run("/usr/bin/pgrep",
+                                   ["-f", "/\(exe) --hubcap-store-bridge"])
+        guard found.code == 0 else { return }
+        for token in found.stdout.split(whereSeparator: { $0 == "\n" || $0 == " " }) {
+            guard let pid = Int32(token), pid != me else { continue }
+            kill(pid, SIGTERM)
+            for _ in 0..<20 {
+                if processStart(pid: pid) == nil { break }
+                usleep(100_000)
+            }
+            if processStart(pid: pid) != nil { kill(pid, SIGKILL) }
+        }
     }
 
     static func registerExecutable() {
@@ -363,26 +361,89 @@ private final class HubcapStorePage {
                 // The game left My Games, so its AppID 480 routing has to leave
                 // config.yaml too, or Steam keeps starting it as Spacewar.
                 syncOnlineFixRouting()
+            case "onlinefix-windows":
+                // Switch a native game to NotProton the way Steam's own Compatibility
+                // settings do: `SteamClient.Apps.SpecifyCompatTool` runs in Steam's UI
+                // realm, not in this store page, so the bridge asks it over CDP.
+                let tool = OnlineFixEmbed.notProtonTool()
+                var switched = false
+                if let tool {
+                    switched = await SteamUICompat.specifyCompatTool(
+                        appID: request.appID, tool: tool)
+                }
+                // Steam refuses the setting from outside its UI, so the next best is
+                // its own Properties dialog, which the user can change.
+                var opened = false
+                if !switched {
+                    opened = await SteamUICompat.openProperties(appID: request.appID)
+                }
+                response = [
+                    "switched": switched,
+                    "opened": opened,
+                    "compatTool": tool ?? "",
+                    "error": switched ? ""
+                        : (tool == nil ? "NotProton is not installed for Steam."
+                            : "Steam only takes this setting from its own UI."),
+                ]
+            case "onlinefix-probe":
+                // Before an install: does online-fix.me have a fix, and is it the GDK
+                // package that cannot run here?
+                let probe = await OnlineFixEmbed.probeFix(name: request.name ?? "")
+                response = ["available": probe.available, "gdk": probe.gdk,
+                            "folder": probe.folder ?? ""]
+            case "onlinefix-route":
+                // "still route my game through spacewar": no files, just the identity
+                // Steam starts it with. Works for a game that has no OnlineFix at all.
+                let host = OnlineFixEmbed.storeRouteAsSpacewar(
+                    appID: request.appID,
+                    name: request.name ?? "",
+                    on: request.confirmed ?? true)
+                syncOnlineFixRouting()
+                var reply = try Self.encode(host)
+                reply["message"] = host.inList
+                    ? "This game now starts as Spacewar (480). Restart Steam and launch it again."
+                    : "The game could not be added to My Games."
+                response = reply
             case "onlinefix-status":
-                response = try Self.encode(OnlineFixEmbed.storeStatus(appID: request.appID))
+                var status = try Self.encode(OnlineFixEmbed.storeStatus(appID: request.appID))
+                // A game that went back to a native launch keeps NotProton's
+                // `NAME=value` prefix, which Steam's macOS client cannot run: it
+                // fails with "Failed to start process ... OS error 260". Clear it
+                // through Steam so the change sticks.
+                if let stale = LaunchOptions.stale(appID: request.appID) {
+                    let clean = LaunchOptions.stripped(stale)
+                    let ok = await SteamUICompat.setLaunchOptions(appID: request.appID, options: clean)
+                    let log = "\(Date()) stale=\(stale) clean=\(clean) ok=\(ok)\n"
+                    let debug = Paths.steamRoot.appendingPathComponent("logs/launchoptions-debug.txt")
+                    if let data = log.data(using: .utf8),
+                       let handle = try? FileHandle(forWritingTo: debug) {
+                        handle.seekToEndOfFile(); handle.write(data); try? handle.close()
+                    } else {
+                        try? log.data(using: .utf8)?.write(to: debug)
+                    }
+                    if ok { status["launchOptionsFixed"] = true }
+                }
+                response = status
             case "onlinefix-keep-id", "onlinefix-spacewar":
-                // A game on Steam's relay network (SDR) only gets a relay as its own
+                // A game without an OnlineFix gets Steam's relay only as its own
                 // AppID, so the card offers this instead of leaving it waiting.
                 let keep = request.action == "onlinefix-keep-id"
-                let changed = OnlineFixEmbed.storeKeepRealAppID(appID: request.appID, keep: keep)
+                let changed = OnlineFixEmbed.storeKeepRealAppID(
+                    appID: request.appID, name: request.name ?? "", keep: keep)
                 syncOnlineFixRouting()
                 var reply = try Self.encode(OnlineFixEmbed.storeStatus(appID: request.appID))
                 reply["message"] = changed
                     ? (keep
                         ? "This game now starts as its own AppID. Restart Steam and launch it again."
                         : "This game now starts as Spacewar (480) again. Restart Steam and launch it again.")
-                    : "Install the patch first!"
+                    : "That is not a Steam AppID macSteam can route."
                 response = reply
             case "onlinefix-install":
                 let outcome = await OnlineFixEmbed.storeInstall(
                     appID: request.appID,
                     name: request.name ?? "",
                     folderName: request.folder,
+                    confirmed: request.confirmed ?? false,
                     progress: { @Sendable text in
                         Task { await self.pushOnlineFixProgress(text, context: context) }
                     })
@@ -475,10 +536,14 @@ private final class HubcapStorePage {
         let name: String?
         /// Which similar uploads folder the player picked on the store page.
         let folder: String?
+        /// True when the player said to install a fix that may not work.
+        let confirmed: Bool?
 
         static let actions: Set<String> = ["status", "add", "remove", "restart", "restart-plain", "fixes", "fix-manifest",
                                            "fix-install", "fix-undo", "fix-open",
                                            "fix-permissions",
+                                           "onlinefix-probe",
+                                           "onlinefix-route", "onlinefix-windows",
                                            "onlinefix-status", "onlinefix-install",
                                            "onlinefix-uninstall", "onlinefix-keep-id",
                                            "onlinefix-spacewar"]

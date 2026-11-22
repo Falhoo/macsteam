@@ -7,10 +7,38 @@
     let state = 'checking';
     let busy = false;
     let fixBusy = false;
-    let root, button, restartButton, removeButton, message, titlePrefix, fixesRoot, buttonHost;
+    let root, button, restartButton, removeButton, message, titlePrefix, fixesRoot, buttonHost, brandSpan;
+    // The player's own Steam licence for the page's app, from the store session.
+    let owned = false;
+    const ownershipCache = new Map();
+    // Free to play: nothing to unlock, and no reason to add it to a library that
+    // already lists it.
+    let freeGame = false;
+    const freeCache = new Map();
     // Whether macSteam has this app in its config, which is what the Remove button acts on.
     let configured = false;
-    let onlineRoot, onlineButton, onlineStatus, onlineDesc, onlineNote, onlineChoices;
+    let onlineRoot, onlineButton, onlineStatus, onlineDesc, onlineNote, onlineChoices, onlineConfirmRow;
+    // Tick "Show me anyway": the install runs only when it is on.
+    let onlineConfirmed = false;
+    let onlineGdk = false;
+    let onlineFree = false;
+    let onlineOverlay = false;
+    // Native macOS build: OnlineFix has no file that can load in a Mac process, only
+    // Steam-side routing applies.
+    let onlineNative = false;
+    // A Mac build whose only fix is the AppID 480 routing, and that routing is on.
+    let onlineRouteInstalled = false;
+    // What online-fix.me has for this page's game, asked once before any install.
+    let onlineProbe = null;
+    let onlineProbeFor = 0;
+    let onlineProbeBusy = false;
+    let onlineWindows = false;
+    let onlineNativeTool = '';
+    let onlineNativePoll = 0;
+    let onlineNativeTimer = null;
+    let onlineNativeWarning = null;
+    let onlineRouteRow = null;
+    let onlineReroute = null;
     let onlineBusy = false;
     let restarting = false;
     // Restart belongs to the card that just added this game, not to a game that
@@ -54,7 +82,7 @@
             onlineStatus.textContent = text;
         }
     };
-    function request(action, fixID, name, folder) {
+    function request(action, fixID, name, folder, extra) {
         return new Promise(resolve => {
             const id = `${appID}:${++sequence}`;
             // Installing an OnlineFix downloads and unpacks an archive; a restart
@@ -66,7 +94,8 @@
                     : 'macSteam did not respond. Open macSteam Config and try again.' });
             }, action === 'onlinefix-install' ? 600000 : action === 'restart' ? 20000 : 180000);
             pending.set(id, { resolve, timer });
-            bridge(JSON.stringify({ id, appID, action, fixID, name: name || '', folder: folder || '' }));
+            bridge(JSON.stringify({ id, appID, action, fixID, name: name || '', folder: folder || '',
+                confirmed: !!extra }));
         });
     }
     // Steam's own store page tells us the platforms it sells: a Mac icon means a
@@ -76,6 +105,52 @@
             '.game_area_purchase_platform .platform_img.mac,'
             + ' .game_area_purchase_game_wrapper .platform_img.mac,'
             + ' .game_area_purchase .platform_img.mac');
+    }
+    // A game the player bought already belongs to them: the card must not offer to
+    // add it, and must never offer to remove it. The store's own session knows.
+    async function pageOwnsGame(id) {
+        if (ownershipCache.has(id)) return ownershipCache.get(id);
+        let answer = false;
+        try {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 4000);
+            const reply = await fetch('/dynamicstore/userdata/', {
+                credentials: 'include', signal: controller.signal,
+            });
+            clearTimeout(timer);
+            if (reply.ok) {
+                const data = await reply.json();
+                const apps = Array.isArray(data.rgOwnedApps) ? data.rgOwnedApps : [];
+                answer = apps.includes(id);
+            }
+        } catch (error) {
+            answer = false;
+        }
+        ownershipCache.set(id, answer);
+        return answer;
+    }
+    // Whether Steam sells the app for nothing. A free game needs no unlock, so the
+    // OnlineFix card warns and the add-to-library card stays away.
+    async function pageGameIsFree(id) {
+        if (freeCache.has(id)) return freeCache.get(id);
+        let answer = false;
+        try {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 4000);
+            const reply = await fetch(`/api/appdetails?appids=${id}&filters=basic`, {
+                credentials: 'include', signal: controller.signal,
+            });
+            clearTimeout(timer);
+            if (reply.ok) {
+                const data = await reply.json();
+                const entry = data[String(id)];
+                answer = !!(entry && entry.success && entry.data && entry.data.is_free);
+            }
+        } catch (error) {
+            answer = false;
+        }
+        freeCache.set(id, answer);
+        return answer;
     }
     // Whether the player asked to see LuaTools fixes for a game that also ships a
     // native macOS build, remembered across store pages.
@@ -94,6 +169,27 @@
     }
     function render() {
         if (!button) return;
+        // A free game needs no macSteam action: it is in every library already.
+        if (freeGame) {
+            root.style.display = 'none';
+            if (buttonHost) buttonHost.style.display = 'none';
+            return;
+        }
+        // A bought game needs no macSteam action at all: the library already has it,
+        // and Remove must stay out of reach of a real licence.
+        if (owned) {
+            root.style.display = '';
+            if (buttonHost) buttonHost.style.display = 'none';
+            if (button) button.style.display = 'none';
+            titlePrefix.textContent = 'You own this game';
+            if (brandSpan) brandSpan.style.display = 'none';
+            message.hidden = true;
+            if (removeButton) removeButton.style.display = 'none';
+            if (restartButton) restartButton.style.display = 'none';
+            return;
+        }
+        if (brandSpan) brandSpan.style.display = '';
+        if (button) button.style.display = '';
         // Already installed: nothing to add or install, so the card says so and
         // offers no button. It is still shown, so the card is visibly there.
         root.style.display = '';
@@ -134,6 +230,27 @@
             state = result.installed ? 'installed' : result.ready ? 'ready' : 'add';
             if (!keepPrompt) message.textContent = '';
         }
+        if (ownershipCache.has(requestedApp)) {
+            owned = ownershipCache.get(requestedApp);
+        } else {
+            owned = false;
+            void pageOwnsGame(requestedApp).then(value => {
+                if (appID !== requestedApp) return;
+                owned = value;
+                render();
+            });
+        }
+        if (freeCache.has(requestedApp)) {
+            freeGame = freeCache.get(requestedApp);
+        } else {
+            freeGame = false;
+            void pageGameIsFree(requestedApp).then(value => {
+                if (appID !== requestedApp) return;
+                freeGame = value;
+                render();
+                if (value) void loadOnlineFix();
+            });
+        }
         render();
     }
     // Game fixes: a second card listing LuaTools fixes for this game.
@@ -165,6 +282,14 @@
     }
     function renderFixes(result, statusText, statusColor) {
         if (!root?.isConnected) return;
+        // The OnlineFix card already says a GDK game cannot be patched; a second card
+        // offering a LuaTools patch for it would contradict that. Once the player
+        // ticks "Show me anyway" both patches are on offer, so the card comes back.
+        if (onlineGdk && !onlineConfirmed) {
+            luaOnlineFix = null;
+            removeFixes();
+            return;
+        }
         // A LuaTools fix patches the game's Windows DLLs. When Steam ships a native
         // macOS build, that Mac app is what launches, so the fix has nothing to
         // patch: the card says so and keeps its fixes behind an opt-in checkbox, for
@@ -260,13 +385,6 @@
                 desc.style.cssText = 'color:#acb2b8;font-size:12px;margin-top:2px';
                 info.appendChild(desc);
             }
-            if (fix.onlineFix) {
-                const note = document.createElement('div');
-                note.textContent = 'Includes the OnlineFix — we recommend this one over '
-                    + 'macSteam\'s OnlineFix card.';
-                note.style.cssText = 'color:#a4d007;font-size:12px;margin-top:2px';
-                info.appendChild(note);
-            }
             const actions = document.createElement('div');
             actions.style.cssText = 'white-space:nowrap';
             const run = async (action, button) => {
@@ -352,6 +470,16 @@
             row.append(info, actions);
             rows.appendChild(row);
         }
+        // A LuaTools fix that carries OnlineFix exists for the same game as the
+        // OnlineFix card. Both write the same files, so only one may be installed.
+        if (result.fixes.some(f => f.onlineFix)) {
+            const warning = document.createElement('div');
+            warning.style.cssText = 'font-size:12px;color:#e8a54b;margin-top:10px;'
+                + 'max-width:560px;line-height:1.45';
+            warning.textContent = 'Dont install both onlinefix and luatools, trust me, '
+                + 'you dont wanna know, one at a time.';
+            rows.appendChild(warning);
+        }
         root.after(fixesRoot);
         applyOnlineRecommendation();
     }
@@ -375,12 +503,21 @@
         onlineDesc = null;
         onlineNote = null;
         onlineChoices = null;
+        onlineConfirmRow?.remove();
+        onlineConfirmRow = null;
+        onlineNativeWarning = null;
+        onlineRouteRow?.remove();
+        onlineRouteRow = null;
+        onlineReroute?.remove();
+        onlineReroute = null;
         onlineSignature = '';
     }
     // When online-fix.me has no folder under the exact name, the reply carries the
     // similar ones: one button each, and picking one installs that folder's fix —
     // all without leaving the store page.
-    function renderOnlineChoices(choices) {
+    // `confirmed` carries the player's yes through: picking a folder must not ask
+    // the same question again.
+    function renderOnlineChoices(choices, confirmed) {
         if (!onlineRoot) return;
         onlineChoices?.remove();
         onlineChoices = document.createElement('div');
@@ -395,13 +532,140 @@
             if (!name) continue;
             const percent = Number(choice.percent);
             const text = Number.isFinite(percent) ? `${name} · ${percent}% match` : name;
-            onlineChoices.appendChild(actionButton(text, () => installOnlineFix(name)));
+            onlineChoices.appendChild(actionButton(text, () => installOnlineFix(name, confirmed)));
         }
         (onlineStatus?.isConnected ? onlineStatus : onlineRoot).after(onlineChoices);
     }
     function clearOnlineChoices() {
         onlineChoices?.remove();
         onlineChoices = null;
+        onlineConfirmRow?.remove();
+        onlineConfirmRow = null;
+    }
+    // One tick for every install the app warns about, GDK or post-check: nothing is
+    // downloaded until it is on.
+    function showConfirmCheckbox(parent, label) {
+        onlineConfirmRow?.remove();
+        onlineConfirmRow = document.createElement('label');
+        onlineConfirmRow.style.cssText = 'display:flex;align-items:center;gap:6px;'
+            + 'font-size:12px;color:#acb2b8;margin-top:6px;cursor:pointer;max-width:560px';
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = !!onlineConfirmed;
+        box.addEventListener('change', () => {
+            onlineConfirmed = box.checked;
+            refreshOnlineButton();
+            if (onlineNative) {
+                if (onlineNativeWarning) onlineNativeWarning.hidden = !onlineConfirmed;
+                const span = onlineButton?.querySelector('span');
+                if (span) {
+                    span.textContent = onlineConfirmed ? 'Install files anyway'
+                        : 'Install Windows version';
+                }
+            }
+            // The LuaTools card follows the tick: hidden with the advice, back on
+            // offer once the player accepts that neither patch will work here.
+            if (onlineGdk) {
+                if (onlineConfirmed) {
+                    void loadFixes();
+                } else {
+                    luaOnlineFix = null;
+                    removeFixes();
+                    applyOnlineRecommendation();
+                }
+            }
+        });
+        const text = document.createElement('span');
+        text.textContent = label
+            || (onlineFree && !onlineGdk ? 'just show me anyway goddamn it' : 'Show me anyway');
+        onlineConfirmRow.append(box, text);
+        parent.appendChild(onlineConfirmRow);
+    }
+    // Hands the game to Steam's own compatibility setting, then lets it install the
+    // Windows build. The callback means the tool is saved before the install starts.
+    async function switchToWindowsBuild() {
+        const requestedApp = appID;
+        if (onlineStatus) {
+            onlineStatus.hidden = false;
+            onlineStatus.style.color = '#acb2b8';
+            onlineStatus.textContent = 'Switching the game to NotProton…';
+        }
+        // Steam's own Compatibility API lives in its UI realm, so the bridge calls it
+        // there. The page only asks; it never pretends the change happened.
+        const reply = await request('onlinefix-windows');
+        if (requestedApp !== appID || !onlineRoot) return;
+        if (!reply.switched) {
+            // Steam would not take the setting from us. It can still open its own
+            // Properties dialog, where the Compatibility tab is the same setting.
+            if (reply.opened) {
+                if (onlineStatus) {
+                    onlineStatus.style.color = '#a4d007';
+                    onlineStatus.textContent = 'Opened the game’s Properties. On the '
+                        + 'Compatibility tab choose “Force the use of a specific Steam Play '
+                        + 'compatibility tool” → NotProton.';
+                }
+                onlineReroute?.remove();
+                onlineReroute = actionButton('Check again', () => {
+                    void loadOnlineFix();
+                    scheduleWindowsPoll();
+                });
+                if (onlineStatus) onlineStatus.after(onlineReroute);
+                scheduleWindowsPoll();
+                return;
+            }
+            // Otherwise open the game's page, say exactly which menu holds it, and keep
+            // watching the folder so the card flips as soon as the Windows build is there.
+            location.href = 'steam://nav/games/details/' + appID;
+            if (onlineStatus) {
+                onlineStatus.style.color = '#e8a54b';
+                onlineStatus.textContent = 'Steam did not let macSteam set it. Open the game’s '
+                    + 'Properties (gear icon) → Compatibility → “Force the use of a specific '
+                    + 'Steam Play compatibility tool” → NotProton, then press Check again.';
+            }
+            onlineReroute?.remove();
+            onlineReroute = actionButton('Check again', () => {
+                void loadOnlineFix();
+                scheduleWindowsPoll();
+            });
+            if (onlineStatus) onlineStatus.after(onlineReroute);
+            scheduleWindowsPoll();
+            return;
+        }
+        // Steam installs one platform at a time; with the tool set, its install/verify
+        // replaces the Mac files with the Windows depot.
+        location.href = 'steam://validate/' + appID;
+        scheduleWindowsPoll();
+        if (onlineStatus) {
+            onlineStatus.style.color = '#a4d007';
+            onlineStatus.textContent = 'NotProton set. Steam will fetch the Windows build; '
+                + 'this card updates when it is in the folder.';
+        }
+    }
+    // Looks again every few seconds while the Windows build is downloading, so the
+    // card turns into "OnlineFix WILL work" on its own.
+    function scheduleWindowsPoll() {
+        if (onlineNativeTimer) clearTimeout(onlineNativeTimer);
+        onlineNativeTimer = null;
+        if (!onlineNative || onlineWindows || onlineNativePoll >= 120) return;
+        onlineNativePoll += 1;
+        const requestedApp = appID;
+        onlineNativeTimer = setTimeout(() => {
+            onlineNativeTimer = null;
+            if (appID !== requestedApp || !onlineRoot?.isConnected) return;
+            void loadOnlineFix();
+            scheduleWindowsPoll();
+        }, 5000);
+    }
+    function refreshOnlineButton() {
+        if (!onlineButton) return;
+        // A native build has a working action either way: switch to the Windows build,
+        // or copy the files over once the player says so.
+        if (onlineNative) {
+            onlineButton.disabled = !onlineGameInstalled;
+            return;
+        }
+        onlineButton.disabled = !onlineGameInstalled
+            || (!onlineConfirmed && (!!onlineGdk || !!onlineFree));
     }
     // When LuaTools carries an Online Fix for the game, this card says to use that
     // one and leaves its own Install as a deliberate "Install anyway" (that is what
@@ -410,32 +674,34 @@
         if (!onlineRoot) return;
         const fix = luaOnlineFix;
         if (onlineDesc) {
-            onlineDesc.textContent = onlineFixInstalled
-                ? (onlineKeepID
-                    ? 'Installed. Launch the game from Steam — it runs as its own AppID.'
-                    : 'Installed. Launch the game from Steam — it runs as AppID 480.')
-                : (onlineKeepID
-                    ? 'Installs the game\'s fix and keeps its own Steam AppID, so Steam can grant '
-                      + 'its relay network.'
-                    : 'Installs the game\'s fix and runs its Steam session as AppID 480 (Spacewar).');
+            onlineDesc.textContent = onlineNative
+                ? (onlineRouteInstalled
+                    ? 'Installed. Only the AppID 480 routing is set: uninstall the fix to go '
+                      + 'back to normal.'
+                    : 'Installs the AppID 480 routing for this Mac build. No game files are '
+                      + 'changed, and uninstalling goes back to normal.')
+                : (onlineFixInstalled
+                    ? (onlineKeepID
+                        ? 'Installed. Launch the game from Steam, it runs as its own AppID.'
+                        : 'Installed. Launch the game from Steam, it runs as AppID 480.')
+                    : (onlineKeepID
+                        ? 'Installs the game\'s fix and keeps its own Steam AppID, so Steam can '
+                          + 'grant its relay network.'
+                        : 'Installs the game\'s fix and runs its Steam session as AppID 480 '
+                          + '(Spacewar).'));
         }
         if (onlineNote) {
-            onlineNote.hidden = !fix;
-            onlineNote.textContent = !fix ? ''
-                : onlineFixInstalled
-                    ? 'LuaTools has a version of OnlineFix for this game. we recommend using that '
-                      + 'one instead of this OnlineFix. It is the same fix, but our OnlineFix isn\'t '
-                      + 'always stable/working. Uninstall here first, so the two copies do not '
-                      + 'overwrite each other.'
-                    : 'LuaTools has a version of OnlineFix for this game'
-                      + (fix.applied ? ' (installed)' : '') + '. we recommend using that one instead '
-                      + 'of this OnlineFix. It is the same fix, but our OnlineFix isn\'t always '
-                      + 'stable/working.';
+            const muted = onlineGdk && !onlineConfirmed;
+            onlineNote.hidden = true;
+            if (muted) onlineNote.textContent = '';
+            else
+            onlineNote.textContent = '';
         }
         if (onlineButton) {
-            const label = onlineFixInstalled ? 'Reinstall' : fix ? 'Install anyway' : 'Install';
+            const label = onlineFixInstalled ? 'Reinstall'
+                : fix ? 'Install anyway' : 'Install';
             onlineButton.querySelector('span').textContent = label;
-            onlineButton.disabled = !onlineGameInstalled;
+            refreshOnlineButton();
         }
     }
     function renderOnlineFix(result) {
@@ -448,9 +714,17 @@
             gameInstalled: !!result.gameInstalled,
             usesSDR: !!result.usesSteamNetworking,
             keepID: !!result.keepRealAppID,
+            photon: result.photonIssue || '',
+            gdk: !!result.gdkRestricted || !!(onlineProbe && onlineProbe.gdk),
+            overlayStub: !!result.overlayStub,
+            free: !!freeGame,
+            probe: onlineProbe ? [!!onlineProbe.available, !!onlineProbe.gdk] : null,
+            nativeMac: !!result.nativeMacBuild,
+            windows: !!result.windowsBuildInstalled,
         });
         if (onlineRoot?.isConnected && signature === onlineSignature) {
             applyOnlineRecommendation();
+            if (onlineNative) scheduleWindowsPoll();
             return;
         }
         removeOnlineFix();
@@ -475,45 +749,208 @@
         onlineGameInstalled = !!result.gameInstalled;
         onlineUsesSDR = !!result.usesSteamNetworking;
         onlineKeepID = !!result.keepRealAppID;
+        onlineGdk = !!result.gdkRestricted || !!(onlineProbe && onlineProbe.gdk);
+        onlineFree = !!freeGame;
+        onlineOverlay = !!result.overlayStub;
+        // "Windows version installed" only means something for a game Steam also sells
+        // a Mac build of; for a Windows-only game that is just the game.
+        const macCapable = !!result.nativeMacBuild || pageSaysNativeMac();
+        onlineWindows = !!result.windowsBuildInstalled && macCapable;
+        // Once Steam has swapped in the Windows build the card is a normal fix card
+        // again; the native handling only applies while the folder still has the .app.
+        onlineNative = !!result.nativeMacBuild && !onlineWindows;
+        onlineNativeTool = result.compatTool || '';
+        // A Mac build has nothing to install but the identity, so a routed Mac app is
+        // installed as far as the card is concerned: Uninstall turns it back off.
+        onlineRouteInstalled = onlineNative && !!result.inList && !onlineKeepID;
+        if (onlineRouteInstalled) onlineFixInstalled = true;
+        if (onlineWindows && onlineNativeTimer) {
+            clearTimeout(onlineNativeTimer);
+            onlineNativeTimer = null;
+        }
+        // A GDK game has no usable LuaTools patch either: its card would only offer
+        // something that cannot work, so it stays down until the tick brings it back.
+        if (onlineGdk) {
+            if (onlineConfirmed) void loadFixes();
+            else {
+                luaOnlineFix = null;
+                removeFixes();
+            }
+        }
         info.append(name, desc);
         const actions = document.createElement('div');
         actions.style.cssText = 'white-space:nowrap';
-        if (result.fixInstalled) {
+        if (result.fixInstalled || onlineRouteInstalled) {
             const remove = actionButton('Uninstall', () => uninstallOnlineFix());
             actions.appendChild(remove);
         }
-        onlineButton = actionButton(result.fixInstalled ? 'Reinstall' : 'Install', () => installOnlineFix());
-        onlineButton.disabled = !result.gameInstalled;
-        actions.appendChild(onlineButton);
+        // A routed Mac build has nothing to reinstall: Uninstall is the only action.
+        if (onlineNative && onlineRouteInstalled) {
+            onlineButton = null;
+        } else {
+            onlineButton = actionButton(result.fixInstalled ? 'Reinstall' : 'Install',
+                () => installOnlineFix(undefined, onlineConfirmed));
+            onlineButton.disabled = !result.gameInstalled;
+            actions.appendChild(onlineButton);
+            refreshOnlineButton();
+        }
         row.append(info, actions);
         onlineRoot.appendChild(row);
-        // Steam's relay network (SDR) is per AppID: as Spacewar this game has no
-        // relay and waits at "waiting for other resources…" forever. Say so, and
-        // offer the one setting that can work, rather than looking broken.
-        if (result.usesSteamNetworking) {
-            if (result.keepRealAppID) {
-                const kept = document.createElement('div');
-                kept.style.cssText = 'font-size:12px;color:#a4d007;margin-top:6px;max-width:560px';
-                kept.textContent = 'Starts as its own AppID — this game uses Steam\'s relay network '
-                    + '(SDR), so it needs to reach the client as itself.';
-                onlineRoot.appendChild(kept);
-                const back = actionButton('Use Spacewar instead', () => setOnlineKeepID(false));
-                back.style.marginLeft = '0';
-                back.style.marginTop = '6px';
-                onlineRoot.appendChild(back);
-            } else {
-                const relay = document.createElement('div');
-                relay.style.cssText = 'font-size:12px;color:#e8a54b;margin-top:8px;'
+        // A GDK game cannot be fixed by OnlineFix or LuaTools under Wine: the only
+        // package needs the Xbox runtime. Say so up front, and keep the install
+        // behind a tick so it is a deliberate choice, not a surprise. onlineGdk also
+        // covers a game the probe found only a GDK archive for, before any install.
+        if (onlineGdk) {
+            const warning = document.createElement('div');
+            warning.style.cssText = 'font-size:12px;color:#e8a54b;margin-top:8px;'
+                + 'max-width:560px;line-height:1.45';
+            warning.textContent = 'games gonna crash yo, GDK and allat';
+            onlineRoot.appendChild(warning);
+            showConfirmCheckbox(onlineRoot);
+        } else {
+            // The switch worked: the folder is the Windows build, which is what the
+            // fix can patch. Say so before anything else.
+            if (onlineWindows) {
+                const ready = document.createElement('div');
+                ready.style.cssText = 'font-size:12px;color:#a4d007;margin-top:8px;'
                     + 'max-width:560px;line-height:1.45';
-                relay.textContent = 'In order to use OnlineFix for this game, we recommend you use '
-                    + 'the "Keep real AppID" button, because the game uses the Steam relay servers, '
-                    + 'which aren\'t compatible with Spacewar (AppID 480).';
-                onlineRoot.appendChild(relay);
-                const keep = actionButton('Keep real AppID', () => setOnlineKeepID(true));
-                keep.style.marginLeft = '0';
-                keep.style.marginTop = '6px';
-                onlineRoot.appendChild(keep);
+                ready.textContent = 'This version of your game is the Windows version, '
+                    + 'OnlineFix WILL work, go ahead.';
+                onlineRoot.appendChild(ready);
             }
+            // A native macOS build takes no OnlineFix files; a free game needs no
+            // unlock. Both can be true at once, so each gets its own line and the
+            // free one keeps its tick.
+            if (onlineNative) {
+                const note = document.createElement('div');
+                note.style.cssText = 'font-size:12px;color:#acb2b8;margin-top:8px;'
+                    + 'max-width:560px;line-height:1.45';
+                note.textContent = onlineRouteInstalled
+                    ? 'Installed. This is the Mac build, so the fix is only the AppID 480 '
+                      + '(Spacewar) routing: the game starts the way a fixed game does and '
+                      + 'no game files were changed. Uninstall the fix to go back to normal.'
+                    : 'This is the Mac build, so OnlineFix\'s Windows files cannot load here. '
+                      + 'Install sets up the AppID 480 (Spacewar) routing instead, which is '
+                      + 'the whole fix for a Mac build, and changes no game files. Uninstall '
+                      + 'the fix to go back to normal.';
+                onlineRoot.appendChild(note);
+                // The routing is the Mac path; the Windows build is the other one, and it
+                // is what lets the real fix files install and work.
+                if (!onlineRouteInstalled) {
+                    const windows = actionButton('Get the Windows version',
+                        () => { void switchToWindowsBuild(); });
+                    windows.style.marginLeft = '0';
+                    windows.style.marginTop = '6px';
+                    onlineRoot.appendChild(windows);
+                }
+            }
+            if (onlineFree) {
+                const warning = document.createElement('div');
+                warning.style.cssText = 'font-size:12px;color:#a4d007;margin-top:8px;'
+                    + 'max-width:560px;line-height:1.45';
+                warning.textContent = 'This game is free and already works without OnlineFix.';
+                onlineRoot.appendChild(warning);
+                showConfirmCheckbox(onlineRoot);
+            }
+        }
+        // R.E.P.O.'s Photon app is stored in the game's asset file. When OnlineFix's
+        // default app is overloaded, a pair the player supplies can be written there,
+        // the same patch the original OnlineFix Manager offers.
+        // Nothing installed yet: ask online-fix.me what exists for this game, so a GDK
+        // package is warned about before anything is downloaded.
+        if (!result.fixInstalled && onlineProbeFor !== appID && !onlineProbeBusy) {
+            onlineProbeBusy = true;
+            const requestedApp = appID;
+            void request('onlinefix-probe', null, gameName()).then(reply => {
+                onlineProbeBusy = false;
+                if (requestedApp !== appID || reply.error) return;
+                onlineProbeFor = requestedApp;
+                onlineProbe = { available: !!reply.available, gdk: !!reply.gdk };
+                void loadOnlineFix();
+            });
+        }
+        // Say what the probe found, once it has answered.
+        if (onlineProbeFor === appID && onlineProbe && !result.fixInstalled && !onlineProbe.gdk
+            && !onlineNative) {
+            const found = document.createElement('div');
+            found.style.cssText = 'font-size:11px;margin-top:8px;max-width:560px;line-height:1.4;'
+                + (onlineProbe.available ? 'color:#a4d007' : 'color:#8f98a0');
+            found.textContent = onlineProbe.available
+                ? 'OnlineFix has a fix for this game; its files are laid out automatically '
+                  + 'when you install it.'
+                : 'No OnlineFix folder was found for this game on online-fix.me.';
+            onlineRoot.appendChild(found);
+        }
+        // The identity Steam starts this game with, for the games that can take fix
+        // files. A Mac build is not one of them: its Install button is the routing,
+        // so the card gets no separate route button for it.
+        if (!result.gdkRestricted && !onlineNative) {
+            const identity = document.createElement('div');
+            identity.style.cssText = 'font-size:12px;margin-top:8px;max-width:560px;'
+                + 'line-height:1.45';
+            const text = document.createElement('div');
+            let label;
+            let run;
+            if (!result.inList) {
+                identity.style.color = '#acb2b8';
+                text.textContent = 'Not in My Games yet. macSteam can still start this game as '
+                    + 'Spacewar (480), the identity an OnlineFix runs with, without writing '
+                    + 'any game files.';
+                label = 'Route through 480';
+                run = () => setOnlineRoute(true);
+            } else if (result.keepRealAppID) {
+                identity.style.color = '#e8a54b';
+                text.textContent = 'Starts as its own AppID ('
+                    + appID + '). '
+                    + (result.usesSteamNetworking
+                        ? 'That is what a game on Steam\'s relay servers needs, but an '
+                          + 'OnlineFix matches players as Spacewar, so it will not connect '
+                          + 'while its fix is installed.'
+                        : (result.fixInstalled
+                            ? 'An OnlineFix matches players as Spacewar (480), so it will not '
+                              + 'connect like this.'
+                            : 'Turning this off starts it as Spacewar (480), the identity an '
+                              + 'OnlineFix would use.'));
+                label = 'Use Spacewar (480)';
+                run = () => setOnlineKeepID(false);
+            } else {
+                identity.style.color = '#a4d007';
+                text.textContent = 'Starts as Spacewar (480), the identity an OnlineFix '
+                    + 'matches players as.'
+                    + (result.usesSteamNetworking
+                        ? ' This game uses Steam\'s relay servers, which only exist for its '
+                          + 'own AppID: if multiplayer waits forever, switch it back.'
+                        : '');
+                label = 'Use real AppID';
+                run = () => setOnlineKeepID(true);
+            }
+            identity.appendChild(text);
+            const button = actionButton(label, run);
+            button.style.marginLeft = '0';
+            button.style.marginTop = '6px';
+            identity.appendChild(button);
+            onlineRoot.appendChild(identity);
+        }
+        // Steam's macOS client cannot run NotProton's `NAME=value` launch prefix
+        // once a game launches natively; it fails with OS error 260. The bridge
+        // clears it through Steam before answering.
+        if (result.launchOptionsFixed) {
+            const cleared = document.createElement('div');
+            cleared.style.cssText = 'font-size:11px;color:#a4d007;margin-top:8px;'
+                + 'max-width:560px;line-height:1.4';
+            cleared.textContent = 'Removed the Windows-only launch options that stopped this '
+                + 'game from starting (OS error 260). It launches normally again.';
+            onlineRoot.appendChild(cleared);
+        }
+        // OnlineFix's Photon support is a second patch that runs inside the game.
+        // When one of its pieces is missing, the fix looks installed and the game
+        // still fails with CustomAuthenticationError, so say what is missing here.
+        if (result.photonIssue) {
+            const photon = document.createElement('div');
+            photon.style.cssText = 'font-size:12px;color:#e8a54b;margin-top:8px;'
+                + 'max-width:560px;line-height:1.45';
+            photon.textContent = result.photonIssue;
+            onlineRoot.appendChild(photon);
         }
         onlineStatus = document.createElement('div');
         onlineStatus.setAttribute('role', 'status');
@@ -530,6 +967,7 @@
         onlineRoot.appendChild(onlineNote);
         (fixesRoot?.isConnected ? fixesRoot : root).after(onlineRoot);
         applyOnlineRecommendation();
+        if (onlineNative) scheduleWindowsPoll();
     }
     async function loadOnlineFix() {
         if (onlineBusy || onlineLoading) return;
@@ -556,14 +994,18 @@
             onlineBusy = false;
             return;
         }
-        renderOnlineFix({ inList: true, fixInstalled: false, gameInstalled: true,
-                          usesSteamNetworking: onlineUsesSDR, keepRealAppID: onlineKeepID });
+        // The fix is gone, so the game may now need its own AppID: ask for the
+        // fresh status instead of re-rendering the flags from before the install.
+        const wasMac = onlineNative;
+        await loadOnlineFix();
         onlineStatus.style.color = '#a4d007';
         onlineStatus.hidden = false;
-        onlineStatus.textContent = reply.message || 'OnlineFix removed.';
+        onlineStatus.textContent = wasMac
+            ? 'Uninstalled. The Mac build starts as itself again, back to normal.'
+            : (reply.message || 'OnlineFix removed.');
     }
-    // Starts the game as itself (or back as Spacewar). Only SDR games show this,
-    // and it applies to the next launch.
+    // Starts the game as itself (or back as Spacewar), which applies to the next
+    // launch. Every game offers this, whatever its engine or fix.
     async function setOnlineKeepID(keep) {
         if (onlineBusy) return;
         onlineBusy = true;
@@ -573,23 +1015,21 @@
             onlineStatus.textContent = 'Saving…';
         }
         const requestedApp = appID;
-        const reply = await request(keep ? 'onlinefix-keep-id' : 'onlinefix-spacewar');
+        const reply = await request(keep ? 'onlinefix-keep-id' : 'onlinefix-spacewar',
+            null, gameName());
         onlineBusy = false;
         if (requestedApp !== appID || !onlineRoot) return;
         if (reply.error) {
             if (onlineStatus) {
                 onlineStatus.style.color = '#e8a54b';
-                onlineStatus.textContent = 'Could not change it — ' + reply.error;
+                onlineStatus.textContent = 'Could not change it: ' + reply.error;
             }
             return;
         }
-        renderOnlineFix({
-            inList: reply.inList,
-            fixInstalled: reply.fixInstalled,
-            gameInstalled: reply.gameInstalled,
-            usesSteamNetworking: reply.usesSteamNetworking,
-            keepRealAppID: reply.keepRealAppID,
-        });
+        // Ask for the whole status again: re-rendering the few flags this reply
+        // carries dropped the rest (GDK, overlay stub, Windows build, native), and
+        // the card changed shape after one click.
+        await loadOnlineFix();
         if (onlineStatus) {
             onlineStatus.style.color = '#a4d007';
             onlineStatus.hidden = false;
@@ -598,8 +1038,78 @@
                 : 'This game now starts as Spacewar (480).');
         }
     }
-    async function installOnlineFix(folderName) {
-        if (onlineBusy || !onlineButton) return;
+    // Routes a game that has no OnlineFix through AppID 480 anyway: macSteam starts
+    // it as Spacewar, the identity a fix would have given it. No files are written.
+    async function setOnlineRoute(on) {
+        if (onlineBusy) return;
+        onlineBusy = true;
+        if (onlineStatus) {
+            onlineStatus.hidden = false;
+            onlineStatus.style.color = '#acb2b8';
+            onlineStatus.textContent = 'Saving…';
+        }
+        const requestedApp = appID;
+        const reply = await request('onlinefix-route', null, gameName(), null, on);
+        onlineBusy = false;
+        if (requestedApp !== appID || !onlineRoot) return;
+        if (reply.error) {
+            if (onlineStatus) {
+                onlineStatus.style.color = '#e8a54b';
+                onlineStatus.textContent = 'Could not route it: ' + reply.error;
+            }
+            return;
+        }
+        await loadOnlineFix();
+        if (onlineStatus) {
+            onlineStatus.style.color = '#a4d007';
+            onlineStatus.hidden = false;
+            onlineStatus.textContent = reply.message || (on
+                ? 'This game now starts as Spacewar (480).'
+                : 'This game now starts as its own AppID.');
+        }
+    }
+    // A Mac build has no files to take: its Install is the AppID 480 routing, which
+    // is the whole fix for it. Uninstall removes the game from My Games again.
+    async function installOnlineRoute() {
+        if (onlineBusy) return;
+        onlineBusy = true;
+        if (onlineButton) onlineButton.disabled = true;
+        if (onlineStatus) {
+            onlineStatus.hidden = false;
+            onlineStatus.style.color = '#acb2b8';
+            onlineStatus.textContent = 'Setting up the AppID 480 (Spacewar) routing…';
+        }
+        const requestedApp = appID;
+        const reply = await request('onlinefix-route', null, gameName(), null, true);
+        onlineBusy = false;
+        if (requestedApp !== appID || !onlineRoot) return;
+        if (reply.error) {
+            if (onlineButton) onlineButton.disabled = false;
+            if (onlineStatus) {
+                onlineStatus.style.color = '#e8a54b';
+                onlineStatus.textContent = 'Could not set up the routing: ' + reply.error;
+            }
+            return;
+        }
+        await loadOnlineFix();
+        if (onlineStatus) {
+            onlineStatus.style.color = '#a4d007';
+            onlineStatus.hidden = false;
+            onlineStatus.textContent = 'OnlineFix installed for this Mac build: it only routes '
+                + 'the game through AppID 480 (Spacewar), and no game files were changed. '
+                + 'Uninstall the fix to go back to normal.';
+        }
+    }
+    // `confirmed` is set when the player already said to install a fix the app
+    // warned them about, so it does not ask twice.
+    async function installOnlineFix(folderName, confirmed) {
+        if (onlineBusy) return;
+        // A Mac build takes the routing path, which has no archive to download.
+        if (onlineNative) {
+            await installOnlineRoute();
+            return;
+        }
+        if (!onlineButton) return;
         onlineBusy = true;
         const requestedApp = appID;
         const wasDisabled = onlineButton.disabled;
@@ -607,12 +1117,22 @@
         clearOnlineChoices();
         onlineStatus.hidden = false;
         onlineStatus.style.color = '#acb2b8';
-        onlineStatus.textContent = folderName
-            ? `Downloading and installing “${folderName}”… this can take a minute.`
-            : 'Downloading and installing the OnlineFix… this can take a minute.';
-        const reply = await request('onlinefix-install', null, gameName(), folderName);
+        onlineStatus.textContent = confirmed
+            ? (folderName
+                ? `Downloading and installing “${folderName}”… this can take a minute.`
+                : 'Downloading and installing the OnlineFix… this can take a minute.')
+            : 'Checking whether OnlineFix works for this game…';
+        const reply = await request('onlinefix-install', null, gameName(), folderName, confirmed);
         onlineBusy = false;
         if (requestedApp !== appID || !onlineRoot) return;
+        // The fix may not work: say why, and install only if the player still wants it.
+        if (reply.confirmation) {
+            onlineButton.disabled = wasDisabled;
+            onlineStatus.style.color = '#e8a54b';
+            onlineStatus.textContent = reply.confirmation;
+            showConfirmCheckbox(onlineStatus);
+            return;
+        }
         if (reply.error) {
             onlineButton.disabled = wasDisabled;
             onlineStatus.style.color = '#e8a54b';
@@ -624,11 +1144,18 @@
             onlineButton.disabled = wasDisabled;
             onlineStatus.style.color = '#acb2b8';
             onlineStatus.textContent = reply.message || 'Pick the right match.';
-            renderOnlineChoices(reply.choices);
+            renderOnlineChoices(reply.choices, confirmed);
             return;
         }
-        renderOnlineFix({ inList: true, fixInstalled: true, gameInstalled: true,
-                          usesSteamNetworking: onlineUsesSDR, keepRealAppID: onlineKeepID });
+        // A native build: the page switches Steam to NotProton and starts the Windows
+        // download, so the fix has a folder it can work in.
+        if (reply.windowsBuild) {
+            void switchToWindowsBuild();
+            return;
+        }
+        // The fix is in place now: ask for the fresh status rather than re-rendering
+        // the flags from before the install.
+        await loadOnlineFix();
         onlineStatus.style.color = '#a4d007';
         onlineStatus.hidden = false;
         onlineStatus.textContent = reply.message || 'OnlineFix installed.';
@@ -660,6 +1187,13 @@
     // macSteam's and drops it from the library on the next refresh.
     async function removeGame() {
         if (busy) return;
+        // Belt and braces: the button is hidden for an owned game, but a real
+        // licence is never worth finding out about the hard way.
+        if (await pageOwnsGame(appID)) {
+            owned = true;
+            render();
+            return;
+        }
         busy = true;
         if (removeButton) removeButton.disabled = true;
         render();
@@ -747,6 +1281,27 @@
             onlineBusy = false;
             fixLoading = false;
             onlineLoading = false;
+            onlineConfirmed = false;
+            onlineGdk = false;
+            onlineFree = false;
+            onlineOverlay = false;
+            onlineNative = false;
+            onlineNativeTool = '';
+            onlineProbe = null;
+            onlineProbeFor = 0;
+            onlineProbeBusy = false;
+            onlineNativeWarning = null;
+            onlineRouteRow = null;
+            onlineConfirmRow = null;
+            onlineNativePoll = 0;
+            onlineReroute?.remove();
+            onlineReroute = null;
+            if (onlineNativeTimer) {
+                clearTimeout(onlineNativeTimer);
+                onlineNativeTimer = null;
+            }
+            owned = false;
+            freeGame = false;
             appID = nextApp;
             busy = false;
             state = 'checking';
@@ -778,6 +1333,7 @@
         title.className = 'title';
         titlePrefix = document.createTextNode('Add to library with ');
         const brand = document.createElement('span');
+        brandSpan = brand;
         brand.textContent = 'macSteam';
         brand.style.cssText = 'display:inline-block;margin-left:6px;padding:2px 8px;border:1px solid rgba(198,212,223,.28);border-radius:999px;color:#c6d4df;font-size:.72em;line-height:1.4;vertical-align:2px';
         title.append(titlePrefix, brand);

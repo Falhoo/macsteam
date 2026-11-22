@@ -39,11 +39,15 @@ struct RootView: View {
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 260)
         } detail: {
-            switch pane {
-            case .status: StatusView()
-            case .prefixes: PrefixesView()
-            case .backups: BackupsView()
+            Group {
+                switch pane {
+                case .status: StatusView()
+                case .prefixes: PrefixesView()
+                case .backups: BackupsView()
+                }
             }
+            // The pages no longer set their own title, so they can sit in macSteam's window.
+            .navigationTitle(pane.label)
         }
     }
 }

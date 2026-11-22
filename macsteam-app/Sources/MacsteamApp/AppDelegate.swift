@@ -24,31 +24,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeOnlineFixHandoff()
 
         mainVC = MainViewController(store: store)
+        // The SwiftUI shell (MainViewController) owns the title and toolbar, and draws
+        // the frosted background under the full-size title bar.
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 820, height: 560),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            contentRect: NSRect(x: 0, y: 0, width: 1120, height: 760),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
         window.title = appName
-        window.titleVisibility = .hidden
         window.tabbingMode = .disallowed
+        window.toolbarStyle = .unified
+        window.titlebarAppearsTransparent = true
         window.contentViewController = mainVC
 
         window.isRestorable = false
-        window.contentMinSize = NSSize(width: 720, height: 480)
+        // Big enough that the sidebar and every page always fit.
+        window.contentMinSize = NSSize(width: 900, height: 640)
 
         window.autorecalculatesKeyViewLoop = true
         window.identifier = NSUserInterfaceItemIdentifier("MacsteamMainWindow")
 
-        let toolbar = NSToolbar(identifier: "MacsteamMainToolbar")
-        toolbar.delegate = mainVC
-        toolbar.displayMode = .iconOnly
-        toolbar.allowsUserCustomization = false
-        window.toolbar = toolbar
-        window.toolbarStyle = .unified
-
-        window.setFrameAutosaveName("MacsteamMainWindow.v2")
+        window.setFrameAutosaveName("MacsteamMainWindow.glass")
         if !window.setFrameUsingName(window.frameAutosaveName) {
-            window.setContentSize(NSSize(width: 820, height: 560))
+            window.setContentSize(NSSize(width: 1120, height: 760))
             window.center()
         }
 

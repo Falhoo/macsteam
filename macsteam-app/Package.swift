@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 import Foundation
 import PackageDescription
 
@@ -15,6 +15,8 @@ var targets: [Target] = [
             .product(name: "CloudRedirectUI", package: "swift-app"),
             // Its installer/config support, from ../vendor/cloudredirect/ui-macos.
             .product(name: "CloudRedirectSupport", package: "ui-macos"),
+            // Liquid Glass components shared with NotProton's and OnlineFix's pages.
+            .product(name: "GlassUI", package: "glass-ui"),
         ],
         path: "Sources/MacsteamApp",
         resources: [.copy("Resources/hubcap-store.js")]
@@ -32,7 +34,7 @@ if FileManager.default.fileExists(atPath: "Tests/MacsteamAppTests") {
 let package = Package(
     name: "MacsteamApp",
     platforms: [
-        .macOS(.v15)   // NotProton needs macOS 15
+        .macOS(.v26)   // the Liquid Glass UI needs macOS 26
     ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
@@ -40,6 +42,7 @@ let package = Package(
         .package(path: "../onlinefix"),
         .package(path: "../vendor/cloudredirect/ui-macos/swift-app"),
         .package(path: "../vendor/cloudredirect/ui-macos"),
+        .package(path: "../glass-ui"),
     ],
     targets: targets
 )

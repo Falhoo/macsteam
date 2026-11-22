@@ -1,29 +1,39 @@
 diff --git a/app/Package.swift b/app/Package.swift
-index 729319d..e227127 100644
+index 729319d..1195308 100644
 --- a/app/Package.swift
 +++ b/app/Package.swift
-@@ -16,11 +16,14 @@ let package = Package(
+@@ -15,14 +15,22 @@ let hasPayload = FileManager.default.fileExists(
+ let package = Package(
      name: "NotProtonApp",
      defaultLocalization: "en",
-     platforms: [.macOS("15.0")],
+-    platforms: [.macOS("15.0")],
++    platforms: [.macOS(.v26)],   // macSteam: Liquid Glass pages need macOS 26
 +    products: [
 +        .library(name: "NotProtonApp", targets: ["NotProtonApp"]),
 +    ],
      dependencies: [
          .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
++        // macSteam: shared Liquid Glass components (../../glass-ui in the macSteam tree).
++        .package(path: "../../glass-ui"),
      ],
      targets: [
 -        .executableTarget(
 +        .target(
              name: "NotProtonApp",
-             dependencies: [.product(name: "Sparkle", package: "Sparkle")],
+-            dependencies: [.product(name: "Sparkle", package: "Sparkle")],
++            dependencies: [
++                .product(name: "Sparkle", package: "Sparkle"),
++                .product(name: "GlassUI", package: "glass-ui"),
++            ],
              path: "Sources/NotProtonApp",
+             resources: (hasPayload ? [.copy("Resources/payload")] : []) + [
+                 .process("Resources/Localization"),
 diff --git a/app/Sources/NotProtonApp/Embed.swift b/app/Sources/NotProtonApp/Embed.swift
 new file mode 100644
-index 0000000..9cccc14
+index 0000000..91daaa7
 --- /dev/null
 +++ b/app/Sources/NotProtonApp/Embed.swift
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,107 @@
 +// macSteam + NotProton: the small public surface the combined app uses to host NotProton.
 +//
 +// Everything else in this module stays internal and unchanged. The combined app shows these
@@ -31,30 +41,6 @@ index 0000000..9cccc14
 +
 +import AppKit
 +import SwiftUI
-+
-+// NotProton's window toolbar items (Refresh, the prefix action strip) need a toolbar that
-+// NotProton owns. The combined app owns the window toolbar, so the same buttons are shown in
-+// a bar at the top of the page instead.
-+struct EmbeddedBar<Content: View>: View {
-+    private let content: Content
-+
-+    init(@ViewBuilder _ content: () -> Content) {
-+        self.content = content()
-+    }
-+
-+    var body: some View {
-+        VStack(spacing: 0) {
-+            HStack(spacing: 8) {
-+                Spacer()
-+                content
-+            }
-+            .padding(.horizontal, 12)
-+            .padding(.vertical, 6)
-+            Divider()
-+        }
-+        .background(.bar)
-+    }
-+}
 +
 +public enum NotProtonEmbed {
 +
@@ -85,17 +71,29 @@ index 0000000..9cccc14
 +        AppLog.start()
 +    }
 +
-+    // One view controller per screen, created on first use and then reused.
++    // The page itself, for hosts that show it directly in SwiftUI. Every page shares the same
++    // SystemStatus and PrefixesModel, so their state survives switching between pages.
++    // Its Refresh / Tools / Reveal / Delete buttons are SwiftUI toolbar items, which the host's
++    // NavigationSplitView puts in the window toolbar.
++    @MainActor
++    public static func view(for screen: Screen) -> AnyView {
++        start()
++        switch screen {
++        case .status: return wrap(StatusView())
++        case .prefixes: return wrap(PrefixesView())
++        case .backups: return wrap(BackupsView())
++        }
++    }
++
++    // One view controller per screen, created on first use and then reused. It hosts
++    // view(for:), with the toolbar buttons shown in a glass bar at the top of the page,
++    // because the hosting controller does not bridge toolbar items into the window.
 +    @MainActor
 +    public static func viewController(for screen: Screen) -> NSViewController {
 +        if let existing = controllers[screen] { return existing }
-+        start()
-+        let controller: NSHostingController<AnyView>
-+        switch screen {
-+        case .status: controller = NSHostingController(rootView: wrap(StatusView()))
-+        case .prefixes: controller = NSHostingController(rootView: wrap(PrefixesView()))
-+        case .backups: controller = NSHostingController(rootView: wrap(BackupsView()))
-+        }
++        let controller = NSHostingController(
++            rootView: AnyView(view(for: screen).environment(\.notProtonInlineToolbar, true))
++        )
 +        // The hosting controller must not drive the window's size or toolbar.
 +        controller.sizingOptions = []
 +        controller.sceneBridgingOptions = []
@@ -268,55 +266,632 @@ index 15dc87a..f1a2537 100644
  }
  
 diff --git a/app/Sources/NotProtonApp/Views/BackupsView.swift b/app/Sources/NotProtonApp/Views/BackupsView.swift
-index 18c47dc..b4af7f4 100644
+index 18c47dc..fd86fe0 100644
 --- a/app/Sources/NotProtonApp/Views/BackupsView.swift
 +++ b/app/Sources/NotProtonApp/Views/BackupsView.swift
-@@ -38,14 +38,8 @@ struct BackupsView: View {
-                 report(StatusRow(title: String(localized: "Done"), value: outcome, tone: .ok))
+@@ -1,3 +1,4 @@
++import GlassUI
+ import SwiftUI
+ 
+ struct BackupsView: View {
+@@ -10,42 +11,43 @@ struct BackupsView: View {
+             if !model.hasLoaded {
+                 ProgressView("Looking for backups")
+                     .frame(maxWidth: .infinity, maxHeight: .infinity)
++                    .transition(.opacity)
+             } else if model.backups.isEmpty {
+-                ContentUnavailableView(
+-                    String(localized: "No Backups"),
+-                    systemImage: "externaldrive.badge.timemachine"
++                GlassEmptyState(
++                    symbol: "externaldrive.badge.timemachine",
++                    title: String(localized: "No Backups")
+                 )
+-                .frame(maxWidth: .infinity, maxHeight: .infinity)
++                .transition(.blurReplace)
+             } else {
+-                table
++                // The count and size NotProton's own window shows as its subtitle.
++                GlassTablePanel(caption: summary) { table }
++                    .transition(.opacity)
              }
          }
+-        .navigationTitle("Prefix Backups")
+-        .navigationSubtitle(summary)
+-        .safeAreaInset(edge: .bottom) {
+-            if let failed = model.report {
+-                report(
+-                    StatusRow(
+-                        title: String(localized: "Failed"),
+-                        value: failed.message,
+-                        tone: .bad,
+-                        action: failed.settingsPane.map { pane in
+-                            StatusAction(label: Remedy.settingsButton) { Remedy.openSettings(pane) }
+-                        }
++        .animation(.smooth, value: model.hasLoaded)
++        .animation(.smooth, value: model.backups.isEmpty)
++        // macSteam: the window title comes from the host (RootView or macSteam's split view).
++        .safeAreaInset(edge: .bottom, spacing: 0) {
++            VStack(spacing: 0) {
++                if let failed = model.report {
++                    ReportBanner(
++                        row: StatusRow(
++                            title: String(localized: "Failed"),
++                            value: failed.message,
++                            tone: .bad,
++                            action: failed.settingsPane.map { pane in
++                                StatusAction(label: Remedy.settingsButton) { Remedy.openSettings(pane) }
++                            }
++                        )
+                     )
+-                )
+-            } else if let outcome = model.outcome {
+-                report(StatusRow(title: String(localized: "Done"), value: outcome, tone: .ok))
+-            }
+-        }
 -        .toolbar {
 -            if #available(macOS 26.1, *) {
 -                ToolbarItemGroup(placement: .primaryAction) { strip }
 -                    .visibilityPriority(.high)
 -            } else {
 -                ToolbarItemGroup(placement: .primaryAction) { strip }
--            }
--        }
-+        // macSteam + NotProton: shown as a bar inside the pane (was a window toolbar)
-+        .safeAreaInset(edge: .top, spacing: 0) { EmbeddedBar { strip } }
++                } else if let outcome = model.outcome {
++                    ReportBanner(row: StatusRow(title: String(localized: "Done"), value: outcome, tone: .ok))
++                }
+             }
++            .animation(.smooth, value: model.failure)
++            .animation(.smooth, value: model.outcome)
+         }
++        .pageToolbar { strip } refresh: { refreshButton }
          .task { if model.prefixes.isEmpty { await model.load() } }
          .onChange(of: model.backups) { _, kept in
              selection = selection.filter { id in kept.contains { $0.id == id } }
+@@ -67,6 +69,7 @@ struct BackupsView: View {
+         }
+     }
+ 
++    // Was the window subtitle; now the caption above the table.
+     private var summary: String {
+         guard !model.backups.isEmpty else { return "" }
+         let size = model.backupBytes.formatted(.byteCount(style: .file))
+@@ -116,7 +119,9 @@ struct BackupsView: View {
+         }
+         .disabled(model.backups.isEmpty || model.isLoading)
+         .help("Delete every backup that rebuilds have kept.")
++    }
+ 
++    private var refreshButton: some View {
+         Button("Refresh", systemImage: "arrow.clockwise") {
+             Task { await model.load() }
+         }
+@@ -203,8 +208,4 @@ struct BackupsView: View {
+         guard !targets.isEmpty, !model.isLoading else { return }
+         model.pendingConfirmation = .deleteBackups(targets)
+     }
+-
+-    private func report(_ row: StatusRow) -> some View {
+-        row.padding(10).frame(maxWidth: .infinity, alignment: .leading).background(.bar)
+-    }
+ }
+diff --git a/app/Sources/NotProtonApp/Views/GlassPage.swift b/app/Sources/NotProtonApp/Views/GlassPage.swift
+new file mode 100644
+index 0000000..d588ea3
+--- /dev/null
++++ b/app/Sources/NotProtonApp/Views/GlassPage.swift
+@@ -0,0 +1,202 @@
++// macSteam + NotProton: Liquid Glass pieces shared by NotProton's pages.
++
++import GlassUI
++import SwiftUI
++
++extension EnvironmentValues {
++    // True when the page is hosted somewhere that does not bridge SwiftUI toolbar items into the
++    // window toolbar (NotProtonEmbed.viewController(for:)). The page's toolbar buttons are then
++    // shown in a glass bar at the top of the page instead.
++    @Entry var notProtonInlineToolbar = false
++}
++
++extension View {
++    // A page's primary toolbar: the page's own action buttons, a gap, then Refresh.
++    func pageToolbar<Actions: View, Refresh: View>(
++        @ViewBuilder actions: () -> Actions,
++        @ViewBuilder refresh: () -> Refresh
++    ) -> some View {
++        modifier(PageToolbar(actions: actions(), refresh: refresh()))
++    }
++
++    func pageToolbar<Refresh: View>(@ViewBuilder refresh: () -> Refresh) -> some View {
++        pageToolbar(actions: { EmptyView() }, refresh: refresh)
++    }
++}
++
++private struct PageToolbar<Actions: View, Refresh: View>: ViewModifier {
++    @Environment(\.notProtonInlineToolbar) private var inline
++
++    let actions: Actions
++    let refresh: Refresh
++
++    private var hasActions: Bool { Actions.self != EmptyView.self }
++
++    @ViewBuilder
++    func body(content: Content) -> some View {
++        if inline {
++            content.safeAreaInset(edge: .top, spacing: 0) {
++                GlassEffectContainer(spacing: 8) {
++                    HStack(spacing: 8) {
++                        Spacer(minLength: 0)
++                        actions
++                        if hasActions { Spacer().frame(width: 6) }
++                        refresh
++                    }
++                }
++                .labelStyle(.iconOnly)
++                .buttonStyle(.glass)
++                .menuStyle(.button)
++                .padding(.horizontal, 20)
++                .padding(.top, 12)
++            }
++        } else {
++            content.toolbar {
++                if #available(macOS 26.1, *) {
++                    PrimaryItems(hasActions: hasActions, actions: actions, refresh: refresh)
++                        .visibilityPriority(.high)
++                } else {
++                    PrimaryItems(hasActions: hasActions, actions: actions, refresh: refresh)
++                }
++            }
++        }
++    }
++}
++
++private struct PrimaryItems<Actions: View, Refresh: View>: ToolbarContent {
++    let hasActions: Bool
++    let actions: Actions
++    let refresh: Refresh
++
++    var body: some ToolbarContent {
++        if hasActions {
++            ToolbarItemGroup(placement: .primaryAction) { actions }
++            ToolbarSpacer(.fixed, placement: .primaryAction)
++        }
++        ToolbarItem(placement: .primaryAction) { refresh }
++    }
++}
++
++// A table on a single glass panel, with an optional caption above it.
++struct GlassTablePanel<Content: View>: View {
++    private let caption: String?
++    private let content: Content
++
++    init(caption: String? = nil, @ViewBuilder content: () -> Content) {
++        self.caption = caption
++        self.content = content()
++    }
++
++    var body: some View {
++        VStack(alignment: .leading, spacing: 10) {
++            if let caption, !caption.isEmpty {
++                Text(caption)
++                    .font(.callout)
++                    .foregroundStyle(.secondary)
++                    .monospacedDigit()
++                    .contentTransition(.numericText())
++                    .padding(.leading, 8)
++                    .transition(.opacity)
++            }
++            content
++                .tableStyle(.inset)
++                .scrollContentBackground(.hidden)
++                .padding(6)
++                .glassEffect(.regular, in: .rect(cornerRadius: 28))
++        }
++        .padding(24)
++        .animation(.smooth, value: caption)
++    }
++}
++
++// The Done / Failed line pinned to the bottom of the Prefixes and Prefix Backups pages.
++struct ReportBanner: View {
++    let row: StatusRow
++
++    var body: some View {
++        row
++            .glassEffect(.regular, in: .rect(cornerRadius: 24))
++            .padding(.horizontal, 24)
++            .padding(.bottom, 18)
++            .transition(.move(edge: .bottom).combined(with: .opacity))
++    }
++}
++
++// Inserts a row divider between each of the rows it is given.
++struct DividedRows<Content: View>: View {
++    private let content: Content
++
++    init(@ViewBuilder content: () -> Content) {
++        self.content = content()
++    }
++
++    var body: some View {
++        Group(subviews: content) { rows in
++            ForEach(rows) { row in
++                if row.id != rows.first?.id { RowDivider() }
++                row
++            }
++        }
++    }
++}
++
++// The status card at the top of the Status page (Failed, Done, a running task).
++struct StatusBanner<Accessory: View>: View {
++    enum Icon {
++        case symbol(String, Color?)
++        case progress
++    }
++
++    let icon: Icon
++    let title: String
++    var message: String?
++    let accessory: Accessory
++
++    init(icon: Icon, title: String, message: String? = nil, @ViewBuilder accessory: () -> Accessory) {
++        self.icon = icon
++        self.title = title
++        self.message = message
++        self.accessory = accessory()
++    }
++
++    var body: some View {
++        HStack(spacing: 16) {
++            switch icon {
++            case .symbol(let symbol, let tint):
++                GlassIcon(symbol: symbol, size: 48, tint: tint)
++                    .accessibilityHidden(true)
++            case .progress:
++                ProgressView()
++                    .controlSize(.small)
++                    .frame(width: 48, height: 48)
++                    .glassEffect(.regular, in: .circle)
++            }
++            VStack(alignment: .leading, spacing: 3) {
++                Text(title)
++                    .font(.title3.weight(.semibold))
++                    .fixedSize(horizontal: false, vertical: true)
++                    .contentTransition(.interpolate)
++                if let message {
++                    Text(message)
++                        .font(.callout)
++                        .foregroundStyle(.secondary)
++                        .textSelection(.enabled)
++                        .fixedSize(horizontal: false, vertical: true)
++                        .contentTransition(.opacity)
++                }
++            }
++            Spacer(minLength: 12)
++            accessory
++        }
++        .padding(18)
++        .frame(maxWidth: .infinity, alignment: .leading)
++        .glassEffect(.regular, in: .rect(cornerRadius: 30))
++        .accessibilityElement(children: .contain)
++    }
++}
++
++extension StatusBanner where Accessory == EmptyView {
++    init(icon: Icon, title: String, message: String? = nil) {
++        self.init(icon: icon, title: title, message: message) { EmptyView() }
++    }
++}
 diff --git a/app/Sources/NotProtonApp/Views/PrefixesView.swift b/app/Sources/NotProtonApp/Views/PrefixesView.swift
-index 0393964..6b29827 100644
+index 0393964..9458fec 100644
 --- a/app/Sources/NotProtonApp/Views/PrefixesView.swift
 +++ b/app/Sources/NotProtonApp/Views/PrefixesView.swift
-@@ -50,14 +50,8 @@ struct PrefixesView: View {
+@@ -1,5 +1,6 @@
+ // Prefix management UI inside NotProton, also see PrefixesModel
+ 
++import GlassUI
+ import SwiftUI
+ 
+ struct PrefixesView: View {
+@@ -14,50 +15,49 @@ struct PrefixesView: View {
+             if !model.hasLoaded {
+                 ProgressView("Looking for prefixes")
+                     .frame(maxWidth: .infinity, maxHeight: .infinity)
++                    .transition(.opacity)
+             } else if model.prefixes.isEmpty {
+-                ContentUnavailableView(
+-                    String(localized: "No Prefixes"),
+-                    systemImage: "externaldrive",
+-                    description: Text(
+-                        String(localized: "A prefix appears here once a Windows game has been launched through NotProton.")
+-                    )
++                GlassEmptyState(
++                    symbol: "externaldrive",
++                    title: String(localized: "No Prefixes"),
++                    message: String(localized: "A prefix appears here once a Windows game has been launched through NotProton.")
                  )
+-                .frame(maxWidth: .infinity, maxHeight: .infinity)
++                .transition(.blurReplace)
+             } else {
+-                table
++                GlassTablePanel { table }
++                    .transition(.opacity)
              }
          }
+-        .navigationTitle("Prefixes")
+-        .safeAreaInset(edge: .bottom) {
+-            if let failed = model.report {
+-                report(
+-                    StatusRow(
+-                        title: String(localized: "Failed"),
+-                        value: failed.message,
+-                        tone: .bad,
+-                        action: failed.settingsPane.map { pane in
+-                            StatusAction(label: Remedy.settingsButton) { Remedy.openSettings(pane) }
+-                        }
++        .animation(.smooth, value: model.hasLoaded)
++        .animation(.smooth, value: model.prefixes.isEmpty)
++        // macSteam: the window title comes from the host (RootView or macSteam's split view).
++        .safeAreaInset(edge: .bottom, spacing: 0) {
++            VStack(spacing: 0) {
++                if let failed = model.report {
++                    ReportBanner(
++                        row: StatusRow(
++                            title: String(localized: "Failed"),
++                            value: failed.message,
++                            tone: .bad,
++                            action: failed.settingsPane.map { pane in
++                                StatusAction(label: Remedy.settingsButton) { Remedy.openSettings(pane) }
++                            }
++                        )
+                     )
+-                )
+-            } else if let outcome = model.outcome {
+-                report(
+-                    StatusRow(
+-                        title: String(localized: "Done"),
+-                        value: outcome,
+-                        tone: .ok
++                } else if let outcome = model.outcome {
++                    ReportBanner(
++                        row: StatusRow(
++                            title: String(localized: "Done"),
++                            value: outcome,
++                            tone: .ok
++                        )
+                     )
+-                )
+-            }
+-        }
 -        .toolbar {
 -            if #available(macOS 26.1, *) {
 -                ToolbarItemGroup(placement: .primaryAction) { strip }
 -                    .visibilityPriority(.high)
 -            } else {
 -                ToolbarItemGroup(placement: .primaryAction) { strip }
--            }
--        }
-+        // macSteam + NotProton: shown as a bar inside the pane (was a window toolbar)
-+        .safeAreaInset(edge: .top, spacing: 0) { EmbeddedBar { strip } }
++                }
+             }
++            .animation(.smooth, value: model.failure)
++            .animation(.smooth, value: model.outcome)
+         }
++        .pageToolbar { strip } refresh: { refreshButton }
          .task { await model.load() }
          .confirmationDialog(
              PrefixPrompt.deleteTitle(deleting),
+@@ -167,7 +167,9 @@ struct PrefixesView: View {
+         }
+         .disabled(model.selectedPrefix == nil)
+         .help("Show the selected prefix in the Finder.")
++    }
+ 
++    private var refreshButton: some View {
+         Button("Refresh", systemImage: "arrow.clockwise") {
+             Task { await model.load() }
+         }
+@@ -380,8 +382,4 @@ struct PrefixesView: View {
+         guard ids.count == 1, let id = ids.first else { return nil }
+         return model.prefixes.first { $0.id == id }
+     }
+-
+-    private func report(_ row: StatusRow) -> some View {
+-        row.padding(10).frame(maxWidth: .infinity, alignment: .leading).background(.bar)
+-    }
+ }
+diff --git a/app/Sources/NotProtonApp/Views/RootView.swift b/app/Sources/NotProtonApp/Views/RootView.swift
+index 5040c47..029e13c 100644
+--- a/app/Sources/NotProtonApp/Views/RootView.swift
++++ b/app/Sources/NotProtonApp/Views/RootView.swift
+@@ -39,11 +39,15 @@ struct RootView: View {
+             .listStyle(.sidebar)
+             .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 260)
+         } detail: {
+-            switch pane {
+-            case .status: StatusView()
+-            case .prefixes: PrefixesView()
+-            case .backups: BackupsView()
++            Group {
++                switch pane {
++                case .status: StatusView()
++                case .prefixes: PrefixesView()
++                case .backups: BackupsView()
++                }
+             }
++            // The pages no longer set their own title, so they can sit in macSteam's window.
++            .navigationTitle(pane.label)
+         }
+     }
+ }
 diff --git a/app/Sources/NotProtonApp/Views/StatusView.swift b/app/Sources/NotProtonApp/Views/StatusView.swift
-index 7981919..13147f8 100644
+index 7981919..38f04c9 100644
 --- a/app/Sources/NotProtonApp/Views/StatusView.swift
 +++ b/app/Sources/NotProtonApp/Views/StatusView.swift
-@@ -174,14 +174,8 @@ struct StatusView: View {
+@@ -1,29 +1,22 @@
+ // 'Status' view, see SystemStatus for actual logic
+ 
++import GlassUI
+ import SwiftUI
+ 
+ enum StatusTone: Sendable {
+     case ok, info, warning, bad, neutral
+ 
+-    var symbol: String {
++    var kind: StatusKind {
+         switch self {
+-        case .ok: "circle.fill"
+-        case .info: "circle"
+-        case .warning: "circle.fill"
+-        case .bad: "circle.fill"
+-        case .neutral: "circle"
++        case .ok: .ok
++        case .info: .inactive
++        case .warning: .warning
++        case .bad: .error
++        case .neutral: .inactive
+         }
+     }
+ 
+-    var color: Color {
+-        switch self {
+-        case .ok: .green
+-        case .info: .secondary
+-        case .warning: .orange
+-        case .bad: .red
+-        case .neutral: .secondary
+-        }
+-    }
++    var color: Color { kind.color }
+ }
+ 
+ struct StatusAction {
+@@ -36,12 +29,7 @@ struct StatusAction {
+     let perform: () -> Void
+ }
+ 
+-enum StatusMetrics {
+-    static let symbolWidth: CGFloat = 10
+-    static let symbolSpacing: CGFloat = 8
+-    static var textInset: CGFloat { symbolWidth + symbolSpacing }
+-}
+-
++// One row on a glass card: status dot, title, value and detail, then its controls.
+ struct StatusRow: View {
+ 
+     let title: String
+@@ -57,42 +45,45 @@ struct StatusRow: View {
+ 
+     var body: some View {
+         HStack(alignment: .center, spacing: 0) {
+-            HStack(alignment: .firstTextBaseline, spacing: StatusMetrics.symbolSpacing) {
++            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                 if let tone {
+-                    Image(systemName: tone.symbol)
+-                        .font(.system(size: 8))
+-                        .foregroundStyle(tone.color)
+-                        .frame(width: StatusMetrics.symbolWidth)
++                    StatusDot(kind: tone.kind)
+                         .accessibilityHidden(true)
+-                } else {
+-                    Color.clear.frame(width: StatusMetrics.symbolWidth, height: 1)
+                 }
+ 
+-                VStack(alignment: .leading, spacing: 2) {
++                VStack(alignment: .leading, spacing: 3) {
+                     Text(title)
+-                        .font(.headline)
++                        .font(.body.weight(.medium))
+                     if let value {
+                         Text(value)
++                            .font(.callout)
+                             .foregroundStyle(.secondary)
++                            .lineSpacing(1.5)
++                            .fixedSize(horizontal: false, vertical: true)
++                            .contentTransition(.opacity)
+                     }
+                     if let detail {
+                         Text(detail)
+                             .font(.callout)
+                             .foregroundStyle(.secondary)
++                            .lineSpacing(1.5)
++                            .fixedSize(horizontal: false, vertical: true)
+                             .textSelection(.enabled)
+                     }
+                 }
+             }
+ 
+             if secondaryAction != nil || action != nil || !menu.isEmpty || toggle != nil || trailing != nil {
+-                Spacer(minLength: 12)
++                Spacer(minLength: 16)
+             }
+             if let trailing {
+                 Text(trailing)
++                    .font(.callout)
+                     .monospacedDigit()
+                     .foregroundStyle(.secondary)
+                     .multilineTextAlignment(.trailing)
+-                    .padding(.trailing, action == nil && menu.isEmpty ? 0 : 8)
++                    .contentTransition(.numericText())
++                    .padding(.trailing, action == nil && menu.isEmpty ? 0 : 12)
+             }
+             if let toggle {
+                 Toggle(title, isOn: toggle)
+@@ -111,6 +102,7 @@ struct StatusRow: View {
+                     .disabled(!action.isEnabled)
+                     .help(action.help ?? "")
+                     .accessibilityLabel("\(action.label), \(title)")
++                    .transition(.blurReplace)
+             }
+             if !menu.isEmpty {
+                 Menu {
+@@ -120,7 +112,8 @@ struct StatusRow: View {
+                         .labelStyle(.iconOnly)
+                 }
+                 .menuStyle(.button)
+-                .buttonStyle(.bordered)
++                .buttonStyle(.glass)
++                .buttonBorderShape(.circle)
+                 .menuIndicator(.hidden)
+                 .fixedSize()
+                 .help("More actions")
+@@ -129,7 +122,9 @@ struct StatusRow: View {
              }
          }
-         .navigationTitle("Status")
+         .accessibilityElement(children: .combine)
+-        .padding(.vertical, 2)
++        .padding(.horizontal, 20)
++        .padding(.vertical, 14)
++        .frame(maxWidth: .infinity, alignment: .leading)
+         .contentShape(Rectangle())
+         .contextMenu {
+             menuItems([action, secondaryAction].compactMap { $0 } + menu, hidingUnavailable: true)
+@@ -148,12 +143,15 @@ struct StatusRow: View {
+ 
+     @ViewBuilder
+     private func button(_ action: StatusAction) -> some View {
++        let tint: Color? = action.role == .destructive ? .red : nil
+         if action.isProminent {
+             Button(action.label, role: action.role, action: action.perform)
+-                .buttonStyle(.borderedProminent)
++                .buttonStyle(.glassProminent)
++                .tint(tint)
+         } else {
+             Button(action.label, role: action.role, action: action.perform)
+-                .buttonStyle(.bordered)
++                .buttonStyle(.glass)
++                .tint(tint)
+         }
+     }
+ }
+@@ -168,20 +166,16 @@ struct StatusView: View {
+         Group {
+             if let snapshot = status.snapshot {
+                 statusForm(snapshot)
++                    .transition(.opacity)
+             } else {
+                 ProgressView("Checking")
+                     .frame(maxWidth: .infinity, maxHeight: .infinity)
++                    .transition(.opacity)
+             }
+         }
+-        .navigationTitle("Status")
 -        .toolbar {
 -            if #available(macOS 26.1, *) {
 -                ToolbarItem(placement: .primaryAction) { refreshButton }
@@ -325,11 +900,479 @@ index 7981919..13147f8 100644
 -                ToolbarItem(placement: .primaryAction) { refreshButton }
 -            }
 -        }
-+        // macSteam + NotProton: shown as a bar inside the pane (was a window toolbar)
-+        .safeAreaInset(edge: .top, spacing: 0) { EmbeddedBar { refreshButton } }
++        .animation(.smooth, value: status.snapshot == nil)
++        // macSteam: the window title comes from the host (RootView or macSteam's split view).
++        .pageToolbar { refreshButton }
          .confirmationDialog(
              String(localized: "Block Steam client updates?"),
              isPresented: asking(.blockUpdates),
+@@ -282,87 +276,113 @@ struct StatusView: View {
+         }
+     }
+ 
+-    private func form(_ snapshot: StatusSnapshot) -> some View {
+-        Form {
+-            if let failure = status.failure {
+-                StatusRow(
+-                    title: String(localized: "Failed"),
+-                    value: failure,
+-                    tone: .bad,
+-                    action: status.failureRemedy?.settingsPane.map { pane in
+-                        StatusAction(label: Remedy.settingsButton) {
+-                            Remedy.openSettings(pane)
+-                        }
+-                    }
+-                )
+-            } else if let outcome = status.outcome {
+-                StatusRow(title: String(localized: "Done"), value: outcome, tone: .ok)
+-            }
+-
+-            if let failure = status.templateCleanupFailure {
+-                StatusRow(title: String(localized: "Template cleanup incomplete"), value: failure, tone: .warning)
+-            }
++    private var hasBanner: Bool {
++        status.failure != nil || status.outcome != nil
++            || status.templateCleanupFailure != nil || status.activity != nil
++    }
+ 
+-            if let activity = status.activity {
+-                HStack(spacing: 10) {
+-                    ProgressView()
+-                        .controlSize(.small)
+-                    Text(activity)
+-                        .foregroundStyle(.secondary)
+-                }
++    private func form(_ snapshot: StatusSnapshot) -> some View {
++        PageScroll(maxWidth: 760) {
++            if hasBanner {
++                banners
++                    .transition(.blurReplace)
+             }
+ 
+-            Section("Steam") {
+-                StatusRow(
+-                    title: String(localized: "Location"),
+-                    value: SupportPaths.Steam.app.path(percentEncoded: false),
+-                    action: StatusAction(
+-                        label: String(localized: "Choose\u{2026}"),
+-                        help: String(localized: "Use a copy of Steam from another folder or drive."),
+-                        isEnabled: status.isIdle
+-                    ) { Task { await status.chooseSteam() } }
+-                )
+-                steamRow(snapshot.steam, payload: snapshot.payload)
+-                if snapshot.steamRunning {
++            GlassSection(title: String(localized: "Steam")) {
++                DividedRows {
+                     StatusRow(
+-                        title: String(localized: "Steam is running"),
+-                        value: String(localized: "Close Steam before continuing."),
+-                        tone: .info
++                        title: String(localized: "Location"),
++                        value: SupportPaths.Steam.app.path(percentEncoded: false),
++                        action: StatusAction(
++                            label: String(localized: "Choose\u{2026}"),
++                            help: String(localized: "Use a copy of Steam from another folder or drive."),
++                            isEnabled: status.isIdle
++                        ) { Task { await status.chooseSteam() } }
++                    )
++                    steamRow(snapshot.steam, payload: snapshot.payload)
++                    if snapshot.steamRunning {
++                        StatusRow(
++                            title: String(localized: "Steam is running"),
++                            value: String(localized: "Close Steam before continuing."),
++                            tone: .info
++                        )
++                        .transition(.opacity)
++                    }
++                    updateBlockRow(snapshot.updateBlocked)
++                    StatusRow(
++                        title: String(localized: "Controller permission"),
++                        value: String(localized: "Clear Steam's controller permission so macOS asks for it again."),
++                        action: StatusAction(
++                            label: String(localized: "Reset"),
++                            isEnabled: status.isIdle
++                        ) { Task { await status.resetControllerPermission() } }
+                     )
+                 }
+-                updateBlockRow(snapshot.updateBlocked)
+-                StatusRow(
+-                    title: String(localized: "Controller permission"),
+-                    value: String(localized: "Clear Steam's controller permission so macOS asks for it again."),
+-                    action: StatusAction(
+-                        label: String(localized: "Reset"),
+-                        isEnabled: status.isIdle
+-                    ) { Task { await status.resetControllerPermission() } }
+-                )
+             }
+ 
+-            Section {
+-                crossOverSection(snapshot)
+-            } header: {
+-                Text("CrossOver")
+-            } footer: {
+-                HStack {
+-                    Spacer()
+-                    Button("Add CrossOver\u{2026}") { Task { await status.addCrossOver() } }
+-                        .disabled(!status.isIdle)
+-                        .help("Add a copy of CrossOver from another folder.")
++            VStack(alignment: .trailing, spacing: 12) {
++                GlassSection(title: String(localized: "CrossOver")) {
++                    crossOverSection(snapshot)
+                 }
++                Button("Add CrossOver\u{2026}", systemImage: "plus") { Task { await status.addCrossOver() } }
++                    .buttonStyle(.glass)
++                    .disabled(!status.isIdle)
++                    .help("Add a copy of CrossOver from another folder.")
+             }
+ 
+             componentsSection(snapshot.payload)
+ 
+             dangerSection
+         }
+-        .formStyle(.grouped)
++        .animation(.smooth, value: status.failure)
++        .animation(.smooth, value: status.outcome)
++        .animation(.smooth, value: status.activity)
++        .animation(.smooth, value: status.templateCleanupFailure)
++        .animation(.snappy, value: snapshot.steamRunning)
++        .animation(.snappy, value: snapshot.updateBlocked)
++        .animation(.snappy, value: status.crossOverRows)
++        .animation(.snappy, value: status.runnerSizes)
++        .animation(.snappy, value: status.bridgeCopyBytes)
++    }
++
++    // Failed or Done, a template cleanup warning, and the task that is running.
++    private var banners: some View {
++        VStack(spacing: 12) {
++            if let failure = status.failure {
++                StatusBanner(
++                    icon: .symbol("xmark", .red),
++                    title: String(localized: "Failed"),
++                    message: failure
++                ) {
++                    if let pane = status.failureRemedy?.settingsPane {
++                        Button(Remedy.settingsButton) { Remedy.openSettings(pane) }
++                            .buttonStyle(.glass)
++                    }
++                }
++                .transition(.blurReplace)
++            } else if let outcome = status.outcome {
++                StatusBanner(icon: .symbol("checkmark", .green), title: String(localized: "Done"), message: outcome)
++                    .transition(.blurReplace)
++            }
++
++            if let failure = status.templateCleanupFailure {
++                StatusBanner(
++                    icon: .symbol("exclamationmark.triangle", .orange),
++                    title: String(localized: "Template cleanup incomplete"),
++                    message: failure
++                )
++                .transition(.blurReplace)
++            }
++
++            if let activity = status.activity {
++                StatusBanner(icon: .progress, title: activity)
++                    .transition(.blurReplace)
++            }
++        }
+     }
+ 
+     private var dangerSection: some View {
+-        Section {
++        GlassSection {
+             StatusRow(
+                 title: String(localized: "Repair Steam"),
+                 value: String(localized: "Restore Steam to its original state."),
+@@ -372,6 +392,7 @@ struct StatusView: View {
+                     isEnabled: status.isIdle
+                 ) { status.pendingConfirmation = .replaceSteam }
+             )
++            RowDivider()
+             StatusRow(
+                 title: String(localized: "Remove Everything"),
+                 value: String(localized: "Remove NotProton and restore Steam to its original state."),
+@@ -537,6 +558,7 @@ struct StatusView: View {
+         }
+         let tools = SupportedRunners.tools(for: snapshot.installedRunners)
+         ForEach(rows) { row in
++            if row.id != rows.first?.id { RowDivider() }
+             StatusRow(
+                 title: row.title,
+                 value: crossOverValue(row),
+@@ -547,15 +569,16 @@ struct StatusView: View {
+                 menu: crossOverMenu(row)
+             )
+             .background {
+-                RoundedRectangle(cornerRadius: 6)
++                RoundedRectangle(cornerRadius: 20)
+                     .fill(Color.accentColor.opacity(0.2))
+-                    .padding(-6)
++                    .padding(6)
+                     .opacity(status.highlightedRow == row.id ? 1 : 0)
+             }
+             .animation(.easeInOut(duration: 0.3), value: status.highlightedRow == row.id)
+             .id(row.id)
+         }
+         if case .ready = snapshot.runner, !snapshot.payload.missing(origin: .patched).isEmpty {
++            RowDivider()
+             StatusRow(
+                 title: String(localized: "Compatibility Tool"),
+                 value: String(localized: "Patched components are missing."),
+@@ -716,11 +739,11 @@ struct StatusView: View {
+     @ViewBuilder
+     private func componentsSection(_ payload: PayloadState) -> some View {
+         if let problem = payload.manifestProblem {
+-            Section("NotProton Components") {
++            GlassSection(title: String(localized: "NotProton Components")) {
+                 StatusRow(title: String(localized: "Components"), value: String(localized: "Component list unreadable."), tone: .bad, detail: problem)
+             }
+         } else if payload.isComplete {
+-            Section("NotProton Components") {
++            GlassSection(title: String(localized: "NotProton Components")) {
+                 StatusRow(
+                     title: String(localized: "Components"), value: String(localized: "Ready."), tone: .ok,
+                     trailing: status.bridgeCopyBytes > 0
+@@ -728,28 +751,33 @@ struct StatusView: View {
+                 )
+             }
+         } else if payload.isEmpty {
+-            Section("NotProton Components") {
++            GlassSection(title: String(localized: "NotProton Components")) {
+                 StatusRow(title: String(localized: "Components"), value: String(localized: "Not yet deployed."), tone: .neutral)
+             }
+         } else {
+-            Section("NotProton Components") {
+-                if !payload.missing.isEmpty {
+-                    let names = payload.missing.map(\.path).joined(separator: ", ")
+-                    StatusRow(
+-                        title: String(localized: "Missing."),
+-                        value: names,
+-                        tone: .bad,
+-                        action: payload.missing.contains(where: { $0.origin.isFetchable })
+-                            ? fetchAction() : nil
+-                    )
+-                }
+-                if !payload.overlayShimPresent {
+-                    StatusRow(title: String(localized: "Overlay shim"), value: String(localized: "Missing."), tone: .bad)
+-                }
+-                if payload.signatureDatabase == nil {
+-                    StatusRow(title: String(localized: "Signature database"), value: String(localized: "Missing."), tone: .bad)
+-                }
++            GlassSection(title: String(localized: "NotProton Components")) {
++                DividedRows { missingComponents(payload) }
+             }
+         }
+     }
++
++    @ViewBuilder
++    private func missingComponents(_ payload: PayloadState) -> some View {
++        if !payload.missing.isEmpty {
++            let names = payload.missing.map(\.path).joined(separator: ", ")
++            StatusRow(
++                title: String(localized: "Missing."),
++                value: names,
++                tone: .bad,
++                action: payload.missing.contains(where: { $0.origin.isFetchable })
++                    ? fetchAction() : nil
++            )
++        }
++        if !payload.overlayShimPresent {
++            StatusRow(title: String(localized: "Overlay shim"), value: String(localized: "Missing."), tone: .bad)
++        }
++        if payload.signatureDatabase == nil {
++            StatusRow(title: String(localized: "Signature database"), value: String(localized: "Missing."), tone: .bad)
++        }
++    }
+ }
+diff --git a/app/Sources/NotProtonApp/Views/WinetricksView.swift b/app/Sources/NotProtonApp/Views/WinetricksView.swift
+index 3254a96..1f1f757 100644
+--- a/app/Sources/NotProtonApp/Views/WinetricksView.swift
++++ b/app/Sources/NotProtonApp/Views/WinetricksView.swift
+@@ -1,4 +1,5 @@
+ import AppKit
++import GlassUI
+ import SwiftUI
+ 
+ struct WinetricksView: View {
+@@ -26,31 +27,42 @@ struct WinetricksView: View {
+         VStack(alignment: .leading, spacing: 0) {
+             if let failure = loadFailed {
+                 failureView(failure)
++                    .transition(.blurReplace)
+             } else if verbs.isEmpty {
+                 ProgressView {
+                     Text(downloadLabel ?? String(localized: "Preparing"))
++                        .contentTransition(.opacity)
+                 }
+                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                 .padding(20)
++                .transition(.opacity)
+             } else {
+-                Text(verbatim: "Winetricks")
+-                    .font(.headline)
+-                    .padding([.top, .horizontal], 20)
++                HStack(spacing: 12) {
++                    GlassIcon(symbol: "wrench.and.screwdriver", size: 36)
++                        .accessibilityHidden(true)
++                    Text(verbatim: "Winetricks")
++                        .font(.title3.weight(.semibold))
++                }
++                .padding([.top, .horizontal], 20)
+                 controls
+                     .padding(.horizontal, 20)
+-                    .padding(.top, 12)
++                    .padding(.top, 14)
+                 table
+                     .padding(.horizontal, 20)
+-                    .padding(.top, 10)
++                    .padding(.top, 12)
+                 if installing {
+                     logView
+                         .padding(.horizontal, 20)
+-                        .padding(.top, 10)
++                        .padding(.top, 12)
++                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                 }
+                 footer
+                     .padding(20)
+             }
+         }
++        .animation(.smooth, value: loadFailed)
++        .animation(.smooth, value: verbs.isEmpty)
++        .animation(.smooth, value: installing)
+         .frame(minWidth: 760, idealWidth: 820, minHeight: 520, idealHeight: 600)
+         .task {
+             model.forgetOutcome()
+@@ -126,17 +138,23 @@ struct WinetricksView: View {
+ 
+     private func failureView(_ failure: String) -> some View {
+         VStack(spacing: 16) {
+-            Image(systemName: "exclamationmark.triangle")
+-                .font(.largeTitle)
+-                .foregroundStyle(.secondary)
++            GlassIcon(symbol: "exclamationmark.triangle", size: 76, tint: .orange)
++                .accessibilityHidden(true)
+             Text(failure)
++                .font(.callout)
+                 .foregroundStyle(.secondary)
+                 .multilineTextAlignment(.center)
+-            HStack {
+-                Button("Cancel") { dismiss() }
+-                    .keyboardShortcut(.cancelAction)
+-                Button("Retry") { Task { await load() } }
+-                    .keyboardShortcut(.defaultAction)
++                .frame(maxWidth: 420)
++                .textSelection(.enabled)
++            GlassEffectContainer(spacing: 10) {
++                HStack(spacing: 10) {
++                    Button("Cancel") { dismiss() }
++                        .keyboardShortcut(.cancelAction)
++                        .buttonStyle(.glass)
++                    Button("Retry") { Task { await load() } }
++                        .keyboardShortcut(.defaultAction)
++                        .buttonStyle(.glassProminent)
++                }
+             }
+         }
+         .frame(maxWidth: .infinity, maxHeight: .infinity)
+@@ -172,9 +190,11 @@ struct WinetricksView: View {
+                     systemImage: ascending ? "arrow.up" : "arrow.down")
+                     .labelStyle(.titleAndIcon)
+             }
++            .menuStyle(.button)
++            .buttonStyle(.glass)
+             .fixedSize()
+-            SearchField(text: $search, prompt: String(localized: "Search"))
+-                .frame(width: 200)
++            GlassSearchField(prompt: String(localized: "Search"), text: $search)
++                .frame(width: 220)
+         }
+         .disabled(installing)
+     }
+@@ -236,7 +256,10 @@ struct WinetricksView: View {
+                 Section("WineD3D") { rowList(wined3d) }
+             }
+         }
+-        .listStyle(.bordered(alternatesRowBackgrounds: true))
++        .listStyle(.inset(alternatesRowBackgrounds: true))
++        .scrollContentBackground(.hidden)
++        .padding(6)
++        .glassEffect(.regular, in: .rect(cornerRadius: 22))
+         .onKeyPress(.space) {
+             toggleSelected()
+             return .handled
+@@ -325,8 +348,8 @@ struct WinetricksView: View {
+                 .padding(8)
+         }
+         .frame(height: 110)
+-        .background(Color(nsColor: .textBackgroundColor))
+-        .overlay(RoundedRectangle(cornerRadius: 1).stroke(Color(nsColor: .separatorColor)))
++        .background(.primary.opacity(0.05), in: .rect(cornerRadius: 16))
++        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.primary.opacity(0.08)))
+     }
+ 
+     private var dismissLabel: String {
+@@ -340,13 +363,21 @@ struct WinetricksView: View {
+ 
+             Spacer(minLength: 12)
+ 
+-            Button(dismissLabel) { dismiss() }
+-                .keyboardShortcut(.cancelAction)
+-                .help(installing ? String(localized: "Winetricks keeps running. The Prefixes window shows when it is done.") : "")
+-            Button("Install") { install() }
+-                .keyboardShortcut(.defaultAction)
+-                .disabled(selectedVerbs.isEmpty || installing || clash != nil)
++            GlassEffectContainer(spacing: 8) {
++                HStack(spacing: 8) {
++                    Button(dismissLabel) { dismiss() }
++                        .keyboardShortcut(.cancelAction)
++                        .buttonStyle(.glass)
++                        .contentTransition(.interpolate)
++                        .help(installing ? String(localized: "Winetricks keeps running. The Prefixes window shows when it is done.") : "")
++                    Button("Install") { install() }
++                        .keyboardShortcut(.defaultAction)
++                        .buttonStyle(.glassProminent)
++                        .disabled(selectedVerbs.isEmpty || installing || clash != nil)
++                }
++            }
+         }
++        .animation(.snappy, value: summary)
+     }
+ 
+     @ViewBuilder
+@@ -418,32 +449,3 @@ struct WinetricksView: View {
+         }
+     }
+ }
+-
+-private struct SearchField: NSViewRepresentable {
+-    @Binding var text: String
+-    let prompt: String
+-
+-    func makeNSView(context: Context) -> NSSearchField {
+-        let field = NSSearchField()
+-        field.placeholderString = prompt
+-        field.delegate = context.coordinator
+-        field.sendsSearchStringImmediately = true
+-        return field
+-    }
+-
+-    func updateNSView(_ field: NSSearchField, context: Context) {
+-        if field.stringValue != text { field.stringValue = text }
+-    }
+-
+-    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+-
+-    final class Coordinator: NSObject, NSSearchFieldDelegate {
+-        let text: Binding<String>
+-        init(text: Binding<String>) { self.text = text }
+-
+-        func controlTextDidChange(_ note: Notification) {
+-            guard let field = note.object as? NSSearchField else { return }
+-            text.wrappedValue = field.stringValue
+-        }
+-    }
+-}
 diff --git a/app/Tests/NotProtonAppTests/SteamBundleTests.swift b/app/Tests/NotProtonAppTests/SteamBundleTests.swift
 index 3584389..fecf88d 100644
 --- a/app/Tests/NotProtonAppTests/SteamBundleTests.swift

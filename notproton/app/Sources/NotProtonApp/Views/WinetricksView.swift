@@ -1,4 +1,5 @@
 import AppKit
+import GlassUI
 import SwiftUI
 
 struct WinetricksView: View {
@@ -26,31 +27,42 @@ struct WinetricksView: View {
         VStack(alignment: .leading, spacing: 0) {
             if let failure = loadFailed {
                 failureView(failure)
+                    .transition(.blurReplace)
             } else if verbs.isEmpty {
                 ProgressView {
                     Text(downloadLabel ?? String(localized: "Preparing"))
+                        .contentTransition(.opacity)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(20)
+                .transition(.opacity)
             } else {
-                Text(verbatim: "Winetricks")
-                    .font(.headline)
-                    .padding([.top, .horizontal], 20)
+                HStack(spacing: 12) {
+                    GlassIcon(symbol: "wrench.and.screwdriver", size: 36)
+                        .accessibilityHidden(true)
+                    Text(verbatim: "Winetricks")
+                        .font(.title3.weight(.semibold))
+                }
+                .padding([.top, .horizontal], 20)
                 controls
                     .padding(.horizontal, 20)
-                    .padding(.top, 12)
+                    .padding(.top, 14)
                 table
                     .padding(.horizontal, 20)
-                    .padding(.top, 10)
+                    .padding(.top, 12)
                 if installing {
                     logView
                         .padding(.horizontal, 20)
-                        .padding(.top, 10)
+                        .padding(.top, 12)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
                 footer
                     .padding(20)
             }
         }
+        .animation(.smooth, value: loadFailed)
+        .animation(.smooth, value: verbs.isEmpty)
+        .animation(.smooth, value: installing)
         .frame(minWidth: 760, idealWidth: 820, minHeight: 520, idealHeight: 600)
         .task {
             model.forgetOutcome()
@@ -126,17 +138,23 @@ struct WinetricksView: View {
 
     private func failureView(_ failure: String) -> some View {
         VStack(spacing: 16) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.largeTitle)
-                .foregroundStyle(.secondary)
+            GlassIcon(symbol: "exclamationmark.triangle", size: 76, tint: .orange)
+                .accessibilityHidden(true)
             Text(failure)
+                .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-            HStack {
-                Button("Cancel") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Button("Retry") { Task { await load() } }
-                    .keyboardShortcut(.defaultAction)
+                .frame(maxWidth: 420)
+                .textSelection(.enabled)
+            GlassEffectContainer(spacing: 10) {
+                HStack(spacing: 10) {
+                    Button("Cancel") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
+                        .buttonStyle(.glass)
+                    Button("Retry") { Task { await load() } }
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.glassProminent)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -172,9 +190,11 @@ struct WinetricksView: View {
                     systemImage: ascending ? "arrow.up" : "arrow.down")
                     .labelStyle(.titleAndIcon)
             }
+            .menuStyle(.button)
+            .buttonStyle(.glass)
             .fixedSize()
-            SearchField(text: $search, prompt: String(localized: "Search"))
-                .frame(width: 200)
+            GlassSearchField(prompt: String(localized: "Search"), text: $search)
+                .frame(width: 220)
         }
         .disabled(installing)
     }
@@ -236,7 +256,10 @@ struct WinetricksView: View {
                 Section("WineD3D") { rowList(wined3d) }
             }
         }
-        .listStyle(.bordered(alternatesRowBackgrounds: true))
+        .listStyle(.inset(alternatesRowBackgrounds: true))
+        .scrollContentBackground(.hidden)
+        .padding(6)
+        .glassEffect(.regular, in: .rect(cornerRadius: 22))
         .onKeyPress(.space) {
             toggleSelected()
             return .handled
@@ -325,8 +348,8 @@ struct WinetricksView: View {
                 .padding(8)
         }
         .frame(height: 110)
-        .background(Color(nsColor: .textBackgroundColor))
-        .overlay(RoundedRectangle(cornerRadius: 1).stroke(Color(nsColor: .separatorColor)))
+        .background(.primary.opacity(0.05), in: .rect(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.primary.opacity(0.08)))
     }
 
     private var dismissLabel: String {
@@ -340,13 +363,21 @@ struct WinetricksView: View {
 
             Spacer(minLength: 12)
 
-            Button(dismissLabel) { dismiss() }
-                .keyboardShortcut(.cancelAction)
-                .help(installing ? String(localized: "Winetricks keeps running. The Prefixes window shows when it is done.") : "")
-            Button("Install") { install() }
-                .keyboardShortcut(.defaultAction)
-                .disabled(selectedVerbs.isEmpty || installing || clash != nil)
+            GlassEffectContainer(spacing: 8) {
+                HStack(spacing: 8) {
+                    Button(dismissLabel) { dismiss() }
+                        .keyboardShortcut(.cancelAction)
+                        .buttonStyle(.glass)
+                        .contentTransition(.interpolate)
+                        .help(installing ? String(localized: "Winetricks keeps running. The Prefixes window shows when it is done.") : "")
+                    Button("Install") { install() }
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.glassProminent)
+                        .disabled(selectedVerbs.isEmpty || installing || clash != nil)
+                }
+            }
         }
+        .animation(.snappy, value: summary)
     }
 
     @ViewBuilder
@@ -415,35 +446,6 @@ struct WinetricksView: View {
         case "dlls": String(localized: "DLLs")
         case "fonts": String(localized: "Fonts")
         default: String(localized: "Settings")
-        }
-    }
-}
-
-private struct SearchField: NSViewRepresentable {
-    @Binding var text: String
-    let prompt: String
-
-    func makeNSView(context: Context) -> NSSearchField {
-        let field = NSSearchField()
-        field.placeholderString = prompt
-        field.delegate = context.coordinator
-        field.sendsSearchStringImmediately = true
-        return field
-    }
-
-    func updateNSView(_ field: NSSearchField, context: Context) {
-        if field.stringValue != text { field.stringValue = text }
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
-
-    final class Coordinator: NSObject, NSSearchFieldDelegate {
-        let text: Binding<String>
-        init(text: Binding<String>) { self.text = text }
-
-        func controlTextDidChange(_ note: Notification) {
-            guard let field = note.object as? NSSearchField else { return }
-            text.wrappedValue = field.stringValue
         }
     }
 }

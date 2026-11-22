@@ -42,6 +42,13 @@ public enum OnlineFixEmbed {
         return controller
     }
 
+    // The same page `viewController(for:)` shows, for hosting it directly in SwiftUI.
+    // Both routes share the one model, so they stay in step.
+    @MainActor
+    public static func view(for screen: Screen) -> AnyView {
+        AnyView(OnlineFixRoot(model: model, screen: screen))
+    }
+
     // Re-reads games.json, the Steam library and the fix's install state.
     @MainActor
     public static func refresh() {
@@ -81,10 +88,12 @@ public enum OnlineFixEmbed {
     @MainActor
     public static func storeInstall(appID: Int, name: String,
                                     folderName: String? = nil,
+                                    confirmed: Bool = false,
                                     progress: @escaping @Sendable (String) -> Void)
         async -> OnlineFixStoreOutcome {
         await model.installFromStore(appID: appID, name: name,
-                                     folderName: folderName, progress: progress)
+                                     folderName: folderName, confirmed: confirmed,
+                                     progress: progress)
     }
 
     @MainActor
@@ -92,13 +101,35 @@ public enum OnlineFixEmbed {
         model.uninstallFromStore(appID: appID)
     }
 
-    /// Starts the game as its own AppID instead of Spacewar (480), which is what
-    /// games on Steam's relay network (SDR) need. Returns false when the game is
-    /// not in My Games, so there is nothing to change.
+    /// What online-fix.me has for a game, for the store card before anything is
+    /// installed: a fix at all, and whether it is the GDK build.
+    public static func probeFix(name: String) async -> (available: Bool, gdk: Bool, folder: String?) {
+        let probe = await FixSource.probe(name: name)
+        return (probe.available, probe.gdk, probe.folder)
+    }
+
+    /// The newest NotProton compatibility tool Steam has installed, so the store
+    /// page can name it when it switches a native game to the Windows build.
+    public static func notProtonTool() -> String? { Steam.notProtonTool() }
+
+    /// Puts the game in My Games and makes Steam start it as Spacewar (480), the
+    /// identity OnlineFix gives a Windows build. No files are written.
     @MainActor
     @discardableResult
-    public static func storeKeepRealAppID(appID: Int, keep: Bool) -> Bool {
-        model.storeSetKeepRealAppID(keep, appID: appID)
+    public static func storeRouteAsSpacewar(appID: Int, name: String, on: Bool)
+        -> OnlineFixStoreStatus {
+        model.storeRouteAsSpacewar(on, appID: appID, name: name)
+    }
+
+    /// Starts the game as its own AppID instead of Spacewar (480), which is what a
+    /// game without an OnlineFix needs when its own code uses Steam's relay. A game
+    /// with an OnlineFix matches players as Spacewar, so it does not need this.
+    /// A game that is not in My Games yet is added first, so the store page can
+    /// offer the choice for any game. Returns false only for an invalid AppID.
+    @MainActor
+    @discardableResult
+    public static func storeKeepRealAppID(appID: Int, name: String = "", keep: Bool) -> Bool {
+        model.storeSetKeepRealAppID(keep, appID: appID, name: name)
     }
 
 }

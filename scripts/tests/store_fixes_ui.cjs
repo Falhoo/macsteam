@@ -40,7 +40,11 @@ function page() {
     const window = { macsteamHubcap: text => sent.push(JSON.parse(text)), addEventListener(n, f) { (events[n] ||= []).push(f); } };
     const head = new Element('head');
     const document = { title: 'Portal 2 on Steam', head,
-        querySelector: () => host, createElement: t => new Element(t),
+        // Only the purchase block is on this fake page: the store's platform icons
+        // would be found here too if every selector answered.
+        querySelector: selector => selector.startsWith('#game_area_purchase')
+            || selector.includes('.game_area_purchase_game:not(') ? host : null,
+        createElement: t => new Element(t),
         getElementById: id => head.children.find(child => child.id === id) || null,
         createTextNode: t => { const n = new Element('#text'); n.textContent = t; return n; } };
     const context = vm.createContext({ window, document, location: new URL('https://store.steampowered.com/app/620/Portal_2/'),
@@ -57,7 +61,8 @@ function page() {
     const card = () => host.children.find(c => c.id === 'macsteam-fixes');
     const buttons = () => card() ? card().querySelectorAll('button') : [];
     const labels = () => buttons().map(b => b.children[0].textContent).sort();
-    const status = () => card().children.find(c => c.role === 'status');
+    // The status line sits inside the card's rows box, so search the whole card.
+    const status = () => card().querySelectorAll('div').find(c => c.role === 'status');
     const focus = () => events.focus.forEach(fn => fn());
     return { sent, answer, buttons, labels, status, focus, host };
 }

@@ -1,5 +1,6 @@
 // Prefix management UI inside NotProton, also see PrefixesModel
 
+import GlassUI
 import SwiftUI
 
 struct PrefixesView: View {
@@ -14,44 +15,49 @@ struct PrefixesView: View {
             if !model.hasLoaded {
                 ProgressView("Looking for prefixes")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .transition(.opacity)
             } else if model.prefixes.isEmpty {
-                ContentUnavailableView(
-                    String(localized: "No Prefixes"),
-                    systemImage: "externaldrive",
-                    description: Text(
-                        String(localized: "A prefix appears here once a Windows game has been launched through NotProton.")
-                    )
+                GlassEmptyState(
+                    symbol: "externaldrive",
+                    title: String(localized: "No Prefixes"),
+                    message: String(localized: "A prefix appears here once a Windows game has been launched through NotProton.")
                 )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.blurReplace)
             } else {
-                table
+                GlassTablePanel { table }
+                    .transition(.opacity)
             }
         }
-        .navigationTitle("Prefixes")
-        .safeAreaInset(edge: .bottom) {
-            if let failed = model.report {
-                report(
-                    StatusRow(
-                        title: String(localized: "Failed"),
-                        value: failed.message,
-                        tone: .bad,
-                        action: failed.settingsPane.map { pane in
-                            StatusAction(label: Remedy.settingsButton) { Remedy.openSettings(pane) }
-                        }
+        .animation(.smooth, value: model.hasLoaded)
+        .animation(.smooth, value: model.prefixes.isEmpty)
+        // macSteam: the window title comes from the host (RootView or macSteam's split view).
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                if let failed = model.report {
+                    ReportBanner(
+                        row: StatusRow(
+                            title: String(localized: "Failed"),
+                            value: failed.message,
+                            tone: .bad,
+                            action: failed.settingsPane.map { pane in
+                                StatusAction(label: Remedy.settingsButton) { Remedy.openSettings(pane) }
+                            }
+                        )
                     )
-                )
-            } else if let outcome = model.outcome {
-                report(
-                    StatusRow(
-                        title: String(localized: "Done"),
-                        value: outcome,
-                        tone: .ok
+                } else if let outcome = model.outcome {
+                    ReportBanner(
+                        row: StatusRow(
+                            title: String(localized: "Done"),
+                            value: outcome,
+                            tone: .ok
+                        )
                     )
-                )
+                }
             }
+            .animation(.smooth, value: model.failure)
+            .animation(.smooth, value: model.outcome)
         }
-        // macSteam + NotProton: shown as a bar inside the pane (was a window toolbar)
-        .safeAreaInset(edge: .top, spacing: 0) { EmbeddedBar { strip } }
+        .pageToolbar { strip } refresh: { refreshButton }
         .task { await model.load() }
         .confirmationDialog(
             PrefixPrompt.deleteTitle(deleting),
@@ -161,7 +167,9 @@ struct PrefixesView: View {
         }
         .disabled(model.selectedPrefix == nil)
         .help("Show the selected prefix in the Finder.")
+    }
 
+    private var refreshButton: some View {
         Button("Refresh", systemImage: "arrow.clockwise") {
             Task { await model.load() }
         }
@@ -373,9 +381,5 @@ struct PrefixesView: View {
     private func single(_ ids: Set<WinePrefix.ID>) -> WinePrefix? {
         guard ids.count == 1, let id = ids.first else { return nil }
         return model.prefixes.first { $0.id == id }
-    }
-
-    private func report(_ row: StatusRow) -> some View {
-        row.padding(10).frame(maxWidth: .infinity, alignment: .leading).background(.bar)
     }
 }

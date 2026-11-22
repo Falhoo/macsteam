@@ -3,7 +3,7 @@ import XCTest
 
 final class LuaToolsFixesTests: XCTestCase {
     @MainActor
-    func testFixDetailSheetFittingWidthIsBounded() {
+    func testFixDetailSheetStartsWithNothingApplied() {
         let game = LuaToolsFixGame(appID: "470220", name: "UNO", headerImage: nil,
                                    fixCount: 1, tags: [])
         let fix = LuaToolsFix(id: "x", title: "x", description: "description",
@@ -18,12 +18,14 @@ final class LuaToolsFixesTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = ConfigStore(configFile: root.appendingPathComponent("config.yaml"),
                                 backupDir: root.appendingPathComponent("backups"))
-        let vc = LuaToolsFixDetailViewController(game: game, detail: detail,
-                                                  installDir: nil, store: store,
-                                                  onConfigChanged: {})
-        _ = vc.view
-        vc.view.layoutSubtreeIfNeeded()
-        XCTAssertLessThanOrEqual(vc.view.fittingSize.width, 900)
+        // The fixes sheet is SwiftUI now, with a fixed 820pt width, so the old AppKit
+        // fitting-width check is replaced by a check of the sheet's starting state.
+        let model = FixesDetailModel(game: game, detail: detail,
+                                     installDir: nil, store: store,
+                                     onConfigChanged: {})
+        XCTAssertFalse(model.isGameInstalled)
+        XCTAssertEqual(model.state(for: fix), .notApplied)
+        XCTAssertFalse(model.isInstalling)
     }
 
     func testListingsDecode() throws {

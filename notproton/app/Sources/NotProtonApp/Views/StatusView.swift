@@ -1,29 +1,22 @@
 // 'Status' view, see SystemStatus for actual logic
 
+import GlassUI
 import SwiftUI
 
 enum StatusTone: Sendable {
     case ok, info, warning, bad, neutral
 
-    var symbol: String {
+    var kind: StatusKind {
         switch self {
-        case .ok: "circle.fill"
-        case .info: "circle"
-        case .warning: "circle.fill"
-        case .bad: "circle.fill"
-        case .neutral: "circle"
+        case .ok: .ok
+        case .info: .inactive
+        case .warning: .warning
+        case .bad: .error
+        case .neutral: .inactive
         }
     }
 
-    var color: Color {
-        switch self {
-        case .ok: .green
-        case .info: .secondary
-        case .warning: .orange
-        case .bad: .red
-        case .neutral: .secondary
-        }
-    }
+    var color: Color { kind.color }
 }
 
 struct StatusAction {
@@ -36,12 +29,7 @@ struct StatusAction {
     let perform: () -> Void
 }
 
-enum StatusMetrics {
-    static let symbolWidth: CGFloat = 10
-    static let symbolSpacing: CGFloat = 8
-    static var textInset: CGFloat { symbolWidth + symbolSpacing }
-}
-
+// One row on a glass card: status dot, title, value and detail, then its controls.
 struct StatusRow: View {
 
     let title: String
@@ -57,42 +45,45 @@ struct StatusRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: StatusMetrics.symbolSpacing) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
                 if let tone {
-                    Image(systemName: tone.symbol)
-                        .font(.system(size: 8))
-                        .foregroundStyle(tone.color)
-                        .frame(width: StatusMetrics.symbolWidth)
+                    StatusDot(kind: tone.kind)
                         .accessibilityHidden(true)
-                } else {
-                    Color.clear.frame(width: StatusMetrics.symbolWidth, height: 1)
                 }
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(title)
-                        .font(.headline)
+                        .font(.body.weight(.medium))
                     if let value {
                         Text(value)
+                            .font(.callout)
                             .foregroundStyle(.secondary)
+                            .lineSpacing(1.5)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .contentTransition(.opacity)
                     }
                     if let detail {
                         Text(detail)
                             .font(.callout)
                             .foregroundStyle(.secondary)
+                            .lineSpacing(1.5)
+                            .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                     }
                 }
             }
 
             if secondaryAction != nil || action != nil || !menu.isEmpty || toggle != nil || trailing != nil {
-                Spacer(minLength: 12)
+                Spacer(minLength: 16)
             }
             if let trailing {
                 Text(trailing)
+                    .font(.callout)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.trailing)
-                    .padding(.trailing, action == nil && menu.isEmpty ? 0 : 8)
+                    .contentTransition(.numericText())
+                    .padding(.trailing, action == nil && menu.isEmpty ? 0 : 12)
             }
             if let toggle {
                 Toggle(title, isOn: toggle)
@@ -111,6 +102,7 @@ struct StatusRow: View {
                     .disabled(!action.isEnabled)
                     .help(action.help ?? "")
                     .accessibilityLabel("\(action.label), \(title)")
+                    .transition(.blurReplace)
             }
             if !menu.isEmpty {
                 Menu {
@@ -120,7 +112,8 @@ struct StatusRow: View {
                         .labelStyle(.iconOnly)
                 }
                 .menuStyle(.button)
-                .buttonStyle(.bordered)
+                .buttonStyle(.glass)
+                .buttonBorderShape(.circle)
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .help("More actions")
@@ -129,7 +122,9 @@ struct StatusRow: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .padding(.vertical, 2)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .contextMenu {
             menuItems([action, secondaryAction].compactMap { $0 } + menu, hidingUnavailable: true)
@@ -148,12 +143,15 @@ struct StatusRow: View {
 
     @ViewBuilder
     private func button(_ action: StatusAction) -> some View {
+        let tint: Color? = action.role == .destructive ? .red : nil
         if action.isProminent {
             Button(action.label, role: action.role, action: action.perform)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.glassProminent)
+                .tint(tint)
         } else {
             Button(action.label, role: action.role, action: action.perform)
-                .buttonStyle(.bordered)
+                .buttonStyle(.glass)
+                .tint(tint)
         }
     }
 }
@@ -168,14 +166,16 @@ struct StatusView: View {
         Group {
             if let snapshot = status.snapshot {
                 statusForm(snapshot)
+                    .transition(.opacity)
             } else {
                 ProgressView("Checking")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .transition(.opacity)
             }
         }
-        .navigationTitle("Status")
-        // macSteam + NotProton: shown as a bar inside the pane (was a window toolbar)
-        .safeAreaInset(edge: .top, spacing: 0) { EmbeddedBar { refreshButton } }
+        .animation(.smooth, value: status.snapshot == nil)
+        // macSteam: the window title comes from the host (RootView or macSteam's split view).
+        .pageToolbar { refreshButton }
         .confirmationDialog(
             String(localized: "Block Steam client updates?"),
             isPresented: asking(.blockUpdates),
@@ -276,87 +276,113 @@ struct StatusView: View {
         }
     }
 
+    private var hasBanner: Bool {
+        status.failure != nil || status.outcome != nil
+            || status.templateCleanupFailure != nil || status.activity != nil
+    }
+
     private func form(_ snapshot: StatusSnapshot) -> some View {
-        Form {
-            if let failure = status.failure {
-                StatusRow(
-                    title: String(localized: "Failed"),
-                    value: failure,
-                    tone: .bad,
-                    action: status.failureRemedy?.settingsPane.map { pane in
-                        StatusAction(label: Remedy.settingsButton) {
-                            Remedy.openSettings(pane)
-                        }
-                    }
-                )
-            } else if let outcome = status.outcome {
-                StatusRow(title: String(localized: "Done"), value: outcome, tone: .ok)
+        PageScroll(maxWidth: 760) {
+            if hasBanner {
+                banners
+                    .transition(.blurReplace)
             }
 
-            if let failure = status.templateCleanupFailure {
-                StatusRow(title: String(localized: "Template cleanup incomplete"), value: failure, tone: .warning)
-            }
-
-            if let activity = status.activity {
-                HStack(spacing: 10) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text(activity)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Section("Steam") {
-                StatusRow(
-                    title: String(localized: "Location"),
-                    value: SupportPaths.Steam.app.path(percentEncoded: false),
-                    action: StatusAction(
-                        label: String(localized: "Choose\u{2026}"),
-                        help: String(localized: "Use a copy of Steam from another folder or drive."),
-                        isEnabled: status.isIdle
-                    ) { Task { await status.chooseSteam() } }
-                )
-                steamRow(snapshot.steam, payload: snapshot.payload)
-                if snapshot.steamRunning {
+            GlassSection(title: String(localized: "Steam")) {
+                DividedRows {
                     StatusRow(
-                        title: String(localized: "Steam is running"),
-                        value: String(localized: "Close Steam before continuing."),
-                        tone: .info
+                        title: String(localized: "Location"),
+                        value: SupportPaths.Steam.app.path(percentEncoded: false),
+                        action: StatusAction(
+                            label: String(localized: "Choose\u{2026}"),
+                            help: String(localized: "Use a copy of Steam from another folder or drive."),
+                            isEnabled: status.isIdle
+                        ) { Task { await status.chooseSteam() } }
+                    )
+                    steamRow(snapshot.steam, payload: snapshot.payload)
+                    if snapshot.steamRunning {
+                        StatusRow(
+                            title: String(localized: "Steam is running"),
+                            value: String(localized: "Close Steam before continuing."),
+                            tone: .info
+                        )
+                        .transition(.opacity)
+                    }
+                    updateBlockRow(snapshot.updateBlocked)
+                    StatusRow(
+                        title: String(localized: "Controller permission"),
+                        value: String(localized: "Clear Steam's controller permission so macOS asks for it again."),
+                        action: StatusAction(
+                            label: String(localized: "Reset"),
+                            isEnabled: status.isIdle
+                        ) { Task { await status.resetControllerPermission() } }
                     )
                 }
-                updateBlockRow(snapshot.updateBlocked)
-                StatusRow(
-                    title: String(localized: "Controller permission"),
-                    value: String(localized: "Clear Steam's controller permission so macOS asks for it again."),
-                    action: StatusAction(
-                        label: String(localized: "Reset"),
-                        isEnabled: status.isIdle
-                    ) { Task { await status.resetControllerPermission() } }
-                )
             }
 
-            Section {
-                crossOverSection(snapshot)
-            } header: {
-                Text("CrossOver")
-            } footer: {
-                HStack {
-                    Spacer()
-                    Button("Add CrossOver\u{2026}") { Task { await status.addCrossOver() } }
-                        .disabled(!status.isIdle)
-                        .help("Add a copy of CrossOver from another folder.")
+            VStack(alignment: .trailing, spacing: 12) {
+                GlassSection(title: String(localized: "CrossOver")) {
+                    crossOverSection(snapshot)
                 }
+                Button("Add CrossOver\u{2026}", systemImage: "plus") { Task { await status.addCrossOver() } }
+                    .buttonStyle(.glass)
+                    .disabled(!status.isIdle)
+                    .help("Add a copy of CrossOver from another folder.")
             }
 
             componentsSection(snapshot.payload)
 
             dangerSection
         }
-        .formStyle(.grouped)
+        .animation(.smooth, value: status.failure)
+        .animation(.smooth, value: status.outcome)
+        .animation(.smooth, value: status.activity)
+        .animation(.smooth, value: status.templateCleanupFailure)
+        .animation(.snappy, value: snapshot.steamRunning)
+        .animation(.snappy, value: snapshot.updateBlocked)
+        .animation(.snappy, value: status.crossOverRows)
+        .animation(.snappy, value: status.runnerSizes)
+        .animation(.snappy, value: status.bridgeCopyBytes)
+    }
+
+    // Failed or Done, a template cleanup warning, and the task that is running.
+    private var banners: some View {
+        VStack(spacing: 12) {
+            if let failure = status.failure {
+                StatusBanner(
+                    icon: .symbol("xmark", .red),
+                    title: String(localized: "Failed"),
+                    message: failure
+                ) {
+                    if let pane = status.failureRemedy?.settingsPane {
+                        Button(Remedy.settingsButton) { Remedy.openSettings(pane) }
+                            .buttonStyle(.glass)
+                    }
+                }
+                .transition(.blurReplace)
+            } else if let outcome = status.outcome {
+                StatusBanner(icon: .symbol("checkmark", .green), title: String(localized: "Done"), message: outcome)
+                    .transition(.blurReplace)
+            }
+
+            if let failure = status.templateCleanupFailure {
+                StatusBanner(
+                    icon: .symbol("exclamationmark.triangle", .orange),
+                    title: String(localized: "Template cleanup incomplete"),
+                    message: failure
+                )
+                .transition(.blurReplace)
+            }
+
+            if let activity = status.activity {
+                StatusBanner(icon: .progress, title: activity)
+                    .transition(.blurReplace)
+            }
+        }
     }
 
     private var dangerSection: some View {
-        Section {
+        GlassSection {
             StatusRow(
                 title: String(localized: "Repair Steam"),
                 value: String(localized: "Restore Steam to its original state."),
@@ -366,6 +392,7 @@ struct StatusView: View {
                     isEnabled: status.isIdle
                 ) { status.pendingConfirmation = .replaceSteam }
             )
+            RowDivider()
             StatusRow(
                 title: String(localized: "Remove Everything"),
                 value: String(localized: "Remove NotProton and restore Steam to its original state."),
@@ -531,6 +558,7 @@ struct StatusView: View {
         }
         let tools = SupportedRunners.tools(for: snapshot.installedRunners)
         ForEach(rows) { row in
+            if row.id != rows.first?.id { RowDivider() }
             StatusRow(
                 title: row.title,
                 value: crossOverValue(row),
@@ -541,15 +569,16 @@ struct StatusView: View {
                 menu: crossOverMenu(row)
             )
             .background {
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: 20)
                     .fill(Color.accentColor.opacity(0.2))
-                    .padding(-6)
+                    .padding(6)
                     .opacity(status.highlightedRow == row.id ? 1 : 0)
             }
             .animation(.easeInOut(duration: 0.3), value: status.highlightedRow == row.id)
             .id(row.id)
         }
         if case .ready = snapshot.runner, !snapshot.payload.missing(origin: .patched).isEmpty {
+            RowDivider()
             StatusRow(
                 title: String(localized: "Compatibility Tool"),
                 value: String(localized: "Patched components are missing."),
@@ -710,11 +739,11 @@ struct StatusView: View {
     @ViewBuilder
     private func componentsSection(_ payload: PayloadState) -> some View {
         if let problem = payload.manifestProblem {
-            Section("NotProton Components") {
+            GlassSection(title: String(localized: "NotProton Components")) {
                 StatusRow(title: String(localized: "Components"), value: String(localized: "Component list unreadable."), tone: .bad, detail: problem)
             }
         } else if payload.isComplete {
-            Section("NotProton Components") {
+            GlassSection(title: String(localized: "NotProton Components")) {
                 StatusRow(
                     title: String(localized: "Components"), value: String(localized: "Ready."), tone: .ok,
                     trailing: status.bridgeCopyBytes > 0
@@ -722,28 +751,33 @@ struct StatusView: View {
                 )
             }
         } else if payload.isEmpty {
-            Section("NotProton Components") {
+            GlassSection(title: String(localized: "NotProton Components")) {
                 StatusRow(title: String(localized: "Components"), value: String(localized: "Not yet deployed."), tone: .neutral)
             }
         } else {
-            Section("NotProton Components") {
-                if !payload.missing.isEmpty {
-                    let names = payload.missing.map(\.path).joined(separator: ", ")
-                    StatusRow(
-                        title: String(localized: "Missing."),
-                        value: names,
-                        tone: .bad,
-                        action: payload.missing.contains(where: { $0.origin.isFetchable })
-                            ? fetchAction() : nil
-                    )
-                }
-                if !payload.overlayShimPresent {
-                    StatusRow(title: String(localized: "Overlay shim"), value: String(localized: "Missing."), tone: .bad)
-                }
-                if payload.signatureDatabase == nil {
-                    StatusRow(title: String(localized: "Signature database"), value: String(localized: "Missing."), tone: .bad)
-                }
+            GlassSection(title: String(localized: "NotProton Components")) {
+                DividedRows { missingComponents(payload) }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func missingComponents(_ payload: PayloadState) -> some View {
+        if !payload.missing.isEmpty {
+            let names = payload.missing.map(\.path).joined(separator: ", ")
+            StatusRow(
+                title: String(localized: "Missing."),
+                value: names,
+                tone: .bad,
+                action: payload.missing.contains(where: { $0.origin.isFetchable })
+                    ? fetchAction() : nil
+            )
+        }
+        if !payload.overlayShimPresent {
+            StatusRow(title: String(localized: "Overlay shim"), value: String(localized: "Missing."), tone: .bad)
+        }
+        if payload.signatureDatabase == nil {
+            StatusRow(title: String(localized: "Signature database"), value: String(localized: "Missing."), tone: .bad)
         }
     }
 }

@@ -373,6 +373,49 @@ enum FixSource {
         return Array(sorted.prefix(8))
     }
 
+    // MARK: - Probe
+
+    /// What a store page can know about a game before anything is installed: whether
+    /// online-fix.me has a fix for it, and whether that fix is the Microsoft Store
+    /// (GDK) build, which cannot run under Wine. One or two requests, cached by name.
+    struct Probe: Sendable {
+        let available: Bool
+        let gdk: Bool
+        let folder: String?
+    }
+
+    private static var probes: [String: Probe] = [:]
+
+    static func probe(name: String) async -> Probe {
+        let key = normalize(name)
+        if let known = probes[key] { return known }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return Probe(available: false, gdk: false, folder: nil) }
+
+        for variant in nameVariants(trimmed) {
+            let url = folderURL(named: variant)
+            guard let body = try? await html(url),
+                  let listing = Optional(entries(in: body, base: url)), !listing.isEmpty else { continue }
+            var archives: [Entry] = []
+            if let fixFolder = listing.first(where: {
+                $0.isDirectory && normalize($0.name).contains("fix")
+            }), let innerHTML = try? await html(fixFolder.url) {
+                archives = entries(in: innerHTML, base: fixFolder.url)
+            }
+            archives += listing.filter {
+                !$0.isDirectory && normalize($0.name).contains("fix")
+            }
+            let result = Probe(available: !archives.isEmpty,
+                               gdk: archives.contains { $0.name.lowercased().contains("gdk") },
+                               folder: variant)
+            probes[key] = result
+            return result
+        }
+        let empty = Probe(available: false, gdk: false, folder: nil)
+        probes[key] = empty
+        return empty
+    }
+
     // MARK: - Archives
 
     static func isArchive(_ name: String) -> Bool {
