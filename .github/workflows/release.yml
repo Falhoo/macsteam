@@ -40,10 +40,12 @@ jobs:
           (cd notproton/app && swift test)
 
       - name: Package DMG
+        # The layout lives in scripts/make-dmg.sh: app on the left, Applications
+        # on the right, over dmg/background.png.
         run: |
-          APP="dist/macSteam.app"
+          brew install create-dmg
           DMG="macSteam-${{ inputs.version }}.dmg"
-          hdiutil create -volname "macSteam" -srcfolder "$APP" -ov -format UDZO "$DMG"
+          ./scripts/make-dmg.sh "$DMG"
 
       - name: Create GitHub Release
         env:

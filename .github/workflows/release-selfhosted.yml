@@ -43,11 +43,11 @@ jobs:
       - name: Package DMG
         env:
           VERSION: ${{ inputs.version }}
+        # The layout lives in scripts/make-dmg.sh: app on the left, Applications
+        # on the right, over dmg/background.png.
         run: |
-          APP="dist/macSteam.app"
-          DMG="macSteam-${VERSION}.dmg"
-          rm -f "$DMG"
-          hdiutil create -volname "macSteam" -srcfolder "$APP" -ov -format UDZO "$DMG"
+          if ! command -v create-dmg >/dev/null 2>&1; then brew install create-dmg; fi
+          ./scripts/make-dmg.sh "macSteam-${VERSION}.dmg"
 
       - name: Create GitHub Release
         env:
