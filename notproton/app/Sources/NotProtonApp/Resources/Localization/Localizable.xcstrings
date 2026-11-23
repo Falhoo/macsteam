@@ -3123,6 +3123,9 @@
         }
       }
     },
+    "Choose Install NotProton Anyway only if you plan to add CrossOver yourself." : {
+      "shouldTranslate" : false
+    },
     "Choose a Windows program to run in %@." : {
       "localizations" : {
         "de" : {
@@ -4088,6 +4091,12 @@
       }
     },
     "CrossOver is already in /Applications." : {
+      "shouldTranslate" : false
+    },
+    "CrossOver is not installed." : {
+      "shouldTranslate" : false
+    },
+    "CrossOver is paid software with a 14-day trial. The first button downloads 26.3 from CodeWeavers, installs it into /Applications, and replaces the tie.pub and licence files it ships with. That download is close to a gigabyte, and macOS asks for your administrator password." : {
       "shouldTranslate" : false
     },
     "CrossOver itself is not removed." : {
@@ -5334,6 +5343,9 @@
         }
       }
     },
+    "Install NotProton Anyway" : {
+      "shouldTranslate" : false
+    },
     "Install NotProton into Steam." : {
       "localizations" : {
         "de" : {
@@ -6541,6 +6553,9 @@
         }
       }
     },
+    "No usable copy of CrossOver was found." : {
+      "shouldTranslate" : false
+    },
     "None" : {
       "localizations" : {
         "de" : {
@@ -7019,6 +7034,9 @@
           }
         }
       }
+    },
+    "NotProton runs Windows games through CrossOver. Installing it without CrossOver finishes, but nothing can start afterwards." : {
+      "shouldTranslate" : false
     },
     "NotProton successfully installed." : {
       "localizations" : {

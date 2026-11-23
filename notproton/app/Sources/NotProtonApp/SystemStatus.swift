@@ -198,6 +198,7 @@ final class SystemStatus {
 
     func requestInstall() async {
         guard canInstall else { return }
+        guard await confirmCrossOverForInstall() else { return }
         checkingLicense = true
         defer { checkingLicense = false }
         if let question = Self.activationQuestion(
@@ -208,6 +209,39 @@ final class SystemStatus {
             pendingConfirmation = question
         } else {
             await installIntoSteam()
+        }
+    }
+
+    /// Without a copy of CrossOver it can use, NotProton installs and then has
+    /// nothing to run a Windows game through. This asks first, and can hand off
+    /// to the CrossOver installer.
+    private func confirmCrossOverForInstall() async -> Bool {
+        let hasUsable = snapshot?.crossOver.contains(where: \.isUsable) == true
+        guard !hasUsable else { return true }
+
+        let alert = NSAlert()
+        alert.messageText = snapshot?.crossOver.isEmpty == true
+            ? String(localized: "CrossOver is not installed.")
+            : String(localized: "No usable copy of CrossOver was found.")
+        alert.informativeText = [
+            String(localized: "NotProton runs Windows games through CrossOver. Installing it without CrossOver finishes, but nothing can start afterwards."),
+            String(localized: "CrossOver is paid software with a 14-day trial. The first button downloads 26.3 from CodeWeavers, installs it into /Applications, and replaces the tie.pub and licence files it ships with. That download is close to a gigabyte, and macOS asks for your administrator password."),
+            String(localized: "Choose Install NotProton Anyway only if you plan to add CrossOver yourself."),
+        ].joined(separator: "\n\n")
+        alert.addButton(withTitle: String(localized: "Install CrossOver…"))
+        alert.addButton(withTitle: String(localized: "Install NotProton Anyway"))
+        alert.addButton(withTitle: String(localized: "Cancel"))
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            await installCrossOver()
+            // A finished install puts a supported copy in /Applications, and the
+            // refresh inside installCrossOver picks it up.
+            return snapshot?.crossOver.contains(where: \.isUsable) == true
+        case .alertSecondButtonReturn:
+            return true
+        default:
+            return false
         }
     }
 
