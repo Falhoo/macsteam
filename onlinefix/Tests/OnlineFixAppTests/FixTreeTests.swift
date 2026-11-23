@@ -21,6 +21,10 @@ struct FixTreeTests {
         try Data(text.utf8).write(to: url)
     }
 
+    private func contents(_ url: URL) -> String {
+        (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    }
+
     private let apiPath = "Engine/Binaries/ThirdParty/Steamworks/Steamv16/Win64/steam_api64.dll"
     private let binPath = "Ride/Binaries/Win64"
 
@@ -31,7 +35,7 @@ struct FixTreeTests {
         try write("[Main]\n", to: fix.appendingPathComponent("\(binPath)/OnlineFix.ini"))
         try write("https://online-fix.me", to: fix.appendingPathComponent("\(binPath)/OnlineFix.url"))
         try write("onlinefix core", to: fix.appendingPathComponent("\(binPath)/OnlineFix64.dll"))
-        try write("dlllist", to: fix.appendingPathComponent("\(binPath)/dlllist.txt"))
+        try write("OnlineFix64.dll\n", to: fix.appendingPathComponent("\(binPath)/dlllist.txt"))
         try write("proxy", to: fix.appendingPathComponent("\(binPath)/winmm.dll"))
         return fix
     }
@@ -43,28 +47,33 @@ struct FixTreeTests {
         return game
     }
 
+    /// The loader goes beside the executable and the Steam API DLL where the game
+    /// already loads one, with the game's own copy kept.
     @Test
-    func installsTheWholeRealFix() throws {
+    func theRealFixLandsWhereTheGameLoadsIt() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let fix = try rideFix(in: root)
         let game = try rideGame(in: root)
 
-        let result = try FixInstaller.installExtracted(from: fix, into: game) { _ in }
+        let scan = GameScan.read(folder: game, appID: 1, name: "Ride")
+        #expect(scan.launchFolder.path.hasSuffix(binPath))
+        let plan = FixPlan.build(appID: 1, name: "Ride", scan: scan,
+                                 package: FixPackage.read(root: fix))
+        _ = try FixApply.apply(plan, appID: 1, folder: game)
 
-        #expect(result.files.count == 6)
         let fm = FileManager.default
         for name in ["OnlineFix64.dll", "OnlineFix.ini", "OnlineFix.url", "dlllist.txt", "winmm.dll"] {
             #expect(fm.fileExists(atPath: game.appendingPathComponent("\(binPath)/\(name)").path),
                     "\(name) must land beside the game's executable")
         }
-        #expect(fm.fileExists(atPath: game.appendingPathComponent(apiPath).path))
-        #expect(fm.fileExists(atPath: game.appendingPathComponent(apiPath + ".onlinefix-backup").path))
+        let api = game.appendingPathComponent(apiPath)
+        #expect(contents(api) == "fixed api")
+        #expect(contents(api.appendingPathExtension("onlinefix-backup")) == "original api")
     }
 
-    /// A readme (or any other stray file) at the archive root used to make every
-    /// path inside the tree unusable, so the loader DLLs were silently dropped and
-    /// the game could not load the patched Steam API DLL.
+    /// A readme at the archive root must not disturb the tree: the loader files and
+    /// the Steam API DLL still go where the game looks for them.
     @Test
     func aStrayRootFileDoesNotDropTheTree() throws {
         let root = try temporaryDirectory()
@@ -73,12 +82,14 @@ struct FixTreeTests {
         try write("read me", to: fix.appendingPathComponent("ReadMe.txt"))
         let game = try rideGame(in: root)
 
-        let result = try FixInstaller.installExtracted(from: fix, into: game) { _ in }
+        let scan = GameScan.read(folder: game, appID: 1, name: "Ride")
+        let plan = FixPlan.build(appID: 1, name: "Ride", scan: scan,
+                                 package: FixPackage.read(root: fix))
+        _ = try FixApply.apply(plan, appID: 1, folder: game)
 
         let fm = FileManager.default
         #expect(fm.fileExists(atPath: game.appendingPathComponent("\(binPath)/OnlineFix64.dll").path))
         #expect(fm.fileExists(atPath: game.appendingPathComponent("\(binPath)/winmm.dll").path))
-        #expect(fm.fileExists(atPath: game.appendingPathComponent(apiPath).path))
-        #expect(result.files.contains { $0.hasSuffix("winmm.dll") })
+        #expect(contents(game.appendingPathComponent(apiPath)) == "fixed api")
     }
 }

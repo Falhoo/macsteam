@@ -45,6 +45,12 @@ enum Paths {
         steamApp.appendingPathComponent("Contents/MacOS/onlinefix.dylib")
     }
 
+    /// macSteam's own config, which carries the `OnlineFix:` routing section the
+    /// dylib reads at each game's launch.
+    static var hostConfigFile: URL {
+        home.appendingPathComponent("Library/Application Support/macsteam/config.yaml")
+    }
+
     static var steamInfoPlist: URL {
         steamApp.appendingPathComponent("Contents/Info.plist")
     }
@@ -57,6 +63,11 @@ enum Paths {
 // MARK: - Hashing
 
 enum Hash {
+    static func sha512(_ url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return SHA512.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     static func sha256(_ url: URL) -> String? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()

@@ -94,7 +94,7 @@ enum FixCompatibility {
         if found.contains(where: { gdkFiles.contains($0) }) {
             return FixCompatibilityCheck(
                 verdict: .unsupported,
-                title: "games gonna crash yo, GDK and allat",
+                title: "This game is like one of the few that aint gonna connect, try if you want ig tho",
                 reason: "\(name) ships the Microsoft Store (GDK) runtime. OnlineFix's only "
                     + "package for it needs the Xbox GDK runtime (xgameruntime.dll), which does "
                     + "not exist under Wine, and LuaTools patches Steam rather than the game's "

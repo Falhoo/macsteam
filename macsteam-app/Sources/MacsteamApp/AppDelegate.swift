@@ -19,6 +19,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updaterManager.start()
         NotProtonEmbed.start()
 
+        // A game that went back to a native launch keeps NotProton's Windows-only
+        // launch options, and Steam's macOS client cannot run them: the game stops
+        // with "OS error 260" and no other sign of why. They are cleared here, at
+        // the one moment Steam is not holding its own copy of them.
+        Task { await LaunchOptionsRepair.run() }
+
         buildMenu()
         observeFixesHandoff()
         observeOnlineFixHandoff()

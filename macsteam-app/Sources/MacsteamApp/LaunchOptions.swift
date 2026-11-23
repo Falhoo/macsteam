@@ -37,6 +37,67 @@ enum LaunchOptions {
         return words.joined(separator: " ")
     }
 
+    // MARK: - Every game at once
+
+    /// Every app whose launch options carry a Windows-only prefix while no compat
+    /// tool is mapped for it: each of those cannot start natively.
+    static func staleApps() -> [Int] {
+        var ids = Set<Int>()
+        for file in configFiles() {
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            for id in staleAppIDs(in: text) where !isMappedToCompatTool(appID: id) {
+                ids.insert(id)
+            }
+        }
+        return ids.sorted()
+    }
+
+    /// The apps in one file's text that carry such a prefix.
+    static func staleAppIDs(in text: String) -> [Int] {
+        appBlocks(in: text).compactMap { block in
+            guard let options = quotedValue("LaunchOptions", in: String(text[block.range])),
+                  hasPrefixAssignments(options) else { return nil }
+            return block.appID
+        }
+    }
+
+    /// That text with these apps' launch options cleared.
+    static func cleared(_ appIDs: [Int], in text: String) -> String {
+        let wanted = Set(appIDs)
+        var result = text
+        // Back to front, so clearing one value cannot move a block still to do.
+        for block in appBlocks(in: result).reversed() where wanted.contains(block.appID) {
+            let body = result[block.range]
+            guard let key = body.range(of: "\"LaunchOptions\""),
+                  let open = body[key.upperBound...].firstIndex(of: "\""),
+                  let close = body[body.index(after: open)...].firstIndex(of: "\"")
+            else { continue }
+            let value = String(body[body.index(after: open)..<close])
+            let clean = stripped(value)
+            guard clean != value else { continue }
+            result.replaceSubrange(body.index(after: open)..<close, with: clean)
+        }
+        return result
+    }
+
+    /// Writes the cleared options into Steam's own file, and reports the apps
+    /// changed. Steam must not be running: the client writes its own copy of this
+    /// file when it quits, which would put the prefixes back.
+    @discardableResult
+    static func clear(_ appIDs: [Int]) -> [Int] {
+        guard !appIDs.isEmpty else { return [] }
+        let wanted = Set(appIDs)
+        var done = Set<Int>()
+        for file in configFiles() {
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            let updated = cleared(appIDs, in: text)
+            guard updated != text else { continue }
+            guard (try? updated.write(to: file, atomically: true, encoding: .utf8)) != nil else { continue }
+            done.formUnion(staleAppIDs(in: text).filter { wanted.contains($0) })
+        }
+        return done.sorted()
+    }
+
     // MARK: - Steam's files
 
     private static var userdata: URL {
@@ -109,6 +170,35 @@ enum LaunchOptions {
 
     private static func appBlock(in text: String, appID: Int) -> String? {
         block(named: "\(appID)", in: text)
+    }
+
+    /// One `"<appid>" { ... }` of the file, with where it sits in the text.
+    struct AppBlock {
+        let appID: Int
+        let range: Range<String.Index>
+    }
+
+    /// Every `"<appid>" { ... }` the text holds, in the order it holds them. Keys
+    /// that are not a number are skipped, so only app sections come back.
+    static func appBlocks(in text: String) -> [AppBlock] {
+        var out: [AppBlock] = []
+        var index = text.startIndex
+        while let quote = text[index...].firstIndex(of: "\"") {
+            guard let close = text[text.index(after: quote)...].firstIndex(of: "\"") else { break }
+            let key = text[text.index(after: quote)..<close]
+            var after = text.index(after: close)
+            while after < text.endIndex, text[after].isWhitespace {
+                after = text.index(after: after)
+            }
+            if !key.isEmpty, key.allSatisfy(\.isNumber), after < text.endIndex,
+               text[after] == "{", let end = matchingBrace(in: text, from: after),
+               let appID = Int(key) {
+                out.append(AppBlock(appID: appID,
+                                    range: after..<text.index(after: end)))
+            }
+            index = text.index(after: close)
+        }
+        return out
     }
 
     /// The `{ ... }` that follows a quoted key, brace-matched.

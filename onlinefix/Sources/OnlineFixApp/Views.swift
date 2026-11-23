@@ -580,6 +580,10 @@ struct PatchSheetView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
 
+    /// The Photon app id typed in, and the one found in the game it replaces.
+    @State private var photonReplacement = ""
+    @State private var photonSource = ""
+
     private var index: Int? { model.games.firstIndex { $0.id == gameID } }
     private var game: ManagedGame? { index.map { model.games[$0] } }
 
@@ -652,7 +656,13 @@ struct PatchSheetView: View {
                   },
                   secondaryButton: .cancel())
         }
-        .onAppear { model.fixGameID = gameID }
+        .onAppear {
+            model.fixGameID = gameID
+            // Read the game's files for the Photon app id they carry. A fix install has
+            // done this already; the scan is skipped when the folder was read before.
+            model.scanPhotonIDs(appID: gameID, name: game?.name ?? "")
+        }
+
     }
 
     private var missingGame: some View {
@@ -725,6 +735,14 @@ struct PatchSheetView: View {
                     RowDivider()
                     repoPhotonRow(game, binding)
                 }
+                if game.id == 2644470 {
+                    RowDivider()
+                    picoPark2Row(game, binding)
+                }
+                if showsPhotonRow(game) {
+                    RowDivider()
+                    photonRow(game)
+                }
             }
         }
     }
@@ -744,7 +762,7 @@ struct PatchSheetView: View {
 
     private func keepRealAppIDRow(_ game: ManagedGame, _ binding: Binding<ManagedGame>) -> some View {
         let relay = usesSteamRelayNetwork(game)
-        let required = spacewarRequired(game, usesSteamRelay: relay)
+        let needsReal = needsRealAppID(game, usesSteamRelay: relay)
         let keepReal = binding.keepRealAppID.wrappedValue
 
         return VStack(alignment: .leading, spacing: 12) {
@@ -752,12 +770,10 @@ struct PatchSheetView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Keep real AppID")
                         .font(.body.weight(.medium))
-                    Text(required
-                         ? "Starts the game as its own AppID instead of Spacewar (480). "
-                           + "This game's OnlineFix needs Spacewar to match players, so leave it off."
-                         : "Starts the game as its own AppID instead of Spacewar (480). "
-                           + "Turn this on for games whose online play uses Steam's relay "
-                           + "servers: remapped, they never get a relay and multiplayer waits forever.")
+                    Text("Starts Steam as the game itself instead of Spacewar (480). "
+                         + "The game still matches players as Spacewar, so this only "
+                         + "changes what Steam's client reports: its playtime, its store "
+                         + "data, and whether it can hand the game a Steam relay.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .lineSpacing(1.5)
@@ -767,20 +783,14 @@ struct PatchSheetView: View {
                 persistToggle("Keep real AppID", binding.keepRealAppID)
                     .labelsHidden()
             }
-            if required {
-                note(keepReal
-                     ? "This game's OnlineFix matches players as Spacewar (480). "
-                       + "Keep real AppID is on, so it will not connect: turn it off "
-                       + "and launch the game again."
-                     : "Runs as Spacewar (480), which is what this game's OnlineFix "
-                       + "needs. Leave Keep real AppID off for it to connect.",
-                     warning: keepReal)
-                    .transition(.blurReplace)
-            } else if relay {
-                note("In order to use OnlineFix for this game, we recommend you use "
-                     + "Keep real AppID, because the game uses the Steam relay servers, "
-                     + "which aren't compatible with Spacewar (AppID 480).",
-                     warning: true)
+            if relay {
+                note(needsReal && !keepReal
+                     ? "This game plays over Steam's relay servers, and Steam only gives "
+                       + "a relay to the game's own AppID. Turn Keep real AppID on, or "
+                       + "multiplayer waits on the relay and never joins."
+                     : "This game plays over Steam's relay servers. Keep real AppID is "
+                       + "what lets Steam hand it a relay, so leave it on.",
+                     warning: !keepReal)
                     .transition(.blurReplace)
             }
         }
@@ -795,6 +805,144 @@ struct PatchSheetView: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 15)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// PICO PARK 2's online play runs on Photon, so the AppID routing above does nothing
+    /// for it. The fix for a Mac build is made to the game's own files instead, which is
+    /// what this switch does.
+    private func picoPark2Row(_ game: ManagedGame, _ binding: Binding<ManagedGame>) -> some View {
+        let state = PicoPark2Patch.state(in: Store.gameFolder(for: game.id, name: game.name))
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("PICO PARK 2 Photon fix")
+                        .font(.body.weight(.medium))
+                    Text("This game's online play runs on Photon, not Steam, so AppID routing "
+                         + "cannot make it connect. The fix belongs in the game's own files: its "
+                         + "Photon app id is swapped for OnlineFix's, and the session limit that "
+                         + "holds it to one player is lifted. macSteam applies it as soon as the "
+                         + "fix is installed, and again after a game update. Only the Mac build "
+                         + "can be patched this way; a Windows build needs the fix's own DLLs.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(1.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 16)
+                Toggle("PICO PARK 2 Photon fix", isOn: Binding(
+                    get: { binding.wrappedValue.picoPark2Photon || state.isPatched },
+                    set: { model.setPicoPark2Photon($0, game: game) }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .disabled(!state.canPatch)
+            }
+            if let message = state.message {
+                note(message, warning: true)
+                    .transition(.blurReplace)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 15)
+        .animation(.smooth(duration: 0.25), value: state.isPatched)
+    }
+
+    /// A Photon game's own app id, read out of its files when the fix was installed.
+    /// Most Photon games need that id swapped for the one the players are on, and this
+    /// is where the patch for a game no fix covers yet comes from: the id is found in
+    /// the game's own files and replaced in place, the untouched file kept beside it.
+    private func photonRow(_ game: ManagedGame) -> some View {
+        let found = model.photonScans[game.id] ?? []
+        let chosen = found.first { $0.id == photonSource } ?? found.first
+        let scanning = model.photonScanning.contains(game.id)
+        let typed = photonReplacement.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fits = chosen.map { PhotonPatch.kind(of: typed) == $0.kind } ?? false
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Photon app id")
+                        .font(.body.weight(.medium))
+                    Text("This game's online play runs on Photon, and the app it joins is "
+                         + "written in its own files, so no AppID setting changes who it "
+                         + "meets. Paste the id the players are on and it is swapped for "
+                         + "the one the game carries.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(1.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 16)
+                if scanning {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+            if found.count > 1 {
+                Picker("App id to replace", selection: Binding(
+                    get: { chosen?.id ?? "" },
+                    set: { photonSource = $0 }
+                )) {
+                    ForEach(found, id: \.self) { candidate in
+                        Text("\(candidate.id) — \(relativePath(of: candidate))").tag(candidate.id)
+                    }
+                }
+                .labelsHidden()
+                .controlSize(.small)
+            }
+            if let chosen {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(chosen.id)
+                        .font(.system(.caption, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                    Text("Found in \(relativePath(of: chosen))"
+                         + (chosen.isOnlineFixShared ? ", OnlineFix's own app" : ""))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            InsetField(prompt: "New app id "
+                       + (chosen?.kind == .quantum ? "(64 base64 characters)" : "(36-character GUID)"),
+                       text: $photonReplacement)
+                .font(.system(.callout, design: .monospaced))
+            HStack(spacing: 8) {
+                Button("Apply to game files") {
+                    if let chosen { model.applyPhotonID(typed, replacing: chosen.id, for: game) }
+                }
+                .buttonStyle(.glassProminent)
+                .disabled(!fits || scanning)
+                Button("Restore the game's own id") { model.restorePhotonIDs(for: game) }
+                    .buttonStyle(.glass)
+                    .disabled(scanning)
+            }
+            .controlSize(.small)
+            if !typed.isEmpty, !fits {
+                note("The new id has to be the same kind and the same length as the one above.",
+                     warning: true)
+                    .transition(.blurReplace)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 15)
+        .animation(.smooth(duration: 0.25), value: fits)
+        .animation(.smooth(duration: 0.25), value: chosen)
+    }
+
+    /// The row is for a game whose files a scan has already found an app id in.
+    /// R.E.P.O. and PICO PARK 2 have a row of their own above.
+    private func showsPhotonRow(_ game: ManagedGame) -> Bool {
+        guard game.id != 3241660, game.id != 2644470 else { return false }
+        return model.photonScans[game.id]?.isEmpty == false
+    }
+
+    /// A file's place inside the game folder, which is all the row has room for.
+    private func relativePath(of candidate: PhotonPatch.Candidate) -> String {
+        candidate.file.pathComponents.suffix(3).joined(separator: "/")
     }
 
     private func repoPhotonRow(_ game: ManagedGame, _ binding: Binding<ManagedGame>) -> some View {
@@ -845,9 +993,9 @@ struct PatchSheetView: View {
     }
 
     /// A fixed game matches players as Spacewar, whatever its own code uses.
-    private func spacewarRequired(_ game: ManagedGame, usesSteamRelay: Bool) -> Bool {
-        SteamNetworking.spacewarRequired(usesSteamNetworking: usesSteamRelay,
-                                         fixInstalled: model.fixIsInstalled(game.id))
+    private func needsRealAppID(_ game: ManagedGame, usesSteamRelay: Bool) -> Bool {
+        SteamNetworking.needsRealAppID(usesSteamNetworking: usesSteamRelay,
+                                       fixInstalled: model.fixIsInstalled(game.id))
     }
 
     private func persistToggle(_ title: String, _ binding: Binding<Bool>) -> some View {
@@ -961,6 +1109,12 @@ struct PatchSheetView: View {
                     }
                     .help("Copy the fix's files where the game loads them, so its loader starts. "
                           + "Run this when the game crashes after the fix was installed.")
+                    Button("Own Steam API") {
+                        model.routingOnlyFix(appID: fix.id)
+                    }
+                    .help("Put the game's own Steam API back and leave OnlineFix's loader out. "
+                          + "Run this when the game starts as Spacewar and no window ever "
+                          + "appears: macSteam's routing still starts it as 480.")
                     Button("Uninstall", role: .destructive) {
                         model.removeFix(id: fix.id)
                     }
@@ -1151,8 +1305,8 @@ struct InstallationView: View {
                 .buttonStyle(.glassProminent)
                 .keyboardShortcut(.defaultAction)
                 .disabled(model.busy || Steam.isRunning() || !model.steamPresent)
-                Button("Uninstall") { model.uninstall() }
-                    .disabled(model.busy || Steam.isRunning())
+                Button("Remove OnlineFix") { model.uninstall() }
+                    .disabled(model.busy)
                 Button("Deploy profiles") { model.deployProfiles() }
                     .disabled(model.busy)
                 Spacer()

@@ -79,16 +79,16 @@ struct OverlayStubTests {
         let ini = root.appendingPathComponent("OnlineFix.ini")
         try Data("[Main]\nRealAppId=1\n\n[Misc]\nExtraProtection=false\n".utf8).write(to: ini)
 
-        #expect(PhotonSupport.enablePhotonIntegration(at: ini))
+        #expect(FixApply.enablePhotonIntegration(at: ini))
 
         let text = try String(contentsOf: ini, encoding: .utf8)
         #expect(text.contains("[Misc]\nPhotonIntegration=true"))
         #expect(text.contains("ExtraProtection=false"))
-        #expect(!PhotonSupport.enablePhotonIntegration(at: ini))
+        #expect(!FixApply.enablePhotonIntegration(at: ini))
 
         // An ini with no [Misc] gets one.
         try Data("[Main]\nRealAppId=1\n".utf8).write(to: ini)
-        #expect(PhotonSupport.enablePhotonIntegration(at: ini))
+        #expect(FixApply.enablePhotonIntegration(at: ini))
         let withoutMisc = try String(contentsOf: ini, encoding: .utf8)
         #expect(withoutMisc.contains("[Misc]\nPhotonIntegration=true"))
     }

@@ -36,12 +36,12 @@ if [ -d "$SRC/runtime" ]; then
     cp "$SRC"/runtime/*.json "$RES/runtime/" 2>/dev/null || true
 fi
 
-# OnlineFix's Photon patch (Custom.dll, BepInEx's preloader and the winmm doorway).
-# The app adds it to a Photon game whose fix stops at the Steam API DLL.
+# OnlineFix's Photon patch and the BepInEx chain it runs through: the plugin, both
+# doorways (winhttp and winmm), the chain's config and BepInEx's whole core. A package
+# that carries only the plugin and the preloader cannot load, and a doorway the game
+# never imports never runs, so the app ships the complete chain.
 if [ -d "$SRC/photon" ]; then
-    mkdir -p "$RES/photon/BepInEx/core"
-    cp "$SRC/photon/winmm.dll" "$RES/photon/" 2>/dev/null || true
-    cp "$SRC/photon/Custom.dll" "$RES/photon/" 2>/dev/null || true
-    cp "$SRC/photon/BepInEx/core/BepInEx.Preloader.dll" "$RES/photon/BepInEx/core/" 2>/dev/null || true
-    echo "installed OnlineFix Photon patch"
+    mkdir -p "$RES/photon"
+    rsync -a --delete "$SRC/photon/" "$RES/photon/"
+    echo "installed OnlineFix Photon patch and its BepInEx chain"
 fi

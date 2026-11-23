@@ -35,6 +35,9 @@ typedef int64_t (*fn_get_ticket_impl)(void *self, uint32_t appId, void *buf,
                                        uint32_t *pSigSize);
 
 #define SOURCE_APPID       7
+// Spacewar: every account owns it, so Steam always signs a ticket for it, and
+// OnlineFix's Photon apps are registered against it.
+#define SPACEWAR_APPID     480
 static _Atomic(uint32_t) g_source_app = SOURCE_APPID;
 uint32_t sx_ticket_source_app(void) { return atomic_load(&g_source_app); }
 void sx_ticket_set_source_app(uint32_t app_id) {
@@ -86,29 +89,63 @@ int sx_ticket_serve_extended(void *server_this, void *reqReader, void *respWrite
     utlbuf_read(reqReader, &req_cbMax, 4);
     utlbuf_read(reqReader, &req_fence, 4);
 
+    if (req_cbMax == 0 || req_cbMax > MAX_TICKET_BUF)
+        return 0;
+
+    fn_get_ticket_impl impl = *(fn_get_ticket_impl *)(*(uintptr_t *)server_this + IMPL_VTABLE_SLOT);
+
+    // Steam's own ticket first. It is signed for this app, so anything that checks it
+    // with Steam (Photon's servers, EOS, a game's backend) accepts it. A forged one is
+    // a genuine ticket with the app id spliced in, and the signature covers that field:
+    // Steam answers "error response from Steam" and Photon reports
+    // CustomAuthenticationFailed. The forge is only for the apps Steam will not issue a
+    // ticket for at all.
+    uint8_t *ticket_buf = (uint8_t *)calloc(1, req_cbMax);
+    if (!ticket_buf) return 0;
+
+    uint32_t offAppId = 0, offSteamId = 0, offSig = 0, sigSize = 0;
+    int64_t ret = impl(server_this, req_appId, ticket_buf, req_cbMax,
+                       &offAppId, &offSteamId, &offSig, &sigSize);
+
+    if (ret > 0 && sigSize > 0) {
+        serialize_response(respWriter, ret, ticket_buf, req_cbMax,
+                           offAppId, offSteamId, offSig, sigSize);
+        free(ticket_buf);
+        SX_LOG("[ticket] app %u: Steam's own ticket, %lld bytes", req_appId, (long long)ret);
+        return 1;
+    }
+
+    // Steam will not issue a ticket for this app: the account does not own it, or the
+    // client will not sign one for a game it is not running as. Spacewar is owned by
+    // every account, so a ticket for it is always signed, and OnlineFix's Photon apps
+    // are registered against 480: Photon asks Steam about 480, and Steam vouches for
+    // this one. A forged ticket cannot pass that check, whatever its app id says.
+    if (req_appId != SPACEWAR_APPID) {
+        uint32_t space_off_app = 0, space_off_steam = 0, space_off_sig = 0, space_sig = 0;
+        int64_t space_len = impl(server_this, SPACEWAR_APPID, ticket_buf, req_cbMax,
+                                 &space_off_app, &space_off_steam, &space_off_sig, &space_sig);
+        if (space_len > 0 && space_sig > 0) {
+            serialize_response(respWriter, space_len, ticket_buf, req_cbMax,
+                               space_off_app, space_off_steam, space_off_sig, space_sig);
+            free(ticket_buf);
+            SX_LOG("[ticket] app %u: Steam's own Spacewar ticket, %lld bytes",
+                   req_appId, (long long)space_len);
+            return 1;
+        }
+    }
+
     if (!should_forge(req_appId)) {
-        if (req_cbMax == 0 || req_cbMax > MAX_TICKET_BUF)
-            return 0;
-
-        uint8_t *ticket_buf = (uint8_t *)calloc(1, req_cbMax);
-        if (!ticket_buf) return 0;
-
-        uint32_t offAppId = 0, offSteamId = 0, offSig = 0, sigSize = 0;
-        fn_get_ticket_impl impl = *(fn_get_ticket_impl *)(*(uintptr_t *)server_this + IMPL_VTABLE_SLOT);
-        int64_t ret = impl(server_this, req_appId, ticket_buf, req_cbMax,
-                           &offAppId, &offSteamId, &offSig, &sigSize);
-
         serialize_response(respWriter, ret, ticket_buf, req_cbMax,
                            offAppId, offSteamId, offSig, sigSize);
         free(ticket_buf);
         return 1;
     }
+    free(ticket_buf);
 
     uint8_t *source_buf = (uint8_t *)calloc(1, MAX_TICKET_BUF);
     if (!source_buf) return 0;
 
     uint32_t src_off_app = 0, src_off_steam = 0, src_off_sig = 0, src_sig_size = 0;
-    fn_get_ticket_impl impl = *(fn_get_ticket_impl *)(*(uintptr_t *)server_this + IMPL_VTABLE_SLOT);
     uint32_t source_app = sx_ticket_source_app();
     int64_t src_len = impl(server_this, source_app, source_buf, MAX_TICKET_BUF,
                            &src_off_app, &src_off_steam, &src_off_sig, &src_sig_size);

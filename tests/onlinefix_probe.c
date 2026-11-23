@@ -56,8 +56,12 @@ int main(int argc, char **argv) {
     assert(game == 105600 && of_session().game == 105600 && !of_session().keep_id);
     assert(of_identity(of_session(), 480) == 105600);
     of_networking(); assert(of_identity(of_session(), 480) == 480);
-    game = 105600; of_start("game -realappid", &game); of_networking();
+    // "Keep real AppID" is Steam's side of the pipe; the game still matches as
+    // Spacewar, or it would sit in its own lobbies where no other fixed copy is.
+    game = 105600; of_start("game -realappid", &game);
+    assert(of_session().keep_id);
     assert(of_identity(of_session(), 480) == 105600);
+    of_networking(); assert(of_identity(of_session(), 480) == 480);
     game = 413150; of_start("game", &game);
     assert(game == 413150 && !of_session().game); // Apps alone never enable routing.
     game = 413150; of_start("game -onlinefix", &game);

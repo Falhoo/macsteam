@@ -51,6 +51,14 @@ final class AppModel: ObservableObject {
     /// Set when a fix may not work and the player has to confirm before it starts.
     @Published var fixCompatibilityPrompt: FixCompatibilityPrompt?
 
+    // Photon app ids, read out of a game's own files
+    /// What the scanner found in each game's files, by AppID.
+    @Published var photonScans: [Int: [PhotonPatch.Candidate]] = [:]
+    /// Games whose files are being read right now.
+    @Published var photonScanning: Set<Int> = []
+    /// The folder each scan read, so the same one is not read twice.
+    private var photonScanFolders: [Int: String] = [:]
+
     init() {
         let file = Store.load()
         games = file.games
@@ -93,9 +101,32 @@ final class AppModel: ObservableObject {
         status = "OnlineFix is installed. Launch Steam normally; games start from Steam."
     }
 
+    /// Takes OnlineFix out and leaves macSteam and NotProton exactly as they are:
+    /// the manager's own folder, its section in macSteam's config, its dylib and
+    /// environment keys in Steam.app, and the files and Photon patches it put in the
+    /// games' folders.
     func uninstall() {
-        run { try Steam.uninstall(progress: { self.status = $0 }) }
-        status = "OnlineFix was removed and Steam was restored."
+        let alert = NSAlert()
+        alert.messageText = "Remove OnlineFix?"
+        alert.informativeText = "OnlineFix's game list, its routing settings, the files it "
+            + "placed in each game folder and the Photon patches it applied are taken out. "
+            + "macSteam, NotProton, the runners and the Wine prefixes stay as they are, so "
+            + "Steam works just as it does now. Steam quits for the change and starts again."
+        alert.addButton(withTitle: "Remove OnlineFix")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        busy = true
+        status = "Taking OnlineFix out…"
+        Task { @MainActor [weak self] in
+            let report = await Task.detached(priority: .userInitiated) {
+                OnlineFixRemoval.run()
+            }.value
+            guard let self else { return }
+            self.busy = false
+            self.status = report.summary
+            self.refresh()
+        }
     }
 
     func deployProfiles() {
@@ -197,7 +228,20 @@ final class AppModel: ObservableObject {
         if fixes.contains(where: { $0.id == appID }), let mac = macAppStatus(appID) {
             return mac.message
         }
-        return photonStatus(appID).message
+        if let photon = photonStatus(appID).message { return photon }
+        return photonConnectionIssue(appID)
+    }
+
+    /// What the game's own log says Photon made of the last connection it tried.
+    /// "Failed to connect to Photon Network" is the game's text for every reason
+    /// Photon can refuse, so the log is the only thing that says which one it was.
+    func photonConnectionIssue(_ appID: Int) -> String? {
+        guard let game = games.first(where: { $0.id == appID }),
+              let folder = Store.gameFolder(for: appID, name: game.name),
+              let evidence = PhotonLog.read(gameFolder: folder,
+                                            prefix: WineOverride.prefix(appID: appID)),
+              evidence.isFailure else { return nil }
+        return "\(evidence.title). \(evidence.detail) \(evidence.remedy)"
     }
 
     /// The list and toggles macSteam's dylib applies at each game's launch.
@@ -212,9 +256,15 @@ final class AppModel: ObservableObject {
             if fixes.contains(where: { $0.id == game.id }), !fixIsInstalled(game.id) {
                 return nil
             }
+            // A Mac build loads none of the fix's files, so Spacewar (480) adds nothing
+            // it can use, and PICO PARK 2's Mac build closes itself a second after
+            // starting when Steam calls it Spacewar. Such a game starts as itself: what
+            // it needs is the patch in its own files, not a different AppID.
+            let macBuild = Store.gameFolder(for: game.id, name: game.name)
+                .map { FixInstaller.nativeMacBundle(in: $0) != nil } ?? false
             return RoutingEntry(appID: game.id, name: game.name,
                                 hasFix: fixIsInstalled(game.id),
-                                keepRealAppID: game.keepRealAppID,
+                                keepRealAppID: game.keepRealAppID || macBuild,
                                 startupAppID: game.patches.startupAppID,
                                 overlayAppID: game.patches.overlayAppID,
                                 inputAppID: game.patches.inputAppID,
@@ -403,8 +453,9 @@ final class AppModel: ObservableObject {
             fixMessage = "Pick a game from your list."
             return
         }
-        guard Store.gameFolder(for: game.id, name: game.name) != nil else {
-            fixMessage = "Install the game in Steam first — OnlineFix needs its game folder."
+        guard Store.isInstalled(appID: game.id,
+                                folder: Store.gameFolder(for: game.id, name: game.name)) else {
+            fixMessage = Store.notInstalledMessage
             return
         }
         guard allowFixInstall(appID: game.id, name: game.name,
@@ -419,7 +470,11 @@ final class AppModel: ObservableObject {
     private func performArchiveImport() {
         guard let archiveURL else { return }
         guard let game = games.first(where: { $0.id == fixGameID }) else { return }
-        guard Store.gameFolder(for: game.id, name: game.name) != nil else { return }
+        guard let folder = Store.gameFolder(for: game.id, name: game.name),
+              Store.isInstalled(appID: game.id, folder: folder) else {
+            fixMessage = Store.notInstalledMessage
+            return
+        }
         busy = true
         fixMessage = ""
         let password = archivePassword.isEmpty ? nil : archivePassword
@@ -428,14 +483,11 @@ final class AppModel: ObservableObject {
         }
         Task { @MainActor in
             do {
-                let result = try await FixInstaller.install(
-                    archive: archiveURL,
-                    game: game,
-                    password: password,
-                    progress: note
-                )
-                self.recordFix(result, for: game)
-                self.showProgress("Installed \(result.files.count) file(s) into \(result.targetDirectory).")
+                let outcome = try await FixService.install(
+                    appID: game.id, name: game.name,
+                    archive: archiveURL, password: password, progress: note)
+                self.recordFix(outcome, for: game)
+                self.showProgress(outcome.message)
             } catch {
                 self.showProgress(error.localizedDescription)
             }
@@ -450,9 +502,11 @@ final class AppModel: ObservableObject {
             fixMessage = "Pick a game from your list."
             return
         }
-        // Check the game folder before downloading anything.
-        guard Store.gameFolder(for: game.id, name: game.name) != nil else {
-            fixMessage = "Install the game in Steam first — OnlineFix needs its game folder."
+        // Check the game is really there before downloading anything: the fix is built
+        // from its files, so a folder with nothing in it cannot be scanned.
+        guard Store.isInstalled(appID: game.id,
+                                folder: Store.gameFolder(for: game.id, name: game.name)) else {
+            fixMessage = Store.notInstalledMessage
             return
         }
         guard allowFixInstall(appID: game.id, name: game.name,
@@ -558,17 +612,12 @@ final class AppModel: ObservableObject {
                 throw ManagerError("The server returned no archives for \(game.name).")
             }
 
-            let result = try await FixInstaller.install(
-                archive: entry,
-                game: game,
-                password: FixSource.defaultPassword,
-                progress: note
-            )
-
-            recordFix(result, for: game)
+            let outcome = try await FixService.install(
+                appID: game.id, name: game.name,
+                archive: entry, password: FixSource.defaultPassword, progress: note)
+            recordFix(outcome, for: game)
             let matched = folder.isExact ? "" : " (matched “\(folder.name)” on online-fix.me)"
-            fixMessage = "Fetched from online-fix.me and installed \(result.files.count) file(s) "
-                + "into \(result.targetDirectory)\(matched)."
+            fixMessage = "Fetched from online-fix.me. " + outcome.message + matched
         } catch {
             fixMessage = "Auto-fetch failed: \(error.localizedDescription)\n"
                 + "\(game.name) stays in My Games and starts as itself until its fix "
@@ -577,53 +626,26 @@ final class AppModel: ObservableObject {
         busy = false
     }
 
-    func recordFix(_ result: FixInstaller.ImportResult, for game: ManagedGame) {
+    func recordFix(_ outcome: FixService.Outcome, for game: ManagedGame) {
         fixes.removeAll { $0.id == game.id }
-        fixes.append(FixRecord(id: game.id, gameName: game.name, files: result.files,
-                               sizes: FixInstaller.sizes(of: result.files)))
+        fixes.append(FixRecord(id: game.id, gameName: game.name, files: outcome.files,
+                               sizes: FixInstaller.sizes(of: outcome.files)))
         removedFixes.remove(game.id)
         prepareWine(for: game)
-        // Photon games whose fix stops at the Steam API DLL get OnlineFix's Photon
-        // patch here, so the chain is part of the fix's own record.
-        if let folder = Store.gameFolder(for: game.id, name: game.name) {
-            // Stored Photon app IDs are applied with the fix, so the player never has
-            // to press Apply.
-            if !game.repoPhoton.realtime.isEmpty || !game.repoPhoton.voice.isEmpty {
-                _ = try? PhotonIDs.apply(gameFolder: folder,
-                                         realtime: game.repoPhoton.realtime,
-                                         voice: game.repoPhoton.voice)
-            }
-            let added = PhotonSupport.install(appID: game.id, gameFolder: folder,
-                                              fixFiles: result.files)
-            let existing = Set(fixes.first(where: { $0.id == game.id })?.files ?? [])
-            let fresh = added.filter { !existing.contains($0) }
-            if !fresh.isEmpty, let index = fixes.firstIndex(where: { $0.id == game.id }) {
-                fixes[index].files.append(contentsOf: fresh)
-                fixes[index].sizes.merge(FixInstaller.sizes(of: fresh)) { first, _ in first }
-            }
+        // Stored Photon app IDs are applied with the fix, so the player never has to
+        // press Apply.
+        if let folder = Store.gameFolder(for: game.id, name: game.name),
+           !game.repoPhoton.realtime.isEmpty || !game.repoPhoton.voice.isEmpty {
+            _ = try? PhotonIDs.apply(gameFolder: folder,
+                                     realtime: game.repoPhoton.realtime,
+                                     voice: game.repoPhoton.voice)
         }
-        // Every fix gets the same repair, whatever shape its archive had.
-        _ = applyUniversalFix(appID: game.id, name: game.name)
+        // The fix's own files are in place now, so read the game for the Photon app id
+        // it connects to. A game whose online play runs on Photon needs that id swapped
+        // for the one everyone plays on, and the patch for it is made from the game's
+        // own files here rather than kept per game.
+        scanPhotonIDs(appID: game.id, name: game.name, force: true)
         persist()
-    }
-
-    /// Repairs the things that stop an installed fix from loading: the payload
-    /// beside the executable, the Steam API DLL the game actually loads, and an
-    /// ini that names this game. New copies join the fix's record, so uninstall
-    /// takes them away again. Safe to call on every refresh.
-    @discardableResult
-    func applyUniversalFix(appID: Int, name: String) -> UniversalFix.Report? {
-        guard let index = fixes.firstIndex(where: { $0.id == appID }),
-              let folder = Store.gameFolder(for: appID, name: name) else { return nil }
-        let report = UniversalFix.apply(appID: appID, gameFolder: folder,
-                                        fixFiles: fixes[index].files)
-        let known = Set(fixes[index].files)
-        let fresh = report.additions.filter { !known.contains($0) }
-        if !fresh.isEmpty {
-            fixes[index].files.append(contentsOf: fresh)
-            fixes[index].sizes.merge(FixInstaller.sizes(of: fresh)) { first, _ in first }
-        }
-        return report
     }
 
     /// Makes the game's Wine prefix run the fix that was just installed.
@@ -677,24 +699,15 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Every recorded fix, applied again on refresh: a fix installed before this
-    /// existed, or a game whose prefix Steam made after its install, is caught here.
+    /// Every recorded fix is checked against its pack on refresh, so a Steam verify or
+    /// an update is put right before the game is next started. A game whose prefix
+    /// Steam made after its install gets its DLL overrides here too.
     private func prepareWineForInstalledFixes() {
-        var repaired = false
+        let repaired = FixService.verifyAll(games: games, fixes: fixes)
+        var changed = false
         for fix in fixes {
             guard let folder = Store.gameFolder(for: fix.id, name: fix.gameName) else { continue }
-            // First, put the fix's own files where the loader looks, so the rest of
-            // this pass (and the game) sees a complete fix.
-            if applyUniversalFix(appID: fix.id, name: fix.gameName)?.changed == true {
-                repaired = true
-            }
-            FixInstaller.ensureOverlayRenderer(appID: fix.id, gameFolder: folder, fixFiles: fix.files)
             prepareWine(for: ManagedGame(id: fix.id, name: fix.gameName), fix: fix)
-            // A Photon game whose fix stops at the Steam API DLL still needs the
-            // patch; the app carries it and adds it here.
-            PhotonSupport.install(appID: fix.id, gameFolder: folder, fixFiles: fix.files)
-            // A Steam verify puts the stock asset back. Reapply the stored Photon app
-            // IDs, so custom ones survive without the player pressing anything.
             if let game = games.first(where: { $0.id == fix.id }),
                !game.repoPhoton.realtime.isEmpty || !game.repoPhoton.voice.isEmpty,
                PhotonFix.isPhotonGame(in: folder) {
@@ -702,8 +715,12 @@ final class AppModel: ObservableObject {
                                          realtime: game.repoPhoton.realtime,
                                          voice: game.repoPhoton.voice)
             }
+            changed = changed || repaired[fix.id] != nil
         }
-        if repaired { persist() }
+        if changed, let first = repaired.values.first {
+            fixMessage = first.message
+            persist()
+        }
     }
 
     func openFixSite() {
@@ -714,16 +731,39 @@ final class AppModel: ObservableObject {
         uninstallFix(appID: id)
     }
 
-    /// Patch-sheet action: run the same universal repair the app runs after an
-    /// install and on every refresh, so a game that crashes with its fix can be put
-    /// right without reinstalling anything.
+    /// Patch-sheet action: put back anything the pack says has changed since the fix
+    /// was built, and say what it did.
     func repairFix(appID: Int) {
         guard let game = games.first(where: { $0.id == appID }) else { return }
-        guard let report = applyUniversalFix(appID: appID, name: game.name) else { return }
+        let outcome = FixService.repair(appID: appID, name: game.name)
+        if !outcome.repaired.isEmpty { persist() }
+        fixMessage = outcome.message
+    }
+
+    /// Puts the game's own Steam API back and leaves the fix's loader out, for a game
+    /// the loader never opens: it starts as Spacewar and no window ever appears, which
+    /// is what a 32-bit .NET game such as Terraria does. The routing still gives it
+    /// the Spacewar identity, so online play meets the other copies.
+    func routingOnlyFix(appID: Int) {
+        guard let game = games.first(where: { $0.id == appID }) else { return }
+        let outcome = FixService.routingOnly(appID: appID, name: game.name)
+        fixMessage = outcome.message
+        guard !outcome.repaired.isEmpty else { return }
+
+        // The file is the game's own again, so its size no longer says anything about
+        // whether the fix is still in place: leaving it in the record would show the
+        // fix as broken on the next app start.
+        if let index = fixes.firstIndex(where: { $0.id == appID }) {
+            let restored = Set(outcome.repaired.map {
+                ($0 as NSString).lastPathComponent.lowercased()
+            })
+            var record = fixes[index]
+            record.files.removeAll {
+                restored.contains(($0 as NSString).lastPathComponent.lowercased())
+            }
+            fixes[index] = record
+        }
         persist()
-        fixMessage = report.changed
-            ? "Repaired the fix: " + report.notes.joined(separator: " ")
-            : "The fix's files are already where the game loads them. Nothing to repair."
     }
 
     /// Progress callbacks arrive from FixSource's async tasks; hop to the main
@@ -741,7 +781,7 @@ final class AppModel: ObservableObject {
         return OnlineFixStoreStatus(
             inList: alreadyAdded(appID),
             fixInstalled: fixIsInstalled(appID),
-            gameInstalled: folder != nil,
+            gameInstalled: Store.isInstalled(appID: appID, folder: folder),
             usesSteamNetworking: SteamNetworking.uses(appID: appID, gameFolder: folder),
             keepRealAppID: games.first { $0.id == appID }?.keepRealAppID ?? false,
             photonIssue: fixIssue(appID),
@@ -784,6 +824,189 @@ final class AppModel: ObservableObject {
                 : "Patched the game files with the new Photon app IDs."
         } catch {
             fixMessage = error.localizedDescription
+        }
+    }
+
+    /// PICO PARK 2's Photon fix, for the Mac build: the two file changes the game needs
+    /// before it will use OnlineFix's Photon app. A Windows build cannot take them, and
+    /// its own fix does the same thing from inside the game instead.
+    func setPicoPark2Photon(_ on: Bool, game: ManagedGame) {
+        guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
+        let folder = Store.gameFolder(for: game.id, name: game.name)
+        guard let app = folder.flatMap({ FixInstaller.nativeMacBundle(in: $0) }) else {
+            fixMessage = "PICO PARK 2's Photon fix is for the Mac build. In Steam, open the "
+                + "game's Properties, Compatibility, turn off the forced Windows version, and "
+                + "let Steam install the Mac build first."
+            return
+        }
+        do {
+            let written = try PicoPark2Patch.setEnabled(on, app: app)
+            games[index].picoPark2Photon = on
+            persist()
+            if !on {
+                fixMessage = "PICO PARK 2's Photon fix is off, and the game's own files are back."
+            } else if written.isEmpty {
+                fixMessage = "PICO PARK 2's Photon fix was already in place."
+            } else {
+                fixMessage = "Patched PICO PARK 2's files for OnlineFix's Photon app, and "
+                    + "signed the game again. Launch it from Steam."
+            }
+        } catch {
+            fixMessage = error.localizedDescription
+        }
+    }
+
+    // MARK: - Photon app id
+
+    /// Reads the game's files for the Photon app id they carry, off the main thread,
+    /// and keeps what it finds for the patch sheet. Runs when a fix is installed and
+    /// when the sheet opens; a folder already read is not read again unless forced.
+    func scanPhotonIDs(appID: Int, name: String, force: Bool = false) {
+        guard let folder = Store.gameFolder(for: appID, name: name) else { return }
+        if !force, photonScans[appID] != nil, photonScanFolders[appID] == folder.path { return }
+        guard !photonScanning.contains(appID) else { return }
+        photonScanning.insert(appID)
+        Task { @MainActor [weak self] in
+            let found = await Task.detached(priority: .userInitiated) {
+                PhotonPatch.scan(in: folder)
+            }.value
+            guard let self else { return }
+            self.photonScans[appID] = found
+            self.photonScanFolders[appID] = folder.path
+            self.photonScanning.remove(appID)
+            self.autoPatchPhoton(appID: appID, name: name, found: found)
+        }
+    }
+
+    /// Runs the Photon pass and waits for it, where `scanPhotonIDs` leaves it running in
+    /// the background. A script installs and launches in one go, so the game's files
+    /// have to be patched before it starts rather than a moment after.
+    @discardableResult
+    func finishPhotonPatch(appID: Int, name: String) async -> PhotonPatch.AutoPatch? {
+        guard let folder = Store.gameFolder(for: appID, name: name) else { return nil }
+        let found = await Task.detached(priority: .userInitiated) {
+            PhotonPatch.scan(in: folder)
+        }.value
+        photonScans[appID] = found
+        photonScanFolders[appID] = folder.path
+        guard fixIsInstalled(appID), found.contains(where: { !$0.isOnlineFixShared }) else {
+            return nil
+        }
+        if appID == 2644470 {
+            if let game = games.first(where: { $0.id == appID }) {
+                setPicoPark2Photon(true, game: game)
+            }
+            return nil
+        }
+        guard PhotonFix.isPhotonGame(in: folder) else { return nil }
+        let report = await Task.detached(priority: .userInitiated) {
+            PhotonPatch.autoPatch(in: folder)
+        }.value
+        if report.replaced != nil {
+            fixMessage = "Patched \(name)'s Photon app id to OnlineFix's, so it can "
+                + "meet players on that app. The game's own files are kept beside them."
+        } else if let skipped = report.skipped {
+            fixMessage = skipped
+        }
+        persist()
+        return report
+    }
+
+    /// The patch every Photon game gets without being asked: the app id its files
+    /// carry is replaced by OnlineFix's, which is what lets it meet players on that
+    /// app. It runs after each scan and is idempotent, so a game already carrying
+    /// OnlineFix's id is left alone. PICO PARK 2 also needs its session limit lifted,
+    /// so it goes through its own patch instead.
+    private func autoPatchPhoton(appID: Int, name: String, found: [PhotonPatch.Candidate]) {
+        guard fixIsInstalled(appID), !found.isEmpty else { return }
+        guard found.contains(where: { !$0.isOnlineFixShared }) else { return }
+        guard !photonScanning.contains(appID) else { return }
+        guard let folder = Store.gameFolder(for: appID, name: name) else { return }
+
+        if appID == 2644470 {
+            guard let game = games.first(where: { $0.id == appID }) else { return }
+            setPicoPark2Photon(true, game: game)
+            return
+        }
+        guard PhotonFix.isPhotonGame(in: folder) else { return }
+        photonScanning.insert(appID)
+        Task { @MainActor [weak self] in
+            let report = await Task.detached(priority: .userInitiated) {
+                PhotonPatch.autoPatch(in: folder)
+            }.value
+            guard let self else { return }
+            self.photonScanning.remove(appID)
+            if report.replaced != nil {
+                self.fixMessage = "Patched \(name)'s Photon app id to OnlineFix's, so it can "
+                    + "meet players on that app. The game's own files are kept beside them."
+                self.scanPhotonIDs(appID: appID, name: name, force: true)
+            } else if let skipped = report.skipped {
+                self.fixMessage = skipped
+            }
+        }
+    }
+
+    /// Writes a Photon app id into the game's files, which is the patch itself: the id
+    /// the game carries is swapped where the game keeps it, and the untouched file is
+    /// kept beside it.
+    func applyPhotonID(_ new: String, replacing old: String, for game: ManagedGame) {
+        guard let folder = Store.gameFolder(for: game.id, name: game.name) else {
+            fixMessage = "Install \(game.name) in Steam first."
+            return
+        }
+        let wanted = new.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !wanted.isEmpty else {
+            fixMessage = "Type the Photon app id to use first."
+            return
+        }
+        guard !photonScanning.contains(game.id) else { return }
+        photonScanning.insert(game.id)
+        fixMessage = "Writing the new Photon app id into \(game.name)'s files…"
+        Task { @MainActor [weak self] in
+            var message: String
+            do {
+                let written = try await Task.detached(priority: .userInitiated) {
+                    try PhotonPatch.replace(old, with: wanted, in: folder)
+                }.value
+                message = written.isEmpty
+                    ? "Nothing changed: no file carries that app id any more, so the game "
+                        + "was either patched already or has been verified since the scan."
+                    : "Patched \(written.count) file(s) with the new Photon app id, and kept "
+                        + "the untouched copies beside them. Launch the game from Steam."
+                self?.scanPhotonIDs(appID: game.id, name: game.name, force: true)
+            } catch {
+                message = error.localizedDescription
+            }
+            self?.photonScanning.remove(game.id)
+            self?.fixMessage = message
+        }
+    }
+
+    /// Puts the game's own files back, which is how a Photon patch is taken off again.
+    func restorePhotonIDs(for game: ManagedGame) {
+        guard let folder = Store.gameFolder(for: game.id, name: game.name) else {
+            fixMessage = "Install \(game.name) in Steam first."
+            return
+        }
+        guard !photonScanning.contains(game.id) else { return }
+        photonScanning.insert(game.id)
+        fixMessage = "Putting \(game.name)'s own files back…"
+        Task { @MainActor [weak self] in
+            var message: String
+            do {
+                let restored = try await Task.detached(priority: .userInitiated) {
+                    try PhotonPatch.restore(in: folder)
+                }.value
+                message = restored.isEmpty
+                    ? "There was nothing to put back: no file here was patched from this screen."
+                    : "Put \(restored.count) game file(s) back, and signed the game again if it "
+                        + "is a Mac build."
+                self?.scanPhotonIDs(appID: game.id, name: game.name, force: true)
+            } catch {
+                message = error.localizedDescription
+            }
+            self?.photonScanning.remove(game.id)
+            self?.fixMessage = message
         }
     }
 
@@ -831,6 +1054,12 @@ final class AppModel: ObservableObject {
         guard let folder = Store.gameFolder(for: appID, name: display) else {
             return OnlineFixStoreOutcome(message: nil,
                                          error: "Install the game in Steam first, OnlineFix needs its game folder.",
+                                         needsGame: true, installed: false)
+        }
+        // A folder Steam made and never filled is not an install: the fix is built from
+        // the game's files, and there are none to read.
+        guard Store.isInstalled(appID: appID, folder: folder) else {
+            return OnlineFixStoreOutcome(message: nil, error: Store.notInstalledMessage,
                                          needsGame: true, installed: false)
         }
         // OnlineFix is Windows PE files that hook Windows Steam's API. A native build
@@ -906,6 +1135,7 @@ final class AppModel: ObservableObject {
             try Paths.ensureDir(dir)
             downloadDir = dir
 
+            progress("Downloading \(archives.count) file(s) from online-fix.me…")
             var downloaded: [URL] = []
             for url in archives {
                 let destination = dir.appendingPathComponent(url.lastPathComponent)
@@ -921,32 +1151,12 @@ final class AppModel: ObservableObject {
             }
 
             progress("Installing \(entry.lastPathComponent)…")
-            let result = try await FixInstaller.install(
-                archive: entry, game: game, password: FixSource.defaultPassword,
-                allowGDK: confirmed, allowNative: confirmed && nativeBuild != nil) { progress($0) }
-            recordFix(result, for: game)
-            let photon = PhotonFix.status(
-                gameFolder: Store.gameFolder(for: appID, name: display),
-                fixInstalled: true,
-                fixFiles: result.files)
-            let gdk = FixInstaller.gdkIssue(
-                for: FixRecord(id: appID, gameName: display, files: result.files))
-            var message = "OnlineFix installed: \(result.files.count) file(s) written into "
-                + "the game folder. Launch \(display) from Steam. It runs as AppID 480."
-            if let repair = applyUniversalFix(appID: appID, name: display) {
-                if !repair.notes.isEmpty {
-                    message += " " + repair.notes.joined(separator: " ")
-                }
-                persist()
-            }
-            if let gdk {
-                message += " " + gdk
-            } else if let issue = photon.message {
-                message += " " + issue
-            } else if photon.isComplete {
-                message += " Its Photon patch (BepInEx doorstop, preloader and Custom.dll) "
-                    + "is in place too."
-            }
+            let outcome = try await FixService.install(
+                appID: appID, name: display,
+                archive: entry, password: FixSource.defaultPassword, progress: progress)
+            recordFix(outcome, for: game)
+            let message = outcome.message
+                + " Launch \(display) from Steam. It runs as AppID 480."
             return OnlineFixStoreOutcome(message: message, error: nil,
                                          needsGame: false, installed: true)
         } catch {
@@ -968,7 +1178,12 @@ final class AppModel: ObservableObject {
         let name = games.first { $0.id == appID }?.name ?? "App \(appID)"
         let record = fixes.first { $0.id == appID }
         var restored = 0
-        if let record {
+        let folder = Store.gameFolder(for: appID, name: name)
+        if let folder, FixPack.hasPack(in: folder) {
+            // The pack holds every file the fix wrote and what each one replaced, so
+            // it puts the game back exactly; the old sweep would guess.
+            restored = FixService.uninstall(appID: appID, name: name)
+        } else if let record {
             do {
                 restored = try FixInstaller.uninstall(record)
             } catch {

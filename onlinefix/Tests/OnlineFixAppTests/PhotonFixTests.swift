@@ -127,4 +127,47 @@ struct PhotonFixTests {
         #expect(!PhotonFix.belongsAtGameRoot("OnlineFix.ini"))
         #expect(!PhotonFix.belongsAtGameRoot("dlllist.txt"))
     }
+
+    /// PICO PARK 2 is IL2CPP, so it has no `Managed` folder to look in. Its assembly
+    /// names are string literals in the metadata instead, which is where the answer
+    /// has to come from or its Photon patch is never switched on.
+    @Test
+    func aIl2cppGameIsRecognisedByItsMetadata() throws {
+        let game = try folder()
+        defer { try? FileManager.default.removeItem(at: game) }
+        try write("....PhotonQuantum....PhotonRealtime....",
+                  to: game.appendingPathComponent("PP2_Data/il2cpp_data/Metadata/global-metadata.dat"))
+        try write("code", to: game.appendingPathComponent("GameAssembly.dll"))
+
+        #expect(PhotonFix.isPhotonGame(in: game))
+    }
+
+    /// A Mac build keeps the same files inside its `.app`, the data under
+    /// `Contents/Resources/Data` and the code under `Contents/Frameworks`, which is
+    /// where PICO PARK 2's Mac build has them.
+    @Test
+    func aMacBundleIsRecognisedByTheMetadataInsideIt() throws {
+        let game = try folder()
+        defer { try? FileManager.default.removeItem(at: game) }
+        try write("....PhotonQuantum....",
+                  to: game.appendingPathComponent(
+                    "pico_park_2.app/Contents/Resources/Data/il2cpp_data/Metadata/global-metadata.dat"))
+        try write("code", to: game.appendingPathComponent(
+            "pico_park_2.app/Contents/Frameworks/GameAssembly.dylib"))
+
+        #expect(PhotonFix.isPhotonGame(in: game))
+    }
+
+    /// An IL2CPP game with no Photon in it is left alone, and its data folder is not
+    /// mistaken for a Mono one.
+    @Test
+    func anIl2cppGameWithoutPhotonIsNotAPhotonGame() throws {
+        let game = try folder()
+        defer { try? FileManager.default.removeItem(at: game) }
+        try write("....Steamworks.NET....",
+                  to: game.appendingPathComponent("PP2_Data/il2cpp_data/Metadata/global-metadata.dat"))
+        try write("code", to: game.appendingPathComponent("GameAssembly.dll"))
+
+        #expect(!PhotonFix.isPhotonGame(in: game))
+    }
 }

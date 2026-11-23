@@ -97,16 +97,15 @@ struct SteamNetworkingTests {
         #expect(SteamNetworking.uses(appID: 1, gameFolder: root))
     }
 
-    /// RV There Yet? works as Spacewar, host and joiner. Its own code uses Steam's
-    /// relay, but the fix is the Steam API that code calls, and its matching is
-    /// what fills the lobby; as its own AppID it cannot create a lobby at all.
+    /// A game on Steam's relay needs its own AppID at the client, which is what
+    /// "Keep real AppID" sets. Its matchmaking identity is Spacewar either way.
     @Test
-    func aFixedRelayGameMustRunAsSpacewar() {
-        #expect(SteamNetworking.spacewarRequired(usesSteamNetworking: true, fixInstalled: true))
+    func aFixedRelayGameNeedsItsOwnAppID() {
+        #expect(SteamNetworking.needsRealAppID(usesSteamNetworking: true, fixInstalled: true))
         // Without a fix there is nothing matching players as Spacewar, so the real
         // AppID is the only identity left.
-        #expect(!SteamNetworking.spacewarRequired(usesSteamNetworking: true, fixInstalled: false))
+        #expect(!SteamNetworking.needsRealAppID(usesSteamNetworking: true, fixInstalled: false))
         // A game that does not use the relay never has to be itself.
-        #expect(!SteamNetworking.spacewarRequired(usesSteamNetworking: false, fixInstalled: true))
+        #expect(!SteamNetworking.needsRealAppID(usesSteamNetworking: false, fixInstalled: true))
     }
 }

@@ -484,5 +484,7 @@ enum FixSource {
             try FileManager.default.removeItem(at: destination)
         }
         try FileManager.default.moveItem(at: temp, to: destination)
+        progress("Downloaded \(url.lastPathComponent)"
+            + (size > 0 ? " (\(size / 1_048_576) MB)" : "") + ".")
     }
 }

@@ -74,12 +74,30 @@
             request.resolve(result);
         }
     };
+    // The install's steps, one line each, so a minute of work reads as progress
+    // instead of one sentence that never changes.
+    function onlineFixStep(text) {
+        if (!onlineStatus) return;
+        onlineStatus.hidden = false;
+        onlineStatus.style.color = '#acb2b8';
+        let list = onlineStatus.querySelector('.of-steps');
+        if (!list) {
+            onlineStatus.textContent = '';
+            list = document.createElement('div');
+            list.className = 'of-steps';
+            onlineStatus.appendChild(list);
+        }
+        const line = document.createElement('div');
+        line.textContent = '· ' + text;
+        line.style.cssText = 'font-size:12px;line-height:1.5;opacity:.85';
+        list.appendChild(line);
+        while (list.children.length > 10) list.removeChild(list.firstChild);
+    }
     window.__macsteamOnlineFix = {
-        progress(text) {
+        progress(text) { onlineFixStep(text); },
+        reset() {
             if (!onlineStatus) return;
-            onlineStatus.hidden = false;
-            onlineStatus.style.color = '#acb2b8';
-            onlineStatus.textContent = text;
+            onlineStatus.textContent = '';
         }
     };
     function request(action, fixID, name, folder, extra) {
@@ -804,7 +822,7 @@
             const warning = document.createElement('div');
             warning.style.cssText = 'font-size:12px;color:#e8a54b;margin-top:8px;'
                 + 'max-width:560px;line-height:1.45';
-            warning.textContent = 'games gonna crash yo, GDK and allat';
+            warning.textContent = 'This game is like one of the few that aint gonna connect, try if you want ig tho';
             onlineRoot.appendChild(warning);
             showConfirmCheckbox(onlineRoot);
         } else {
@@ -903,12 +921,11 @@
                 text.textContent = 'Starts as its own AppID ('
                     + appID + '). '
                     + (result.usesSteamNetworking
-                        ? 'That is what a game on Steam\'s relay servers needs, but an '
-                          + 'OnlineFix matches players as Spacewar, so it will not connect '
-                          + 'while its fix is installed.'
+                        ? 'That is what a game on Steam\'s relay servers needs, and it '
+                          + 'still matches players as Spacewar (480), so leave it on.'
                         : (result.fixInstalled
-                            ? 'An OnlineFix matches players as Spacewar (480), so it will not '
-                              + 'connect like this.'
+                            ? 'It still matches players as Spacewar (480); this only '
+                              + 'changes what Steam reports for it.'
                             : 'Turning this off starts it as Spacewar (480), the identity an '
                               + 'OnlineFix would use.'));
                 label = 'Use Spacewar (480)';
@@ -957,7 +974,7 @@
         onlineStatus.setAttribute('aria-live', 'polite');
         onlineStatus.style.cssText = 'font-size:12px;color:#acb2b8;margin-top:6px';
         if (!result.gameInstalled) {
-            onlineStatus.textContent = 'You can only install an OnlineFix AFTER you install the game!';
+            onlineStatus.textContent = 'You can only install an OnlineFix once the game is installed: the fix is built from the game\'s own files, so there has to be something there to scan.';
         }
         onlineStatus.hidden = !onlineStatus.textContent;
         onlineRoot.appendChild(onlineStatus);
@@ -1117,11 +1134,12 @@
         clearOnlineChoices();
         onlineStatus.hidden = false;
         onlineStatus.style.color = '#acb2b8';
-        onlineStatus.textContent = confirmed
+        window.__macsteamOnlineFix?.reset();
+        onlineFixStep(confirmed
             ? (folderName
                 ? `Downloading and installing “${folderName}”… this can take a minute.`
                 : 'Downloading and installing the OnlineFix… this can take a minute.')
-            : 'Checking whether OnlineFix works for this game…';
+            : 'Checking whether OnlineFix works for this game…');
         const reply = await request('onlinefix-install', null, gameName(), folderName, confirmed);
         onlineBusy = false;
         if (requestedApp !== appID || !onlineRoot) return;

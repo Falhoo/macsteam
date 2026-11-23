@@ -1,10 +1,13 @@
 // Whether a game's online play runs on Steam's own networking (SDR relay).
 //
 // Steam's relay is per AppID: the client asks Valve for that AppID's relay
-// config and tickets. A game started as Spacewar (480) has none of that, so it
-// sits at "waiting for other resources before starting the steam network relay"
-// and never joins. Those games need "Keep real AppID": their own identity is the
-// only one Steam can issue a relay for.
+// config and tickets. A game the client believes is Spacewar (480) has none of
+// that, so it sits at "waiting for other resources before starting the steam
+// network relay" and never joins. Those games need "Keep real AppID": their own
+// identity is the only one Steam can issue a relay for.
+//
+// This is about the client only. A fixed game matches players as Spacewar (480)
+// either way: that is the identity every fixed copy is in.
 //
 // This reads the game's own code only, never the files an OnlineFix installs:
 // those contain the same entry point names because the fix emulates Steam
@@ -47,13 +50,13 @@ enum SteamNetworking {
         Paths.appSupport.appendingPathComponent("steam-networking.json")
     }
 
-    /// A game with an OnlineFix installed matches other players as Spacewar (480).
-    /// That holds even when the game's own code uses Steam's relay: the fix is the
-    /// Steam API those calls go through, and its matching is what puts players in
-    /// the same lobby. Started as its own AppID, a fixed relay game cannot create a
-    /// lobby at all (RV There Yet?, both roles), while Spacewar works for host and
-    /// joiner. So a fixed game is kept on Spacewar, relay code or not.
-    static func spacewarRequired(usesSteamNetworking: Bool, fixInstalled: Bool) -> Bool {
+    /// A game whose online play runs on Steam's relay (SDR) needs "Keep real AppID":
+    /// the client asks Valve for that AppID's relay config and tickets, and it can
+    /// only do that for the AppID it believes the game is. A fixed relay game at 480
+    /// waits on "connecting to Steam relay servers" and never joins. Which AppID the
+    /// game matches under is a separate matter: a fixed game always matches as
+    /// Spacewar (480), whatever this answers.
+    static func needsRealAppID(usesSteamNetworking: Bool, fixInstalled: Bool) -> Bool {
         fixInstalled && usesSteamNetworking
     }
 

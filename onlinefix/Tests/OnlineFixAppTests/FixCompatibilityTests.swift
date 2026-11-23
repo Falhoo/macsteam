@@ -86,7 +86,7 @@ struct FixCompatibilityTests {
 
         let check = FixCompatibility.check(appID: 3527290, name: "PEAK", folder: root)
         #expect(check.verdict == FixCompatibilityVerdict.unsupported.rawValue)
-        #expect(check.title == "games gonna crash yo, GDK and allat")
+        #expect(check.title == "This game is like one of the few that aint gonna connect, try if you want ig tho")
         #expect(check.needsConfirmation)
         #expect(check.reason.contains("GDK"))
 

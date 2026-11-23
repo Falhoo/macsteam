@@ -98,17 +98,107 @@ enum PhotonFix {
         return status
     }
 
-    /// True when the game's managed assemblies include Photon.
+    /// True when the game carries Photon assemblies.
     ///
-    /// Only the `*_Data/Managed` folders are read: Unity names its assemblies there,
-    /// and walking a whole game folder (hundreds of megabytes of assets) for every
-    /// row of the list would be pointless.
+    /// A Mono build names them in `*_Data/Managed`, which is cheap to look at. An
+    /// IL2CPP build has no Managed folder: the names are string literals in the
+    /// game's metadata and code instead, so those files are read (in chunks,
+    /// stopping at the first hit). PICO PARK 2 is one of those.
     static func isPhotonGame(in folder: URL) -> Bool {
+        cacheLock.lock()
+        let cached = photonCache[folder.path]
+        cacheLock.unlock()
+        if let cached { return cached }
+        var answer = false
         for managed in managedFolders(in: folder) {
             let names = (try? Paths.fm.contentsOfDirectory(atPath: managed.path)) ?? []
-            if names.contains(where: { assemblies.contains($0.lowercased()) }) { return true }
+            if names.contains(where: { assemblies.contains($0.lowercased()) }) {
+                answer = true
+                break
+            }
+        }
+        if !answer { answer = il2cppCarriesPhoton(in: folder) }
+        cacheLock.lock()
+        photonCache[folder.path] = answer
+        cacheLock.unlock()
+        return answer
+    }
+
+    /// The answer per folder, so a big game's metadata is read once per run rather
+    /// than once per fix on every refresh.
+    private static let cacheLock = NSLock()
+    private static var photonCache: [String: Bool] = [:]
+
+    /// Assembly names as an IL2CPP build keeps them: string literals in the
+    /// metadata, not a folder of .dll files.
+    static let il2cppMarkers: [String] = [
+        "PhotonRealtime", "Photon3Unity3D", "PhotonUnityNetworking", "PhotonQuantum",
+        "PhotonVoice",
+    ]
+
+    /// How much of a game's code is read before giving up on finding Photon.
+    static let il2cppReadLimit = 512 * 1024 * 1024
+    /// One chunk at a time, so a large binary is never held in memory.
+    static let il2cppChunk = 4 * 1024 * 1024
+
+    private static func il2cppCarriesPhoton(in folder: URL) -> Bool {
+        let wanted = il2cppMarkers.map { Data($0.utf8) }
+        for file in il2cppFiles(in: folder) {
+            guard let handle = try? FileHandle(forReadingFrom: file) else { continue }
+            defer { try? handle.close() }
+            var read = 0
+            var carry = Data()
+            while read < il2cppReadLimit {
+                guard let chunk = (try? handle.read(upToCount: il2cppChunk)) ?? nil,
+                      !chunk.isEmpty else { break }
+                read += chunk.count
+                // A marker that straddles two chunks still matches.
+                var window = carry
+                window.append(chunk)
+                if wanted.contains(where: { window.range(of: $0) != nil }) { return true }
+                carry = window.suffix(16)
+            }
         }
         return false
+    }
+
+    /// The files an IL2CPP build keeps its assembly names in, smallest first: the
+    /// metadata answers for most games without the game's code file being read.
+    private static func il2cppFiles(in folder: URL) -> [URL] {
+        var small: [URL] = []
+        var large: [URL] = []
+        let relatives = ["il2cpp_data/Metadata/global-metadata.dat",
+                         "globalgamemanagers", "globalgamemanagers.assets",
+                         "resources.assets", "data.unity3d"]
+        for entry in directories(in: folder) {
+            // A Mac build keeps the same files inside its `.app`: the data under
+            // `Contents/Resources/Data`, the code under `Contents/Frameworks`.
+            if entry.pathExtension.lowercased() == "app" {
+                let data = entry.appendingPathComponent("Contents/Resources/Data")
+                for relative in relatives {
+                    let url = data.appendingPathComponent(relative)
+                    if Paths.fm.fileExists(atPath: url.path) { small.append(url) }
+                }
+                let dylib = entry.appendingPathComponent("Contents/Frameworks/GameAssembly.dylib")
+                if Paths.fm.fileExists(atPath: dylib.path) { large.append(dylib) }
+                continue
+            }
+            if !entry.lastPathComponent.lowercased().hasSuffix("_data") {
+                // A build that wraps everything in a folder of the game's own name.
+                let nested = il2cppFiles(in: entry)
+                small.append(contentsOf: nested.filter { !$0.lastPathComponent.hasPrefix("GameAssembly") })
+                large.append(contentsOf: nested.filter { $0.lastPathComponent.hasPrefix("GameAssembly") })
+                continue
+            }
+            for relative in relatives {
+                let url = entry.appendingPathComponent(relative)
+                if Paths.fm.fileExists(atPath: url.path) { small.append(url) }
+            }
+            let code = entry.deletingLastPathComponent()
+                .appendingPathComponent("GameAssembly.dll")
+            if Paths.fm.fileExists(atPath: code.path) { large.append(code) }
+        }
+        return small + large
     }
 
     /// `*_Data/Managed`, one level deep: a build wrapped in a folder of the game's

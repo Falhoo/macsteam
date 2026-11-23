@@ -412,8 +412,15 @@ private final class HubcapStorePage {
                 // through Steam so the change sticks.
                 if let stale = LaunchOptions.stale(appID: request.appID) {
                     let clean = LaunchOptions.stripped(stale)
-                    let ok = await SteamUICompat.setLaunchOptions(appID: request.appID, options: clean)
-                    let log = "\(Date()) stale=\(stale) clean=\(clean) ok=\(ok)\n"
+                    var fixed = await SteamUICompat.setLaunchOptions(appID: request.appID,
+                                                                    options: clean)
+                    // Steam's own UI is the way that sticks, but it does not always
+                    // answer. With the client closed the file can be written directly,
+                    // which is what macSteam does at its start when it finds one.
+                    if !fixed, !HubcapStoreBridge.steamIsRunning() {
+                        fixed = !LaunchOptions.clear([request.appID]).isEmpty
+                    }
+                    let log = "\(Date()) stale=\(stale) clean=\(clean) ok=\(fixed)\n"
                     let debug = Paths.steamRoot.appendingPathComponent("logs/launchoptions-debug.txt")
                     if let data = log.data(using: .utf8),
                        let handle = try? FileHandle(forWritingTo: debug) {
@@ -421,7 +428,7 @@ private final class HubcapStorePage {
                     } else {
                         try? log.data(using: .utf8)?.write(to: debug)
                     }
-                    if ok { status["launchOptionsFixed"] = true }
+                    if fixed { status["launchOptionsFixed"] = true }
                 }
                 response = status
             case "onlinefix-keep-id", "onlinefix-spacewar":

@@ -1,3 +1,12 @@
+// What a fix needs, and the tools the fix kit uses.
+//
+// An OnlineFix is three things working together: a Steam API DLL the game loads, a
+// payload DLL (`OnlineFix64.dll`, `winmm.dll`, and the other proxies) that the loader
+// starts, and `OnlineFix.ini`, which tells the payload which AppID the game really is.
+// Deciding where each of those goes is `FixPlan`'s job and putting them there is
+// `FixApply`'s; this file keeps the extraction, the small facts about a game folder
+// (where Steam starts it from, which Steam API DLL it loads, whether it is a Mac
+// build), the record of what an install wrote, and the checks that read it back.
 import Foundation
 
 /// Whether a recorded fix is still in the game folder.
@@ -120,54 +129,32 @@ enum FixInstaller {
         var targetDirectory: String
     }
 
-    // MARK: - From an archive
+    // MARK: - Extracting
 
-    /// Unpacks a fix archive and installs it. The unpacking runs off the calling
-    /// thread and reports its percentage, because a fix archive can be large and
-    /// 7-Zip gives no sign of life for minutes at a time.
-    static func install(
-        archive: URL,
-        game: ManagedGame,
-        allowGDK: Bool = false,
-        allowNative: Bool = false,
-        progress: @escaping @Sendable (String) -> Void
-    ) async throws -> ImportResult {
-        try await install(archive: archive, game: game,
-                          password: FixSource.defaultPassword, allowGDK: allowGDK,
-                          allowNative: allowNative, progress: progress)
-    }
-
-    static func install(
-        archive: URL,
-        game: ManagedGame,
-        password: String?,
-        allowGDK: Bool = false,
-        allowNative: Bool = false,
-        progress: @escaping @Sendable (String) -> Void
-    ) async throws -> ImportResult {
+    /// Unpacks a fix archive and returns the folder it unpacked into, which the caller
+    /// removes. Where each file goes is decided afterwards, from the package and the
+    /// game's own folder.
+    static func extract(archive: URL, password: String?,
+                        progress: @escaping @Sendable (String) -> Void) async throws -> URL {
         guard let sevenZip = sevenZip() else {
             throw ManagerError("The bundled 7-Zip tool is missing from this app.")
         }
-
         let temp = Paths.fm.temporaryDirectory
             .appendingPathComponent("onlinefix-\(UUID().uuidString)", isDirectory: true)
         try Paths.ensureDir(temp)
-        defer { try? Paths.fm.removeItem(at: temp) }
 
         let name = archive.lastPathComponent
         progress("Extracting \(name)…")
         let pw = (password?.isEmpty == false) ? password! : FixSource.defaultPassword
-        // -bsp2 puts 7-Zip's progress on stdout and -bb1 its file names, which is
-        // what lets the window show that it is still working.
         var args = ["x", "-y", "-bsp2", "-bb1", "-o\(temp.path)", "-p\(pw)", archive.path]
         var result = await extract(sevenZip: sevenZip, args: args, name: name, progress: progress)
 
         if result.timedOut {
-            throw ManagerError("Extracting \(name) took longer than 15 minutes and was stopped. "
-                + "If that archive is the whole game rather than a fix, unpack it by hand and "
-                + "use “Choose archive…” on the extracted folder's files.")
+            try? Paths.fm.removeItem(at: temp)
+            throw ManagerError("Extracting \(name) took longer than 15 minutes and was "
+                + "stopped. If that archive is the whole game rather than a fix, unpack it "
+                + "by hand and use “Choose archive…” on the extracted folder's files.")
         }
-
         if result.code != 0 {
             // Not encrypted after all? Try once without a password.
             args = ["x", "-y", "-bsp2", "-bb1", "-o\(temp.path)", archive.path]
@@ -175,25 +162,24 @@ enum FixInstaller {
             let second = await extract(sevenZip: sevenZip, args: args, name: name,
                                        progress: progress)
             if second.timedOut {
+                try? Paths.fm.removeItem(at: temp)
                 throw ManagerError("Extracting \(name) took longer than 15 minutes and was stopped.")
             }
             if second.code == 0 {
                 result = second
             } else {
+                try? Paths.fm.removeItem(at: temp)
                 let detail = (result.err + result.out).lowercased()
                 if detail.contains("password") || detail.contains("wrong") {
-                    throw ManagerError("The archive password was rejected. The default is “\(FixSource.defaultPassword)”.")
+                    throw ManagerError("The archive password was rejected. The default is "
+                        + "“\(FixSource.defaultPassword)”.")
                 }
                 throw ManagerError("Extraction failed: \((second.err + second.out).suffix(600))")
             }
         }
-
-        progress("Installing the fix…")
-        return try installExtracted(from: temp, game: game, allowGDK: allowGDK,
-                                    allowNative: allowNative, progress: progress)
+        return temp
     }
 
-    /// Runs 7-Zip and turns its progress output into messages for the window.
     private static func extract(sevenZip: URL, args: [String], name: String,
                                 progress: @escaping @Sendable (String) -> Void) async -> Shell.Result {
         let throttle = Throttle()
@@ -242,187 +228,10 @@ enum FixInstaller {
         }
     }
 
-    // MARK: - From an extracted folder
-
-    /// Two shapes are supported:
-    ///  * Steamworks games: the package contains `steam_api64.dll`, which replaces the
-    ///    copy the game actually loads.
-    ///  * Everything else (GDK / Microsoft Store builds): the package is meant to be
-    ///    unpacked into the game folder, so its contents are merged in.
-    static func installExtracted(
-        from root: URL,
-        game: ManagedGame,
-        allowGDK: Bool = false,
-        allowNative: Bool = false,
-        progress: (String) -> Void
-    ) throws -> ImportResult {
-
-        guard let folder = Store.gameFolder(for: game.id, name: game.name) else {
-            throw ManagerError("Could not find the installed game folder for \(game.name) (App \(game.id)). Install it in Steam first.")
-        }
-        if !allowNative, let bundle = nativeMacBundle(in: folder) {
-            throw ManagerError("Steam installed the native macOS build of \(game.name) "
-                + "(\(bundle.lastPathComponent)), and OnlineFix only patches Windows game files, "
-                + "so there is nothing here for it to change. In Steam, open the game's Properties, "
-                + "Compatibility, force the Windows version, and try again.")
-        }
-        return try installExtracted(from: root, into: folder, appID: game.id,
-                                    allowGDK: allowGDK, allowNative: allowNative,
-                                    progress: progress)
-    }
-
-    /// The same, into a game folder the caller already knows (the tests use one).
-    static func installExtracted(
-        from root: URL,
-        into folder: URL,
-        appID: Int? = nil,
-        allowGDK: Bool = false,
-        allowNative: Bool = false,
-        progress: (String) -> Void
-    ) throws -> ImportResult {
-
-        progress("Inspecting the fix…")
-        let extracted = try enumerateFiles(in: root).filter { $0.lastPathComponent != ".DS_Store" }
-        guard !extracted.isEmpty else {
-            throw ManagerError("The archive is empty.")
-        }
-
-        // The Microsoft Store (GDK) package needs the Xbox GDK runtime, which is not
-        // part of Wine: its xsapi.dll stops the game at "Failed to load
-        // xgameruntime.dll. Error code: 126". Its own self-protection also rejects a
-        // rewritten Steam shape, so nothing of it can be used here.
-        let archiveNames = Set(extracted.map { $0.lastPathComponent.lowercased() })
-        let isGDK = archiveNames.contains("gdk_helper.bat")
-            || archiveNames.contains("wdapp.exe")
-            || archiveNames.contains("xsapi.dll")
-        if isGDK, !allowGDK, !gdkRuntimeAvailable(in: folder, appID: appID) {
-            throw ManagerError("This fix is the Microsoft Store (GDK) build: it needs the "
-                + "Xbox GDK runtime (xgameruntime.dll), which only exists on Windows, and its "
-                + "self-protection refuses a rewritten Steam version. Play the game as itself "
-                + "without the fix.")
-        }
-
-        let apiDLLs = extracted.filter {
-            let n = $0.lastPathComponent.lowercased()
-            return n == "steam_api64.dll" || n == "steam_api.dll"
-        }
-
-        var written: [String] = []
-        let basePath = root.standardizedFileURL.path
-
-        if !apiDLLs.isEmpty {
-            let existing = try findExistingAPIDLL(in: folder)
-            let targetDir: URL
-            if let existing {
-                targetDir = existing.deletingLastPathComponent()
-            } else if let win64 = findWin64Binaries(in: folder) {
-                targetDir = win64
-            } else {
-                targetDir = folder
-            }
-
-            // Some fixes are laid out like the game folder itself
-            // (`Engine/Binaries/.../steam_api64.dll`, `Ride/Binaries/Win64/OnlineFix64.dll`).
-            // Those relative paths say where every file goes. Deciding per file
-            // matters: requiring the whole archive to mirror the game folder meant
-            // one stray file at its root (a readme, a second `.url`) sent everything
-            // down the flat fallback below, which dropped OnlineFix64.dll and the
-            // winmm.dll proxy, so the game could not load the patched Steam API DLL
-            // while Steam still showed the fix installed.
-            var mirrored: [(source: URL, folder: URL)] = []
-            // Files outside the mirrored tree keep their archive path. A Photon fix
-            // ships `winmm.dll`, `BepInEx/core/BepInEx.Preloader.dll` and
-            // `Custom.dll` at its root, and Unity only loads that chain from beside
-            // its executable: dropping them left a fix that looked installed while
-            // OnlineFix's Photon patch never ran.
-            var loose: [(source: URL, relative: String?)] = []
-            for file in extracted {
-                let path = file.standardizedFileURL.path
-                guard path.hasPrefix(basePath + "/") else { loose.append((file, nil)); continue }
-                let relative = String(path.dropFirst(basePath.count + 1))
-                if let parent = mirroredParent(for: relative, in: folder) {
-                    mirrored.append((file, parent))
-                } else {
-                    loose.append((file, relative))
-                }
-            }
-
-            if !mirrored.isEmpty {
-                progress("Unpacking the fix into \(folder.lastPathComponent)…")
-                for item in mirrored {
-                    written.append(try place(item.source, into: item.folder))
-                }
-                // The archive is laid out like the game folder, so a loose file's own
-                // path says where it goes. Everything at the archive root belongs at
-                // the game root: OnlineFix's loader reads `dlllist.txt`, `OnlineFix.ini`
-                // and `OnlineFix64.dll` from there, not from the Steam API DLL's folder.
-                let wrapper = archiveWrapper(mirrored: mirrored, base: basePath, in: folder)
-                for item in loose {
-                    guard let relative = item.relative else {
-                        if isFixPayload(item.source) {
-                            written.append(try place(item.source, into: targetDir))
-                        }
-                        continue
-                    }
-                    written.append(try place(item.source,
-                                             at: stripping(wrapper, from: relative),
-                                             in: folder))
-                }
-                written.append(contentsOf: try installOverlayRenderer(
-                    into: overlayFolder(written: written, fallback: targetDir),
-                    appID: appID, progress: progress))
-                disableOverlayStub(in: written)
-                return ImportResult(files: written, targetDirectory: targetDir.path)
-            }
-
-            progress("Installing Steam API DLL(s)…")
-            // A flat fix (no folders of its own) is laid out for the game's own
-            // executable: the Steam API DLL goes where the game loads it from, and
-            // everything else beside the executable, which is where Windows searches
-            // for a DLL. Putting the whole set at the game folder's root left games
-            // whose executable lives one level down — Buckshot Roulette keeps it in
-            // "Buckshot Roulette_windows" — with a fix Windows never loads.
-            let exeFolder = launchFolder(in: folder) ?? folder
-            let apiFolder = apiDestination(near: exeFolder, fallback: targetDir)
-            for file in extracted {
-                let relative = archiveRelative(file, base: basePath)
-                let name = file.lastPathComponent.lowercased()
-                if name == "steam_api64.dll" || name == "steam_api.dll"
-                    || name == "steam_api64.of" || name == "steam_api.of" {
-                    written.append(try place(file, into: apiFolder))
-                } else if PhotonFix.belongsAtGameRoot(relative) {
-                    written.append(try place(file, at: relative, in: exeFolder))
-                } else {
-                    written.append(try place(file, into: exeFolder))
-                }
-            }
-            written.append(contentsOf: try installOverlayRenderer(
-                into: overlayFolder(written: written, fallback: exeFolder),
-                appID: appID, progress: progress))
-            disableOverlayStub(in: written)
-            return ImportResult(files: written, targetDirectory: apiFolder.path)
-        }
-
-        // Whole-folder fix: merge the tree into the game folder, keeping originals.
-        progress("Unpacking the fix into \(folder.lastPathComponent)…")
-        for file in extracted {
-            let relative = file.standardizedFileURL.path.replacingOccurrences(of: basePath + "/", with: "")
-            guard !relative.isEmpty else { continue }
-            let parent = (relative as NSString).deletingLastPathComponent
-            let destinationFolder = parent.isEmpty ? folder : folder.appendingPathComponent(parent, isDirectory: true)
-            if !Paths.fm.fileExists(atPath: destinationFolder.path) {
-                try Paths.ensureDir(destinationFolder)
-            }
-            written.append(try place(file, into: destinationFolder))
-        }
-        disableOverlayStub(in: written)
-        return ImportResult(files: written, targetDirectory: folder.path)
-    }
-
     // MARK: - Helpers
 
     /// Executables a game ships beside its own but Steam never starts.
-    private static let helperExecutables: Set<String> = [
+    static let helperExecutableNames: Set<String> = [
         "unitycrashhandler64.exe", "unitycrashhandler32.exe", "crashreportclient.exe",
         "wdapp.exe", "gamelaunchhelper.exe", "vcredist_x64.exe", "vcredist_x86.exe",
         "dxwebsetup.exe", "unins000.exe",
@@ -446,7 +255,7 @@ enum FixInstaller {
                 continue
             }
             guard url.pathExtension.lowercased() == "exe",
-                  !helperExecutables.contains(url.lastPathComponent.lowercased()),
+                  !helperExecutableNames.contains(url.lastPathComponent.lowercased()),
                   (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
             else { continue }
             let size = Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
@@ -456,136 +265,6 @@ enum FixInstaller {
             }
         }
         return best?.url.deletingLastPathComponent()
-    }
-
-    /// Where the game loads its Steam API DLL from. Unity installs it under
-    /// `<Name>_Data/Plugins/<arch>`; other builds keep it beside the executable.
-    private static func apiDestination(near exeFolder: URL, fallback: URL) -> URL {
-        if let existing = try? findExistingAPIDLL(in: exeFolder) {
-            return existing.deletingLastPathComponent()
-        }
-        let entries = (try? Paths.fm.contentsOfDirectory(
-            at: exeFolder, includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles])) ?? []
-        for entry in entries where entry.lastPathComponent.lowercased().hasSuffix("_data") {
-            for arch in ["x86_64", "x86"] {
-                let plugins = entry.appendingPathComponent("Plugins/\(arch)", isDirectory: true)
-                if Paths.fm.fileExists(atPath: plugins.path) { return plugins }
-            }
-        }
-        if Paths.fm.fileExists(atPath: exeFolder.path) { return exeFolder }
-        return fallback
-    }
-
-    /// The game folder an archive path belongs in, or nil when the path names no
-    /// folder of this game. The archive is normally laid out like the game folder,
-    /// so the file's own parent is the answer; some archives wrap everything in a
-    /// folder named after the game, in which case dropping that first component
-    /// finds the real one.
-    private static func mirroredParent(for relative: String, in folder: URL) -> URL? {
-        let parts = relative.split(separator: "/").map(String.init)
-        guard parts.count > 1 else { return nil }
-        let candidates = [Array(parts.dropLast()), Array(parts.dropLast().dropFirst())]
-        for parts in candidates where !parts.isEmpty {
-            let url = folder.appendingPathComponent(parts.joined(separator: "/"),
-                                                    isDirectory: true)
-            if Paths.fm.fileExists(atPath: url.path) { return url }
-        }
-        return nil
-    }
-
-    /// Where the fix put SteamOverlay64.dll, so the renderer it loads goes beside it
-    /// rather than in the Steam API DLL's folder.
-    private static func overlayFolder(written: [String], fallback: URL) -> URL {
-        for path in written where (path as NSString).lastPathComponent == "SteamOverlay64.dll" {
-            return URL(fileURLWithPath: path).deletingLastPathComponent()
-        }
-        return fallback
-    }
-
-    /// Turns each placed SteamOverlay64.dll into one that does nothing at load, so
-    /// its missing renderer cannot stop the game before it starts.
-    private static func disableOverlayStub(in written: [String]) {
-        for path in written where (path as NSString).lastPathComponent == "SteamOverlay64.dll" {
-            OverlayStub.disable(at: URL(fileURLWithPath: path))
-        }
-    }
-
-    /// What a fix archive ships around the Steam API DLL: the loader DLL, the
-    /// overlay, and the small text files that configure them.
-    private static func isFixPayload(_ file: URL) -> Bool {
-        let name = file.lastPathComponent.lowercased()
-        return name == "onlinefix64.dll" || name == "onlinefix.dll"
-            || name == "steamoverlay64.dll"
-            || ["ini", "txt", "url"].contains(file.pathExtension.lowercased())
-    }
-
-    /// Copies a file into a folder, keeping a one-time backup of anything it replaces.
-    ///
-    /// The copy lands in a staging file first, so the game's own file stays in place
-    /// until the fix's copy is whole. A full disk or a lost permission used to leave
-    /// the game with neither its original nor the fix, which then would not start.
-    private static func place(_ source: URL, into folder: URL) throws -> String {
-        let destination = folder.appendingPathComponent(source.lastPathComponent)
-        let staging = folder.appendingPathComponent(".\(source.lastPathComponent).onlinefix-new")
-        try? Paths.fm.removeItem(at: staging)
-        try Paths.fm.copyItem(at: source, to: staging)
-        do {
-            if Paths.fm.fileExists(atPath: destination.path) {
-                let backup = destination.appendingPathExtension("onlinefix-backup")
-                if !Paths.fm.fileExists(atPath: backup.path) {
-                    try Paths.fm.copyItem(at: destination, to: backup)
-                }
-                try Paths.fm.removeItem(at: destination)
-            }
-            try Paths.fm.moveItem(at: staging, to: destination)
-        } catch {
-            try? Paths.fm.removeItem(at: staging)
-            throw error
-        }
-        return destination.path
-    }
-
-    /// Copies a file to an archive-relative path under the game folder, creating the
-    /// folders it needs. The BepInEx chain has to keep its tree (`core/`, `plugins/`).
-    private static func place(_ source: URL, at relative: String, in folder: URL) throws -> String {
-        let parent = (relative as NSString).deletingLastPathComponent
-        let destinationFolder = parent.isEmpty
-            ? folder
-            : folder.appendingPathComponent(parent, isDirectory: true)
-        if !Paths.fm.fileExists(atPath: destinationFolder.path) {
-            try Paths.ensureDir(destinationFolder)
-        }
-        return try place(source, into: destinationFolder)
-    }
-
-    /// A file's path relative to the extracted archive's root.
-    private static func archiveRelative(_ file: URL, base: String) -> String {
-        let path = file.standardizedFileURL.path
-        guard path.hasPrefix(base + "/") else { return file.lastPathComponent }
-        return String(path.dropFirst(base.count + 1))
-    }
-
-    /// Some archives wrap everything in a folder named after the game. When a
-    /// mirrored file only matched after its first component was dropped, that
-    /// component is the wrapper and every loose file has it too.
-    private static func archiveWrapper(mirrored: [(source: URL, folder: URL)],
-                                       base: String, in folder: URL) -> String? {
-        for item in mirrored {
-            let parts = archiveRelative(item.source, base: base)
-                .split(separator: "/").map(String.init)
-            guard parts.count > 1 else { continue }
-            let stripped = parts.dropFirst().joined(separator: "/")
-            if Paths.fm.fileExists(atPath: folder.appendingPathComponent(stripped).path) {
-                return parts[0]
-            }
-        }
-        return nil
-    }
-
-    private static func stripping(_ wrapper: String?, from relative: String) -> String {
-        guard let wrapper, relative.hasPrefix(wrapper + "/") else { return relative }
-        return String(relative.dropFirst(wrapper.count + 1))
     }
 
     static func enumerateFiles(in root: URL) throws -> [URL] {
@@ -652,6 +331,14 @@ enum FixInstaller {
     /// "Failed to load xgameruntime.dll. Error code: 126".
     static func gdkIssue(for fix: FixRecord) -> String? {
         guard isGDKFix(fix) else { return nil }
+        // A fix that carries Steam's API as well belongs to a game that runs as the
+        // Steam build, which is what PEAK does: its GDK files are the runtime the game
+        // looks for, not a sign that it cannot start. Only a fix with no Steam side is
+        // the Microsoft Store one that stops at error 126.
+        let names = Set(fix.files.map { ($0 as NSString).lastPathComponent.lowercased() })
+        guard !names.contains("steam_api64.dll"), !names.contains("steam_api.dll") else {
+            return nil
+        }
         return "This is the Microsoft Store (GDK) version of the fix, and it needs the Xbox GDK "
             + "runtime (xgameruntime.dll), which only exists on Windows. The game stops with "
             + "error 126 while loading it. Remove the fix and play the Steam build as itself."
@@ -704,25 +391,6 @@ enum FixInstaller {
         return (try? kept.joined(separator: "\n").data(using: .utf8)?.write(to: list, options: .atomic)) != nil
     }
 
-    /// Steam's overlay loader (`SteamOverlay64.dll`) reads Steam's path from the
-    /// Wine registry and loads `GameOverlayRenderer64.dll` from there. A Steam update
-    /// or a prefix repair removes that copy, and the overlay then fails with error
-    /// 126, which stops the loader before OnlineFix's Photon patch is reached.
-    /// Puts it back in the game folder and in the prefix. Safe to call often.
-    /// Puts the renderer beside the fix's own SteamOverlay64.dll (where the
-    /// recorded path says it is), and in the Windows prefix. Called on refresh, so
-    /// a prefix Steam made after the install still gets it.
-    static func ensureOverlayRenderer(appID: Int, gameFolder: URL, fixFiles: [String]) {
-        let recorded = fixFiles.first {
-            ($0 as NSString).lastPathComponent == "SteamOverlay64.dll"
-        }
-        let folder = recorded.map { URL(fileURLWithPath: $0).deletingLastPathComponent() }
-            ?? overlayFolder(under: gameFolder)
-        guard let folder else { return }
-        _ = try? installOverlayRenderer(into: folder, appID: appID, progress: { _ in })
-    }
-
-    /// The folder holding the overlay stub, when the record does not say.
     private static func overlayFolder(under folder: URL) -> URL? {
         guard let enumerator = Paths.fm.enumerator(
             at: folder,
@@ -735,85 +403,6 @@ enum FixInstaller {
             }
             if url.lastPathComponent == "SteamOverlay64.dll" {
                 return url.deletingLastPathComponent()
-            }
-        }
-        return nil
-    }
-
-    private static func installOverlayRenderer(into folder: URL, appID: Int?,
-                                               progress: (String) -> Void) throws -> [String] {
-        guard Paths.fm.fileExists(atPath: folder.appendingPathComponent("SteamOverlay64.dll").path),
-              let source = steamOverlayRenderer() else { return [] }
-
-        var written: [String] = []
-        var announced = false
-        // Only into the prefix's Steam folders: the stub asks Steam's registry entry
-        // for them. A copy beside the game is what Windows would use, but in the
-        // Wine prefix Steam's renderer started from the game folder takes that folder
-        // for the Steam client and exits the process before the game initialises —
-        // Godot and Unity then die with no log at all.
-        for target in windowsPrefixDirectories(for: appID) {
-            guard Paths.fm.fileExists(atPath: target.path) else { continue }
-            let renderer = target.appendingPathComponent("GameOverlayRenderer64.dll")
-            guard !Paths.fm.fileExists(atPath: renderer.path) else { continue }
-            if !announced {
-                progress("Installing the Steam overlay the OnlineFix overlay loads…")
-                announced = true
-            }
-            written.append(try place(source, into: target))
-        }
-        return written
-    }
-
-    /// Where the game's Windows prefix keeps Steam: the overlay asks the registry
-    /// for Steam's InstallPath and then loads the renderer from there.
-    private static func windowsPrefixDirectories(for appID: Int?) -> [URL] {
-        guard let appID else { return [] }
-        let pfx = Paths.steamSupport
-            .appendingPathComponent("steamapps/compatdata/\(appID)/pfx", isDirectory: true)
-        guard Paths.fm.fileExists(atPath: pfx.path) else { return [] }
-        return [
-            pfx.appendingPathComponent("drive_c/Program Files (x86)/Steam", isDirectory: true),
-            pfx.appendingPathComponent("drive_c/windows/system32", isDirectory: true),
-        ]
-    }
-
-    /// The Windows overlay renderer Steam already ships for its legacy compat layer.
-    private static func steamOverlayRenderer() -> URL? {
-        let roots = [
-            "/Applications/Steam.app/Contents/MacOS/legacycompat",
-            Paths.steamSupport
-                .appendingPathComponent("Steam.AppBundle/Steam/Contents/MacOS/legacycompat")
-                .path,
-            Paths.home
-                .appendingPathComponent("Library/Application Support/notproton/bridge/legacycompat")
-                .path,
-        ]
-        for root in roots {
-            let url = URL(fileURLWithPath: root)
-                .appendingPathComponent("GameOverlayRenderer64.dll")
-            if Paths.fm.fileExists(atPath: url.path) { return url }
-        }
-        return nil
-    }
-
-    static func findWin64Binaries(in folder: URL) -> URL? {
-        let candidates = [
-            folder.appendingPathComponent("Dungeons/Binaries/Win64", isDirectory: true),
-            folder.appendingPathComponent("Binaries/Win64", isDirectory: true),
-        ]
-        for candidate in candidates where Paths.fm.fileExists(atPath: candidate.path) {
-            return candidate
-        }
-        if let enumerator = Paths.fm.enumerator(at: folder, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-            for case let url as URL in enumerator {
-                guard url.lastPathComponent == "Win64",
-                      (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-                else { continue }
-                if let contents = try? Paths.fm.contentsOfDirectory(atPath: url.path),
-                   contents.contains(where: { $0.lowercased().hasSuffix(".exe") }) {
-                    return url
-                }
             }
         }
         return nil

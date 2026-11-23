@@ -124,4 +124,45 @@ enum WineOverride {
     private static func userReg(appID: Int) -> URL? {
         prefix(appID: appID)?.appendingPathComponent("user.reg")
     }
+
+    // MARK: - Removal
+
+    /// The same registry text without any of the overrides a fix needed, and the DLL
+    /// names whose lines went. Every other key in the prefix is left as it is.
+    static func clearing(_ text: String) -> (text: String, removed: [String]) {
+        var result = text
+        var removed: [String] = []
+        for dll in fixDLLs {
+            while let found = line(for: dll, in: result) {
+                let next = removing(line: found, from: result)
+                // A line that does not come out would loop forever, so stop instead.
+                guard next != result else { break }
+                result = next
+                if !removed.contains(dll) { removed.append(dll) }
+            }
+        }
+        return (result, removed)
+    }
+
+    /// The text with one exact registry line gone.
+    static func removing(line target: String, from text: String) -> String {
+        let wanted = target.trimmingCharacters(in: .whitespaces)
+        var lines = text.components(separatedBy: "\n")
+        if let index = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == wanted }) {
+            lines.remove(at: index)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Takes this game's OnlineFix overrides out of its prefix, and reports the DLLs
+    /// whose line went. Only the lines this wrote are touched.
+    @discardableResult
+    static func clear(appID: Int) -> [String] {
+        guard let reg = userReg(appID: appID),
+              let text = try? String(contentsOf: reg, encoding: .isoLatin1) else { return [] }
+        let cleared = clearing(text)
+        guard !cleared.removed.isEmpty else { return [] }
+        let data = cleared.text.data(using: .isoLatin1) ?? Data(cleared.text.utf8)
+        return (try? data.write(to: reg, options: .atomic)) != nil ? cleared.removed : []
+    }
 }

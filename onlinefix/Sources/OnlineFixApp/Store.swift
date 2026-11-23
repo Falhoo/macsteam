@@ -55,6 +55,48 @@ enum Store {
         return Paths.fm.fileExists(atPath: url.path) ? url : nil
     }
 
+    /// True when Steam has put the game's files there, not just a folder with its name.
+    ///
+    /// A fix is built from what the game's own files say: its bitness, the folder it
+    /// loads Steam's API DLL from, whether it is a .NET build, which engine it is. A
+    /// folder Steam made and never filled, or one a cancelled download left behind,
+    /// gives the scan nothing to read, and the build would then guess at the rest.
+    /// Steam writes `StateFlags 4` once every file of an app is on disk.
+    static func isInstalled(appID: Int, folder: URL?, manifest: URL? = nil) -> Bool {
+        guard let folder else { return false }
+        let file = manifest ?? appManifest(for: appID)
+        if let flags = stateFlags(manifest: file), flags != 0, flags & fullyInstalled == 0 {
+            return false
+        }
+        return hasGameFiles(in: folder)
+    }
+
+    /// What a player is told when the folder exists but the game is not downloaded:
+    /// the fix is built from the game's own files, so there has to be something to read.
+    static let notInstalledMessage =
+        "Install the game in Steam first: OnlineFix builds the fix from what the game's "
+        + "own files say (its bitness, its engine, where it loads Steam from), and its "
+        + "folder has none of them yet. Start the download in Steam, and install the fix "
+        + "once it finishes."
+
+    /// Steam's flag for an app whose files are all on disk.
+    static let fullyInstalled = 4
+
+    static func appManifest(for appID: Int) -> URL {
+        Paths.steamApps.appendingPathComponent("appmanifest_\(appID).acf")
+    }
+
+    static func stateFlags(manifest: URL) -> Int? {
+        guard let text = try? String(contentsOf: manifest, encoding: .utf8) else { return nil }
+        return firstMatch(in: text, pattern: "\"StateFlags\"\\s+\"?(\\d+)").flatMap { Int($0) }
+    }
+
+    /// An executable, or a Mac app bundle: the two things the scan reads a game from.
+    static func hasGameFiles(in folder: URL) -> Bool {
+        if FixInstaller.nativeMacBundle(in: folder) != nil { return true }
+        return FixInstaller.launchFolder(in: folder) != nil
+    }
+
     /// A game folder in steamapps/common whose name matches the game's name.
     /// Used when there is no appmanifest (a game macSteam unlocked, or one
     /// Steam has not written a manifest for yet).
