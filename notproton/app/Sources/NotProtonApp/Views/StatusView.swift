@@ -328,6 +328,10 @@ struct StatusView: View {
                     .buttonStyle(.glass)
                     .disabled(!status.isIdle)
                     .help("Add a copy of CrossOver from another folder.")
+                Button("Install CrossOver\u{2026}", systemImage: "arrow.down.circle") { Task { await status.installCrossOver() } }
+                    .buttonStyle(.glass)
+                    .disabled(!status.isIdle)
+                    .help("Download CrossOver \(CrossOverInstaller.defaultVersion) from CodeWeavers and install it into /Applications.")
             }
 
             componentsSection(snapshot.payload)

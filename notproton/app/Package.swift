@@ -35,6 +35,7 @@ let package = Package(
             resources: (hasPayload ? [.copy("Resources/payload")] : []) + [
                 .process("Resources/Localization"),
                 .copy("Resources/payload.manifest"),
+                .copy("Resources/crossover-install.sh"),
                 .copy("Resources/valve-packages.manifest"),
                 .copy("Resources/detour2.bin"),
                 .copy("Resources/detour2-fex.bin"),

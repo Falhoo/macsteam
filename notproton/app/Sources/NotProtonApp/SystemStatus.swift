@@ -288,6 +288,36 @@ final class SystemStatus {
         await refresh()
     }
 
+    /// Downloads CrossOver 26.3.x from CodeWeavers and installs it into
+    /// /Applications. The bundled script does the work; macOS asks for the
+    /// administrator password once, when it starts.
+    func installCrossOver() async {
+        guard isIdle else { return }
+
+        let target = CrossOverInstaller.target
+        if FileManager.default.fileExists(atPath: target.path(percentEncoded: false)) {
+            let alert = NSAlert()
+            alert.messageText = String(localized: "CrossOver is already in /Applications.")
+            alert.informativeText = String(localized: "Install CrossOver \(CrossOverInstaller.defaultVersion) over it? The copy in /Applications is replaced.")
+            alert.addButton(withTitle: String(localized: "Install"))
+            alert.addButton(withTitle: String(localized: "Cancel"))
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+
+        await perform(from: String(localized: "Installing CrossOver…")) { progress in
+            let outcome = try await CrossOverInstaller.install { label in
+                progress(label)
+            }
+            switch outcome {
+            case .installed:
+                NSWorkspace.shared.open(target)
+                return String(localized: "CrossOver \(CrossOverInstaller.defaultVersion) installed in /Applications.")
+            case .cancelled:
+                return String(localized: "CrossOver install cancelled.")
+            }
+        }
+    }
+
     func chooseSteam() async {
         let current = SupportPaths.Steam.app
         let panel = NSOpenPanel()

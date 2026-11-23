@@ -3064,6 +3064,9 @@
         }
       }
     },
+    "Checking CrossOver's signature…" : {
+      "shouldTranslate" : false
+    },
     "Checking Steam" : {
       "localizations" : {
         "de" : {
@@ -3820,6 +3823,9 @@
         }
       }
     },
+    "Copying CrossOver into /Applications…" : {
+      "shouldTranslate" : false
+    },
     "Copying your files…" : {
       "localizations" : {
         "de" : {
@@ -3991,6 +3997,9 @@
     "CrossOver" : {
       "shouldTranslate" : false
     },
+    "CrossOver %@ installed in /Applications." : {
+      "shouldTranslate" : false
+    },
     "CrossOver app not found." : {
       "localizations" : {
         "de" : {
@@ -4047,6 +4056,9 @@
         }
       }
     },
+    "CrossOver install cancelled." : {
+      "shouldTranslate" : false
+    },
     "CrossOver is activated." : {
       "localizations" : {
         "de" : {
@@ -4074,6 +4086,9 @@
           }
         }
       }
+    },
+    "CrossOver is already in /Applications." : {
+      "shouldTranslate" : false
     },
     "CrossOver itself is not removed." : {
       "localizations" : {
@@ -4803,6 +4818,9 @@
         }
       }
     },
+    "Download CrossOver %@ from CodeWeavers and install it into /Applications." : {
+      "shouldTranslate" : false
+    },
     "Download missing Valve binaries." : {
       "localizations" : {
         "de" : {
@@ -4858,6 +4876,9 @@
           }
         }
       }
+    },
+    "Downloading CrossOver…" : {
+      "shouldTranslate" : false
     },
     "Downloading from %@" : {
       "localizations" : {
@@ -5279,6 +5300,12 @@
         }
       }
     },
+    "Install CrossOver %@ over it? The copy in /Applications is replaced." : {
+      "shouldTranslate" : false
+    },
+    "Install CrossOver…" : {
+      "shouldTranslate" : false
+    },
     "Install NotProton" : {
       "localizations" : {
         "de" : {
@@ -5474,6 +5501,9 @@
           }
         }
       }
+    },
+    "Installing CrossOver…" : {
+      "shouldTranslate" : false
     },
     "Installing compatibility tool" : {
       "localizations" : {
@@ -10773,6 +10803,12 @@
         }
       }
     },
+    "The CrossOver install failed." : {
+      "shouldTranslate" : false
+    },
+    "The CrossOver installer script is missing from the app." : {
+      "shouldTranslate" : false
+    },
     "The Steam client will not update itself." : {
       "localizations" : {
         "de" : {
@@ -11164,6 +11200,9 @@
           }
         }
       }
+    },
+    "The installer finished but /Applications/CrossOver.app is not there." : {
+      "shouldTranslate" : false
     },
     "The patched %@ ntdll has not been copied into place." : {
       "localizations" : {
@@ -11724,6 +11763,9 @@
           }
         }
       }
+    },
+    "Unpacking CrossOver…" : {
+      "shouldTranslate" : false
     },
     "Update" : {
       "localizations" : {
