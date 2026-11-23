@@ -1011,10 +1011,17 @@ struct PatchSheetView: View {
 
     private var fixSource: some View {
         GlassSection(title: "Fix source") {
+            if OnlineFixAvailability.isBroken {
+                Text(OnlineFixAvailability.message)
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 12)
+            }
             HStack(spacing: 10) {
                 Button("Fetch fix automatically") { model.fetchFix() }
                     .buttonStyle(.glassProminent)
-                    .disabled(model.busy)
+                    .disabled(model.busy || OnlineFixAvailability.isBroken)
                 Button("Open online-fix.me") { model.openFixSite() }
                     .buttonStyle(.glass)
                 Spacer(minLength: 0)
@@ -1041,7 +1048,7 @@ struct PatchSheetView: View {
                                  text: $model.archivePassword)
                 Button("Install from archive") { model.importFix() }
                     .buttonStyle(.glass)
-                    .disabled(model.busy || model.archiveURL == nil)
+                    .disabled(model.busy || model.archiveURL == nil || OnlineFixAvailability.isBroken)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 15)
@@ -1304,7 +1311,8 @@ struct InstallationView: View {
                 }
                 .buttonStyle(.glassProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(model.busy || Steam.isRunning() || !model.steamPresent)
+                .disabled(model.busy || Steam.isRunning() || !model.steamPresent
+                          || OnlineFixAvailability.isBroken)
                 Button("Remove OnlineFix") { model.uninstall() }
                     .disabled(model.busy)
                 Button("Deploy profiles") { model.deployProfiles() }

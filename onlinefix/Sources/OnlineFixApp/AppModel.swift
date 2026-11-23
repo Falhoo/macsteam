@@ -97,6 +97,11 @@ final class AppModel: ObservableObject {
     // MARK: - Install
 
     func install() {
+        guard !OnlineFixAvailability.isBroken else {
+            status = OnlineFixAvailability.message
+            fixMessage = OnlineFixAvailability.message
+            return
+        }
         run { try Steam.install(progress: { self.status = $0 }) }
         status = "OnlineFix is installed. Launch Steam normally; games start from Steam."
     }
@@ -445,6 +450,10 @@ final class AppModel: ObservableObject {
     }
 
     func importFix() {
+        guard !OnlineFixAvailability.isBroken else {
+            fixMessage = OnlineFixAvailability.message
+            return
+        }
         guard archiveURL != nil else {
             fixMessage = "Choose a fix archive first."
             return
@@ -498,6 +507,10 @@ final class AppModel: ObservableObject {
 
     /// Fetches the fix package for the selected game from online-fix.me and installs it.
     func fetchFix() {
+        guard !OnlineFixAvailability.isBroken else {
+            fixMessage = OnlineFixAvailability.message
+            return
+        }
         guard let game = games.first(where: { $0.id == fixGameID }) else {
             fixMessage = "Pick a game from your list."
             return
