@@ -425,4 +425,50 @@ struct FixDiagnosisTests {
         #expect(!codes(diagnosis).contains("OF060"))
         #expect(!codes(diagnosis).contains("OF061"))
     }
+
+    /// A leftover `steam_appid.txt` for another game is stronger than the routing:
+    /// Steam reports its id to every Steam API call, including the fix's payload.
+    @Test
+    func aSteamAppIDFileForAnotherGameIsReported() throws {
+        let gameFolder = try game("appid-file")
+        defer { try? FileManager.default.removeItem(at: gameFolder) }
+        try write("1509960\n", to: gameFolder.appendingPathComponent("steam_appid.txt"))
+
+        let scan = GameScan.read(folder: gameFolder, appID: 1, name: "Game")
+        let diagnosis = FixDiagnosis.run(scan: scan, package: nil)
+        #expect(codes(diagnosis).contains("OF018"))
+        #expect(diagnosis.findings.first { $0.code == "OF018" }?.level == .warning)
+    }
+
+    /// An earlier install's list is read before a package is in hand. A trailing
+    /// newline is enough to make OnlineFix64 treat it as an empty DLL name.
+    @Test
+    func aBrokenInstalledLoaderListIsReported() throws {
+        let gameFolder = try game("broken-list")
+        defer { try? FileManager.default.removeItem(at: gameFolder) }
+        try write("payload", to: gameFolder.appendingPathComponent("OnlineFix64.dll"))
+        try write("overlay", to: gameFolder.appendingPathComponent("SteamOverlay64.dll"))
+        try write("OnlineFix64.dll\r\n", to: gameFolder.appendingPathComponent("dlllist.txt"))
+
+        let scan = GameScan.read(folder: gameFolder, appID: 1, name: "Game")
+        let diagnosis = FixDiagnosis.run(scan: scan, package: nil)
+        #expect(codes(diagnosis).contains("OF014"))
+        #expect(diagnosis.findings.first { $0.code == "OF014" }?.level == .warning)
+    }
+
+    /// A complete list with Windows line endings has no blank line. Splitting a CRLF
+    /// with Foundation's newline set would invent one and warn on every good fix.
+    @Test
+    func aValidCRLFLoaderListIsNotReported() throws {
+        let gameFolder = try game("crlf-list")
+        defer { try? FileManager.default.removeItem(at: gameFolder) }
+        try write("payload", to: gameFolder.appendingPathComponent("OnlineFix64.dll"))
+        try write("overlay", to: gameFolder.appendingPathComponent("SteamOverlay64.dll"))
+        try write("SteamOverlay64.dll\r\nOnlineFix64.dll",
+                  to: gameFolder.appendingPathComponent("dlllist.txt"))
+
+        let scan = GameScan.read(folder: gameFolder, appID: 1, name: "Game")
+        let diagnosis = FixDiagnosis.run(scan: scan, package: nil)
+        #expect(!codes(diagnosis).contains("OF014"))
+    }
 }

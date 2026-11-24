@@ -293,7 +293,7 @@ enum FixApply {
         guard !names.isEmpty else { return false }
         let original = read(url) ?? ""
         let newline = original.isEmpty || original.contains("\r\n") ? "\r\n" : "\n"
-        let rawLines = original.components(separatedBy: .newlines)
+        let rawLines = dllListLines(original)
         var kept = rawLines.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         let removedCustomNet = kept.contains { $0.lowercased() == "custom.net" }
@@ -322,6 +322,15 @@ enum FixApply {
             kept.insert(overlay, at: 0)
         }
         return write(kept.joined(separator: newline), to: url)
+    }
+
+    /// Splits a loader list without inventing a blank line between the CR and LF of
+    /// a Windows line ending. Every list OnlineFix writes is CRLF, and Foundation's
+    /// newline set treats the two bytes as two separators.
+    static func dllListLines(_ text: String) -> [String] {
+        text.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
     }
 
     /// Drops a line, such as the overlay loader that stops on error 126.

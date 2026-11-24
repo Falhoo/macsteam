@@ -187,10 +187,12 @@ struct FixDiagnosis: Sendable {
         if !runtimePresent(scan: scan) {
             diagnosis.add(FixFinding(
                 code: "OF040", level: .notice,
-                title: "Visual C++ runtime not beside the game",
-                detail: "msvcp140.dll and vcruntime140.dll come from the Microsoft VC++ runtime. "
-                    + "A prefix without it stops the game at start.",
-                remedy: "Report it; install vcrun2019 in the game's prefix with the prefix tools."))
+                title: "Visual C++ runtime is not installed",
+                detail: "msvcp140.dll and vcruntime140.dll come from the Microsoft VC++ "
+                    + "runtime. Neither is beside the game nor in its Wine prefix, and the "
+                    + "game stops at start when it needs them.",
+                remedy: "Install vcrun2019 in the game's prefix with the prefix tools, or "
+                    + "put the runtime DLLs beside the game."))
         }
 
 
@@ -214,6 +216,76 @@ struct FixDiagnosis: Sendable {
                     + "installed into the copy the game never loads.",
                 remedy: "Keep the copy in \(scan.apiFolder?.lastPathComponent ?? "the folder the game loads it from") "
                     + "and remove the others."))
+        }
+
+        // OF018: a stale steam_appid.txt beside the executable. Steam reads it
+        // before the routing, so a game correctly started as one AppID can still
+        // authenticate as another. An id of 480 is the Spacewar identity the routing
+        // itself asks for, so only a different real id is a finding.
+        if let file = scan.steamAppIDFile {
+            if let id = scan.steamAppID, id != scan.appID, id != 480 {
+                diagnosis.add(FixFinding(
+                    code: "OF018", level: .warning,
+                    title: "steam_appid.txt names another game",
+                    detail: "\(file.lastPathComponent) asks Steam to report AppID \(id), but "
+                        + "this game is \(scan.appID). The payload and the routing both answer "
+                        + "for the wrong game, so online play cannot meet the right players.",
+                    remedy: "Remove \(file.lastPathComponent), or set it to \(scan.appID). "
+                        + "Steam's routing is the only AppID the fix should see."))
+            } else if scan.steamAppID == nil {
+                diagnosis.add(FixFinding(
+                    code: "OF018", level: .notice,
+                    title: "steam_appid.txt is not a number",
+                    detail: "\(file.lastPathComponent) is beside the executable but does not "
+                        + "begin with an AppID. Steam ignores a file it cannot read, so the "
+                        + "routing still decides.",
+                    remedy: "Leave it alone, or remove it if the game starts under the wrong id."))
+            }
+        }
+
+        // OF014: a list an earlier attempt left behind. It is read below only once a
+        // package is in hand, but a list already on disk can be broken before that:
+        // a partial install names the payload but no longer has it, or names
+        // Custom.net, or ends with a blank line. Each stops OnlineFix64 with error
+        // 126, and the player sees a fix that installs and does nothing.
+        if let list = scan.dllListURL,
+           let payload = ["onlinefix64.dll", "onlinefix.dll"]
+                .first(where: { scan.loaderFiles[$0] != nil }) {
+            let names = scan.dllListLines.map { $0.lowercased() }
+            // Split only after folding CRLF to LF. Foundation treats a CRLF as two
+            // separators, so components(separatedBy: .newlines) would invent an empty
+            // line in every list OnlineFix itself writes.
+            let rawLines = scan.dllListText
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+                .components(separatedBy: "\n")
+            let blank = rawLines.contains {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            let customNet = names.contains("custom.net")
+            let missingPayload = !names.contains(payload)
+            let overlay = scan.loaderFiles["steamoverlay64.dll"] != nil
+            let overlayLater = overlay && names.contains("steamoverlay64.dll")
+                && names.first != "steamoverlay64.dll"
+            if missingPayload || customNet || blank || overlayLater {
+                var problems: [String] = []
+                if missingPayload { problems.append("it does not name \(payload)") }
+                if customNet { problems.append("it names Custom.net, which is managed and "
+                    + "cannot be loaded as a native DLL") }
+                if blank { problems.append("it has a blank line, which OnlineFix64 reads as "
+                    + "an empty DLL name") }
+                if overlayLater { problems.append("it puts SteamOverlay64.dll after the "
+                    + "first line, and OnlineFix64 expects the overlay first") }
+                diagnosis.add(FixFinding(
+                    code: "OF014", level: .warning,
+                    title: "The installed loader list is broken",
+                    detail: "\(list.lastPathComponent) is beside the game, but "
+                        + problems.joined(separator: "; ") + ". OnlineFix64 stops with "
+                        + "\"Failed to load from the list. Error code: 126\".",
+                    remedy: "Repair the fix from the fix card; the post-install pass rewrites "
+                        + "the list with the payload and the overlay in the order OnlineFix64 "
+                        + "reads."))
+            }
         }
 
         guard let package else { return diagnosis }
@@ -307,6 +379,7 @@ struct FixDiagnosis: Sendable {
                 remedy: "Use the package for AppID \(scan.appID), or route this game as itself."))
         }
         if package.carriesPayload,
+           !diagnosis.findings.contains(where: { $0.code == "OF014" }),
            !package.dllList.contains(where: { $0.lowercased() == "onlinefix64.dll"
                 || $0.lowercased() == "onlinefix.dll" }) {
             diagnosis.add(FixFinding(
@@ -473,13 +546,12 @@ struct FixDiagnosis: Sendable {
         return Paths.fm.fileExists(atPath: bundle.appendingPathComponent(doorway).path)
     }
 
-    /// True when the Visual C++ runtime is beside the executable or not needed at all.
+    /// True when the Visual C++ runtime is beside the executable, in the prefix, or
+    /// not needed at all.
     private static func runtimePresent(scan: GameScan) -> Bool {
-        let names = ["msvcp140.dll", "vcruntime140.dll", "msvcp140_1.dll"]
-        if names.contains(where: {
-            Paths.fm.fileExists(atPath: scan.launchFolder.appendingPathComponent($0).path)
-        }) { return true }
-        // A Godot or Unity build ships its own runtime beside the exe.
+        if scan.hasVCRuntime { return true }
+        // A Godot or Unity build ships its own runtime; the scan has already checked
+        // the game folder and the prefix for the other engines.
         return scan.engine == .godot || scan.engine == .unityMono
     }
 }

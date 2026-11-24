@@ -489,7 +489,7 @@ enum FixAudit {
                 wanted.append("Custom.dll")
             }
             let hasCustomNet = lines.contains("custom.net")
-            let rawLines = text.components(separatedBy: .newlines)
+            let rawLines = FixApply.dllListLines(text)
             let ordered = rawLines
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }

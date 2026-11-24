@@ -62,8 +62,19 @@ struct GameScan: Sendable {
     let hasAntiCheat: Bool
     let macBundle: URL?
     let prefix: URL?
+    /// A `steam_appid.txt` beside the executable, which overrides the AppID Steam
+    /// launched the game with. A second, stale id there defeats the routing.
+    let steamAppIDFile: URL?
+    let steamAppID: Int?
+    /// True when the Visual C++ runtime is beside the game or already installed in
+    /// its Wine prefix. Checking only the game folder warned on games whose prefix
+    /// came with the runtime, PICO PARK among them.
+    let hasVCRuntime: Bool
     let iniText: String
     let dllListLines: [String]
+    /// `dlllist.txt` as written, so a blank line or a trailing newline is visible.
+    /// `dllListLines` drops both, and both make OnlineFix64 stop with error 126.
+    let dllListText: String
 
     // MARK: - Markers
 
@@ -104,7 +115,7 @@ struct GameScan: Sendable {
         // the caller passed /var, and two spellings of one file compare as two files.
         let folder = canonical(input)
         let launch = canonical(FixInstaller.launchFolder(in: folder) ?? folder)
-        let executable = mainExecutable(in: launch)
+        let executable = mainExecutable(in: launch, name: name)
         let files = markerFiles(in: folder)
         let apiDLLs = (try? FixInstaller.enumerateFiles(in: folder))?.filter {
             FixPackage.apiNames.contains($0.lastPathComponent.lowercased())
@@ -120,6 +131,8 @@ struct GameScan: Sendable {
         }
         let engine = engine(in: folder, executable: executable, launch: launch)
         let imports = importedDLLs(in: folder, launch: launch, exe: executable)
+        let prefix = WineOverride.prefix(appID: appID)
+        let appIDFile = steamAppIDFile(in: launch, folder: folder)
 
         return GameScan(
             appID: appID,
@@ -147,9 +160,14 @@ struct GameScan: Sendable {
             hasStoreManifest: files.contains("appxmanifest.xml"),
             hasAntiCheat: !files.isDisjoint(with: antiCheatFiles),
             macBundle: FixInstaller.nativeMacBundle(in: folder),
-            prefix: WineOverride.prefix(appID: appID),
+            prefix: prefix,
+            steamAppIDFile: appIDFile?.url,
+            steamAppID: appIDFile?.id,
+            hasVCRuntime: runtimeFilesPresent(in: launch, folder: folder,
+                                              prefix: prefix, is64Bit: is64Bit),
             iniText: loader["onlinefix.ini"].flatMap(text) ?? "",
-            dllListLines: loader["dlllist.txt"].map(lines) ?? []
+            dllListLines: loader["dlllist.txt"].map(lines) ?? [],
+            dllListText: loader["dlllist.txt"].flatMap(text) ?? ""
         )
     }
 
@@ -369,7 +387,12 @@ struct GameScan: Sendable {
         return score
     }
 
-    private static func mainExecutable(in launch: URL) -> URL? {
+    /// The executable Steam starts, not simply the biggest .exe beside it. A
+    /// launcher, a crash reporter or a redistributable can be larger than the game,
+    /// and reading the wrong one gives the scan the wrong bitness, runtime and
+    /// doorway. The game's name wins, then a binary that imports Steam's API, then
+    /// size.
+    static func mainExecutable(in launch: URL, name: String) -> URL? {
         let entries = (try? Paths.fm.contentsOfDirectory(
             at: launch, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
             options: [.skipsHiddenFiles])) ?? []
@@ -377,10 +400,73 @@ struct GameScan: Sendable {
             $0.pathExtension.lowercased() == "exe"
                 && !FixInstaller.helperExecutableNames.contains($0.lastPathComponent.lowercased())
         }
-        return executables.max { one, other in
-            let oneSize = (try? one.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            let otherSize = (try? other.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            return oneSize < otherSize
+        guard !executables.isEmpty else { return nil }
+
+        let gameName = Store.normalized(name)
+        let folderName = Store.normalized(launch.lastPathComponent)
+        func sizeScore(_ url: URL) -> Int {
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            return Int(min(Int64(size) / 1_000_000, 50))
+        }
+        func rank(_ url: URL) -> Int {
+            let stem = Store.normalized(url.deletingPathExtension().lastPathComponent)
+            // The name is decisive, and this path reads no PE data, which keeps a
+            // folder full of launchers from being read in full just to pick one.
+            if !gameName.isEmpty, stem == gameName { return 1_000 + sizeScore(url) }
+            if !folderName.isEmpty, stem == folderName { return 600 + sizeScore(url) }
+
+            var score = 0
+            if gameName.count >= 4, stem.contains(gameName) { score += 300 }
+            let imports = PortableExecutable.read(url)?.imports
+                ?? PortableExecutable.fallbackImports(in: url)
+            if imports.contains("steam_api64.dll") || imports.contains("steam_api.dll") {
+                score += 200
+            }
+            if !imports.isDisjoint(with: ["winhttp.dll", "winmm.dll", "version.dll"]) {
+                score += 20
+            }
+            if ["launcher", "launch", "start", "play", "setup"].contains(stem) {
+                score -= 200
+            }
+            return score + sizeScore(url)
+        }
+        return executables.max { rank($0) < rank($1) }
+    }
+
+    /// A `steam_appid.txt` beside the executable overrides the AppID Steam passed on
+    /// the command line. A stale copy is enough to make a correctly routed game
+    /// authenticate as another app, so the scan reports it rather than guessing.
+    static func steamAppIDFile(in launch: URL, folder: URL)
+        -> (url: URL, id: Int?)? {
+        var seen = Set<String>()
+        for dir in [launch, folder] where seen.insert(dir.path).inserted {
+            let url = dir.appendingPathComponent("steam_appid.txt")
+            guard Paths.fm.fileExists(atPath: url.path), let raw = text(url) else { continue }
+            let first = raw.components(separatedBy: .newlines).first ?? ""
+            let value = first.trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\u{FEFF}"))
+            return (url, Int(value))
+        }
+        return nil
+    }
+
+    /// True when the Microsoft VC++ runtime is beside the game or already in its
+    /// prefix. A fresh prefix has neither; PICO PARK's prefix had both, and warning
+    /// it was missing sent the player looking for a problem that was not there.
+    static func runtimeFilesPresent(in launch: URL, folder: URL, prefix: URL?,
+                                    is64Bit: Bool) -> Bool {
+        let names = ["msvcp140.dll", "vcruntime140.dll", "msvcp140_1.dll"]
+        for dir in [launch, folder] {
+            if names.contains(where: {
+                Paths.fm.fileExists(atPath: dir.appendingPathComponent($0).path)
+            }) { return true }
+        }
+        guard let prefix else { return false }
+        let windows = prefix.appendingPathComponent("drive_c/windows", isDirectory: true)
+        let bin = is64Bit ? "system32" : "syswow64"
+        let dir = windows.appendingPathComponent(bin, isDirectory: true)
+        return names.contains {
+            Paths.fm.fileExists(atPath: dir.appendingPathComponent($0).path)
         }
     }
 

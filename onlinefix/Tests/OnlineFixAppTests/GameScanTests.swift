@@ -68,4 +68,53 @@ struct GameScanTests {
         #expect(scan.originalSteamAPI?.deletingLastPathComponent().path
             == api.deletingLastPathComponent().path)
     }
+
+    /// A larger launcher beside the game is not the executable Steam starts. The
+    /// scan reads the one named after the game, which is what the game's bitness and
+    /// doorway are read from.
+    @Test
+    func theNamedExecutableBeatsALargerLauncher() throws {
+        let game = GameScan.canonical(try folder())
+        defer { try? FileManager.default.removeItem(at: game) }
+        try write(String(repeating: "x", count: 4096),
+                  to: game.appendingPathComponent("Launcher.exe"))
+        try write("exe", to: game.appendingPathComponent("Game.exe"))
+        try write("api", to: game.appendingPathComponent("steam_api64.dll"))
+
+        let scan = GameScan.read(folder: game, appID: 1, name: "Game")
+        #expect(scan.exe?.lastPathComponent == "Game.exe")
+    }
+
+    /// `steam_appid.txt` overrides the AppID Steam passes on the command line, so
+    /// the scan keeps the value rather than leaving the routing to guess.
+    @Test
+    func aSteamAppIDFileIsRead() throws {
+        let game = GameScan.canonical(try folder())
+        defer { try? FileManager.default.removeItem(at: game) }
+        try write("exe", to: game.appendingPathComponent("Game.exe"))
+        try write("1509960\r\n", to: game.appendingPathComponent("steam_appid.txt"))
+
+        let scan = GameScan.read(folder: game, appID: 1, name: "Game")
+        #expect(scan.steamAppID == 1_509_960)
+        #expect(scan.steamAppIDFile?.lastPathComponent == "steam_appid.txt")
+    }
+
+    /// The VC++ runtime in the prefix counts. PICO PARK has it there and no copy
+    /// beside the game; warning that it is missing is a false alarm.
+    @Test
+    func theRuntimeInThePrefixCounts() throws {
+        let game = GameScan.canonical(try folder())
+        let prefix = try folder()
+        defer {
+            try? FileManager.default.removeItem(at: game)
+            try? FileManager.default.removeItem(at: prefix)
+        }
+        let bin = prefix.appendingPathComponent("drive_c/windows/system32")
+        try write("runtime", to: bin.appendingPathComponent("vcruntime140.dll"))
+
+        #expect(GameScan.runtimeFilesPresent(in: game, folder: game, prefix: prefix,
+                                            is64Bit: true))
+        #expect(!GameScan.runtimeFilesPresent(in: game, folder: game, prefix: nil,
+                                             is64Bit: true))
+    }
 }

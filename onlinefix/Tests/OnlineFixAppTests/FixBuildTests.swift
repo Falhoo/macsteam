@@ -423,4 +423,22 @@ struct FixBuildTests {
         #expect(contents(list) == "SteamOverlay64.dll\r\nOnlineFix64.dll\r\n"
             + "GameAssembly.dll\r\nCustom.dll")
     }
+
+    /// A Windows line ending is two bytes, but one line. A complete CRLF list is left
+    /// byte for byte alone; treating the CR and LF separately would rewrite it on
+    /// every audit and record a change that never happened.
+    @Test
+    func aCompleteCRLFListIsLeftAlone() throws {
+        let game = try folder("list-crlf")
+        defer { try? FileManager.default.removeItem(at: game) }
+        let list = game.appendingPathComponent("dlllist.txt")
+        let text = "SteamOverlay64.dll\r\nOnlineFix64.dll"
+        try write(text, to: list)
+
+        let changed = FixApply.ensureDLLListEntries(
+            ["SteamOverlay64.dll", "OnlineFix64.dll"], at: list)
+
+        #expect(!changed)
+        #expect(contents(list) == text)
+    }
 }
