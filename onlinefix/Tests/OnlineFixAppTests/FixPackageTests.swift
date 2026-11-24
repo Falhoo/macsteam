@@ -43,6 +43,28 @@ struct FixPackageTests {
         #expect(package.apiItem(needs64: false) == nil)
     }
 
+    /// A Mac archive brings resource forks and Finder litter along. None of it is a
+    /// fix file, and copying it would put `__MACOSX` into the game.
+    @Test
+    func archiveJunkIsNotAFixFile() throws {
+        let root = try folder("junk")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write("payload", to: root.appendingPathComponent("OnlineFix64.dll"))
+        try write("[Main]\nRealAppId=1\nFakeAppId=480\n",
+                  to: root.appendingPathComponent("OnlineFix.ini"))
+        try write("fork", to: root.appendingPathComponent("__MACOSX/._OnlineFix64.dll"))
+        try write("fork", to: root.appendingPathComponent("._steam_api64.dll"))
+        try write("finder", to: root.appendingPathComponent(".DS_Store"))
+        try write("finder", to: root.appendingPathComponent("BepInEx/.DS_Store"))
+        try write("windows", to: root.appendingPathComponent("Thumbs.db"))
+
+        let package = FixPackage.read(root: root)
+        #expect(package.names == ["onlinefix.ini", "onlinefix64.dll"])
+        #expect(FixPackage.isJunk("__MACOSX/._OnlineFix64.dll"))
+        #expect(FixPackage.isJunk("sub/._file"))
+        #expect(!FixPackage.isJunk("OnlineFix64.dll"))
+    }
+
     @Test
     func aPhotonPackageCarriesTheChainWithoutAGameRootAssumption() throws {
         let root = try folder("photon")
@@ -70,7 +92,7 @@ struct FixPackageTests {
 
         let packaged = try folder("packaged")
         defer { try? FileManager.default.removeItem(at: packaged) }
-        try write("[Main]\nIsPackaged=false\nProductId=9NMKF7LPVX44\n",
+        try write("[Main]\nIsPackaged=false\nProductId = 9NMKF7LPVX44\n",
                   to: packaged.appendingPathComponent("OnlineFix.ini"))
         #expect(FixPackage.read(root: packaged).isGDK)
 

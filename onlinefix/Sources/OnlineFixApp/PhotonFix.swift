@@ -35,10 +35,18 @@ enum PhotonFix {
               file: "Custom.dll"),
     ]
 
-    /// Managed assemblies a Photon game ships next to its own code.
+    /// Managed assemblies a Photon game ships next to its own code. Names differ by
+    /// SDK version and by packaging: PUN's library is PhotonUnityNetworking.dll in
+    /// one build and Photon.Realtime.dll in another, and the Quantum SDK brings
+    /// Quantum.Core.dll. Any one of them is evidence of Photon, so the list is broad
+    /// rather than tied to the games that have been tested.
     static let assemblies: Set<String> = [
         "photonrealtime.dll", "photonunitynetworking.dll", "photon3unity3d.dll",
-        "photonvoice.dll", "photonchat.dll",
+        "photonvoice.dll", "photonchat.dll", "photon.dll", "photonwebsocket.dll",
+        "photonquantum.dll", "quantum.core.dll", "quantumunity.dll",
+        "exitgames.client.photon.dll", "exitgames.client.photon.realtime.dll",
+        "exitgames.client.photon.chat.dll", "exitgames.client.photon.voicenetworking.dll",
+        "photon.socket.server.dll",
     ]
 
     /// What an installed fix's Photon chain looks like on disk.
@@ -75,25 +83,42 @@ enum PhotonFix {
     /// only the Steam API side) has nothing to check.
     static func status(gameFolder: URL?, fixInstalled: Bool, appID: Int? = nil,
                        fixFiles: [String] = []) -> Status {
-        guard fixInstalled, let folder = gameFolder, isPhotonGame(in: folder) else {
-            return Status()
-        }
+        guard fixInstalled, let gameFolder else { return Status() }
+        // The chain sits beside the executable, which for a game in a subfolder is
+        // below the folder Steam installed. Reading the install root would report a
+        // complete chain as missing on every refresh.
+        let folder = FixInstaller.launchFolder(in: gameFolder) ?? gameFolder
         let names = Set(fixFiles.map {
             ($0 as NSString).lastPathComponent.lowercased()
         })
+        let rawNames = Set(fixFiles.map { $0.lowercased().replacingOccurrences(of: "\\", with: "/") })
+        let rootCustom = exists(any: ["Custom.dll"], in: folder)
+        let pluginCustom = exists(any: [PhotonChain.plugin], in: folder)
+        let preloader = exists(any: ["BepInEx/core/BepInEx.Preloader.dll"], in: folder)
         let shipsChain = names.contains("custom.dll")
             || names.contains("bepinex.preloader.dll")
-            || exists(any: ["BepInEx/core/BepInEx.Preloader.dll", "Custom.dll"], in: folder)
+            || rawNames.contains(where: { $0.hasPrefix("bepinex/") })
+            || rootCustom || pluginCustom || preloader
         guard shipsChain else { return Status() }
+
         var status = Status()
         status.isPhoton = true
-        for piece in pieces where !exists(any: piece.paths, in: folder) {
-            status.missing.append(piece)
-        }
-        // A prefix Steam has not made yet has nothing to override; it is set the
-        // first time the game is launched.
-        if let appID, prefix(appID: appID) != nil {
-            status.loaderReady = loaderOverrideInPlace(appID: appID)
+        // A root Custom.dll is loaded directly by dlllist.txt through OnlineFix64.
+        // Only a plugin or preloader layout needs BepInEx's doorstop and core.
+        let chainLayout = preloader || pluginCustom
+            || rawNames.contains(where: { $0.hasPrefix("bepinex/") })
+            || names.contains("bepinex.preloader.dll")
+        if chainLayout {
+            for piece in pieces where !exists(any: piece.paths, in: folder) {
+                status.missing.append(piece)
+            }
+            // A prefix Steam has not made yet has nothing to override; it is set the
+            // first time the game is launched.
+            if let appID, prefix(appID: appID) != nil {
+                status.loaderReady = loaderOverrideInPlace(appID: appID)
+            }
+        } else if !rootCustom {
+            status.missing.append(pieces[2])
         }
         return status
     }
@@ -118,10 +143,21 @@ enum PhotonFix {
             }
         }
         if !answer { answer = il2cppCarriesPhoton(in: folder) }
+        if !answer { answer = settingsCarryPhoton(in: folder) }
         cacheLock.lock()
         photonCache[folder.path] = answer
         cacheLock.unlock()
         return answer
+    }
+
+    /// Drops one folder's cached answer after a fix put Photon assemblies in place.
+    /// Without this, a game first seen before its fix stays "not Photon" for the rest
+    /// of the run, and the Photon patch is never offered.
+    static func forget(folder: URL) {
+        cacheLock.lock()
+        photonCache[folder.path] = nil
+        photonCache[GameScan.canonical(folder).path] = nil
+        cacheLock.unlock()
     }
 
     /// The answer per folder, so a big game's metadata is read once per run rather
@@ -141,23 +177,60 @@ enum PhotonFix {
     /// One chunk at a time, so a large binary is never held in memory.
     static let il2cppChunk = 4 * 1024 * 1024
 
+    /// A Unity build serializes its Photon settings into an assets file. When the
+    /// managed assemblies are stripped or renamed, that class name is the remaining
+    /// evidence that the game speaks Photon, so it is read before giving up.
+    private static func settingsCarryPhoton(in folder: URL) -> Bool {
+        let markers = [Data("PhotonServerSettings".utf8), Data("PhotonAppSettings".utf8),
+                       Data("PhotonNetwork".utf8)]
+        guard let enumerator = Paths.fm.enumerator(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else { return false }
+        for case let url as URL in enumerator {
+            if enumerator.level > 8 {
+                enumerator.skipDescendants()
+                continue
+            }
+            let name = url.lastPathComponent.lowercased()
+            if name == "bepinex" || name == "doorstop" || name == ".macsteam-onlinefix" {
+                enumerator.skipDescendants()
+                continue
+            }
+            guard name.hasSuffix(".assets") || name == "globalgamemanagers" else { continue }
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            guard size > 0, size <= PhotonPatch.maxFileSize else { continue }
+            if carries(markers, in: url, limit: size, overlap: 32) { return true }
+        }
+        return false
+    }
+
     private static func il2cppCarriesPhoton(in folder: URL) -> Bool {
         let wanted = il2cppMarkers.map { Data($0.utf8) }
         for file in il2cppFiles(in: folder) {
-            guard let handle = try? FileHandle(forReadingFrom: file) else { continue }
-            defer { try? handle.close() }
-            var read = 0
-            var carry = Data()
-            while read < il2cppReadLimit {
-                guard let chunk = (try? handle.read(upToCount: il2cppChunk)) ?? nil,
-                      !chunk.isEmpty else { break }
-                read += chunk.count
-                // A marker that straddles two chunks still matches.
-                var window = carry
-                window.append(chunk)
-                if wanted.contains(where: { window.range(of: $0) != nil }) { return true }
-                carry = window.suffix(16)
-            }
+            if carries(wanted, in: file, limit: il2cppReadLimit, overlap: 16) { return true }
+        }
+        return false
+    }
+
+    /// Reads one file for any of the byte markers, keeping enough of the previous
+    /// chunk that a marker on a boundary still matches. The handle is closed at the
+    /// end of this call, not when the folder walk finishes.
+    private static func carries(_ markers: [Data], in url: URL, limit: Int,
+                                overlap: Int) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        var read = 0
+        var carry = Data()
+        while read < limit {
+            guard let chunk = (try? handle.read(upToCount: 4 * 1024 * 1024)) ?? nil,
+                  !chunk.isEmpty else { break }
+            read += chunk.count
+            var window = carry
+            window.append(chunk)
+            if markers.contains(where: { window.range(of: $0) != nil }) { return true }
+            carry = window.suffix(overlap)
         }
         return false
     }
@@ -201,14 +274,38 @@ enum PhotonFix {
         return small + large
     }
 
-    /// `*_Data/Managed`, one level deep: a build wrapped in a folder of the game's
-    /// own name keeps it at two.
+    /// Every `Managed` folder in the game, wherever the engine put it. A wrapped
+    /// build keeps it two folders down, an Unreal or custom layout can keep it under
+    /// `Engine/Binaries`, and a Mac bundle keeps it inside `.app/Contents/Resources`.
+    /// The walk stops at BepInEx, which has its own managed folder that says nothing
+    /// about the game.
     static func managedFolders(in folder: URL) -> [URL] {
         var found: [URL] = []
-        for entry in directories(in: folder) {
-            if let managed = dataFolder(entry) { found.append(managed) }
-            for child in directories(in: entry) {
-                if let managed = dataFolder(child) { found.append(managed) }
+        guard let enumerator = Paths.fm.enumerator(
+            at: folder,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return found }
+        for case let url as URL in enumerator {
+            if enumerator.level > 6 {
+                enumerator.skipDescendants()
+                continue
+            }
+            let name = url.lastPathComponent.lowercased()
+            if name == "bepinex" || name == "doorstop" {
+                enumerator.skipDescendants()
+                continue
+            }
+            guard isDirectory(url) else { continue }
+            if name == "managed" { found.append(url) }
+        }
+        // A Mac bundle is a package; `.skipsPackageDescendants` would hide its Data
+        // folder, so the known build layout is added explicitly.
+        for app in directories(in: folder) where app.pathExtension.lowercased() == "app" {
+            for relative in ["Contents/Resources/Data/Managed",
+                             "Contents/Resources/Data/il2cpp_data/Metadata"] {
+                let candidate = app.appendingPathComponent(relative, isDirectory: true)
+                if isDirectory(candidate), !found.contains(candidate) { found.append(candidate) }
             }
         }
         return found

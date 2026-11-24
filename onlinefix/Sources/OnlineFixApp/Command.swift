@@ -16,6 +16,23 @@ public enum OnlineFixCommand {
         return report.failures.isEmpty ? 0 : 1
     }
 
+    /// Takes the fix off one game, keeping the rest of the library alone. This is
+    /// the app's own uninstall path, so the manager's record and routing go with it.
+    @MainActor
+    public static func uninstallGame(appID: Int, name: String = "") -> Int32 {
+        let stored = Store.load().games.first { $0.id == appID }?.name ?? ""
+        let typed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let display = typed.isEmpty ? (stored.isEmpty ? "App \(appID)" : stored) : typed
+        let outcome = OnlineFixEmbed.storeUninstall(appID: appID)
+        if let error = outcome.error {
+            FileHandle.standardError.write(Data((error + "\n").utf8))
+            return 1
+        }
+        if let message = outcome.message { print(message) }
+        else { print("Removed the fix for \(display).") }
+        return 0
+    }
+
     /// Installs the fix for one AppID the way the app's own install does, printing
     /// each step, and returns an exit code.
     @MainActor
@@ -77,7 +94,11 @@ public enum OnlineFixCommand {
         if let skipped = plan.skipped {
             print("Automatic patch: \(skipped)")
         } else if let id = plan.id, let target = plan.target {
-            print("Automatic patch: would replace \(id) with \(target)")
+            var line = "would replace \(id) with \(target)"
+            if let voiceID = plan.voiceID, let voiceTarget = plan.voiceTarget {
+                line += ", and the voice id \(voiceID) with \(voiceTarget)"
+            }
+            print("Automatic patch: \(line)")
         } else {
             print("Automatic patch: nothing to do")
         }

@@ -148,6 +148,29 @@ struct PhotonPatchTests {
         #expect(PhotonPatch.scan(in: folder).map(\.id) == [other])
     }
 
+    /// A pair can hold the same value in both fields, as R.E.P.O.'s does. A manual
+    /// replace that treats it as one value writes the realtime id into the voice field.
+    @Test
+    func aManualReplaceKeepsTheTwoSettingsFieldsApart() throws {
+        let folder = try folder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var blob = Data("PhotonServerSettings".utf8)
+        blob.append(contentsOf: [0, 0, 0, 0, 0, 0, 0, 0])
+        for _ in 0..<2 {
+            blob.append(contentsOf: [0x24, 0, 0, 0])
+            blob.append(Data(guid.utf8))
+            blob.append(contentsOf: [0, 0, 0, 0])
+        }
+        let file = folder.appendingPathComponent("resources.assets")
+        try blob.write(to: file)
+        let voice = "ba60e90a-af6f-4965-80cf-ff783c91c992"
+
+        _ = try PhotonPatch.replace(guid, with: voice, in: folder, sign: { _ in })
+        let text = String(decoding: try Data(contentsOf: file), as: UTF8.self)
+        #expect(text.components(separatedBy: voice).count - 1 == 1)
+        #expect(text.components(separatedBy: guid).count - 1 == 1)
+    }
+
     @Test
     func aReplacementOfAnotherShapeIsRefused() throws {
         let folder = try folder()

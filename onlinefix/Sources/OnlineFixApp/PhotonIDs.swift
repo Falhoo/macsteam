@@ -51,40 +51,137 @@ enum PhotonIDs {
             }
         }
 
-        let files = candidates(in: gameFolder)
-        guard !files.isEmpty else {
-            throw ManagerError("No Photon app ID from OnlineFix was found in this game's "
-                + "files, so there is nothing to replace.")
+        // Use the field-aware scanner: a PhotonServerSettings pair can hold the same
+        // value twice, and replacing every copy would put the realtime id in the
+        // voice field. Settings are found by name, so this also reaches a game whose
+        // stock ids are not in the list below (PEAK's, for one).
+        // Use the field-aware scanner: a PhotonServerSettings pair can hold the same
+        // value twice, and replacing every copy would put the realtime id in the
+        // voice field. Settings are found by name, so this also reaches a game whose
+        // stock ids are not in the list below (PEAK's, for one).
+        let found = PhotonPatch.scan(in: gameFolder)
+        let relevant = found.filter { candidate in
+            candidate.settings || knownDefaults.contains {
+                $0.id.lowercased() == candidate.id.lowercased()
+            }
         }
-
-        // A file may hold the realtime/voice pair (R.E.P.O.) or a single id (the other
-        // games). A single one always becomes the realtime id.
-        var written: [String] = []
-        for file in files {
-            let located = knownDefaults.filter { file.data.range(of: Data($0.id.utf8)) != nil }
-            let singles = located.filter { !$0.voice && $0.id != Self.realtime }
-            if singles.count > 1, !located.contains(where: { $0.id == Self.realtime }) {
+        var changes: [PhotonPatch.Change]
+        if relevant.isEmpty {
+            // A second edit finds the game carrying our own ids, which the scanner
+            // no longer offers. The untouched copy still names the fields, so it is
+            // what the next edit is worked out from.
+            changes = try changesFromBackups(in: gameFolder,
+                                             realtime: wantRealtime, voice: wantVoice)
+        } else {
+            let settings = relevant.filter(\.settings)
+            var settingsFiles = Set<String>()
+            if settings.count == 2 {
+                let plan = PhotonPatch.plan(for: relevant, realtime: wantRealtime,
+                                            voice: wantVoice)
+                if let skipped = plan.skipped { throw ManagerError(skipped) }
+                changes = plan.changes
+                settingsFiles = Set(settings.map(\.file.path))
+            } else if settings.count > 2 {
+                throw ManagerError("This game's Photon settings carry more than a "
+                    + "realtime/voice pair, so which two to change is unclear. Nothing "
+                    + "was changed.")
+            } else {
+                changes = []
+            }
+            let live = relevant.filter { !settingsFiles.contains($0.file.path) }
+            let nonVoice = Set(live.filter { candidate in
+                !knownDefaults.contains {
+                    $0.voice && $0.id.lowercased() == candidate.id.lowercased()
+                }
+            }.map(\.id))
+            if nonVoice.count > 1 {
                 throw ManagerError("This game's files carry more than one Photon app ID, "
                     + "so which is realtime and which is voice is unclear. Nothing was changed.")
             }
-            var data = file.data
-            for item in located {
-                let replacement = item.voice ? wantVoice : wantRealtime
-                guard !replacement.isEmpty else { continue }
-                data = replacing(data, old: item.id, new: replacement)
+            for candidate in live {
+                let target = knownDefaults.contains {
+                    $0.voice && $0.id.lowercased() == candidate.id.lowercased()
+                } ? wantVoice : wantRealtime
+                guard !target.isEmpty, target != candidate.id else { continue }
+                changes.append(PhotonPatch.Change(candidate: candidate, old: candidate.id,
+                                                  new: target))
             }
-            guard data != file.data else { continue }
-            let backup = URL(fileURLWithPath: file.url.path + backupSuffix)
-            if !Paths.fm.fileExists(atPath: backup.path) {
-                try Paths.fm.copyItem(at: file.url, to: backup)
-            }
-            try data.write(to: file.url, options: .atomic)
-            written.append(file.url.path)
         }
+        guard !changes.isEmpty else {
+            throw ManagerError("Nothing changed: those are the IDs the game already carries.")
+        }
+        let written = try PhotonPatch.apply(changes, in: gameFolder)
         guard !written.isEmpty else {
             throw ManagerError("Nothing changed: those are the IDs the game already carries.")
         }
         return written
+    }
+
+    /// The fields named by the untouched copies, as changes to write into the game's
+    /// current files. This is how a second edit reaches a field the first one already
+    /// replaced; the offsets are the same as in the current file.
+    private static func changesFromBackups(in folder: URL, realtime: String,
+                                           voice: String) throws -> [PhotonPatch.Change] {
+        var changes: [PhotonPatch.Change] = []
+        guard let enumerator = Paths.fm.enumerator(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
+        for case let backup as URL in enumerator {
+            if enumerator.level > 6 {
+                enumerator.skipDescendants()
+                continue
+            }
+            guard backup.lastPathComponent.hasSuffix(backupSuffix),
+                  let values = try? backup.resourceValues(forKeys: [.isRegularFileKey]),
+                  values.isRegularFile == true,
+                  let data = try? Data(contentsOf: backup, options: [.mappedIfSafe])
+            else { continue }
+            let original = URL(fileURLWithPath: String(backup.path.dropLast(backupSuffix.count)))
+            guard let current = try? Data(contentsOf: original, options: [.mappedIfSafe]) else {
+                continue
+            }
+            let settings = PhotonPatch.assetIDs(in: data)
+            if settings.count == 2 {
+                for (index, item) in settings.enumerated() {
+                    let target = index == 0 ? realtime : voice
+                    // An empty voice field asks for the game's own voice id back.
+                    let wanted = target.isEmpty && index == 1 ? item.id : target
+                    let old = currentID(at: item.offset, in: current) ?? item.id
+                    guard !wanted.isEmpty, wanted != old else { continue }
+                    let candidate = PhotonPatch.Candidate(
+                        file: original, id: item.id, kind: .guid,
+                        offset: item.offset, settings: true)
+                    changes.append(PhotonPatch.Change(candidate: candidate, old: old,
+                                                      new: wanted))
+                }
+                continue
+            }
+            for item in PhotonPatch.ids(in: data) where item.kind == .guid {
+                guard let known = knownDefaults.first(where: {
+                    $0.id.lowercased() == item.id.lowercased()
+                }) else { continue }
+                let target = known.voice ? voice : realtime
+                let wanted = target.isEmpty && known.voice ? item.id : target
+                let old = currentID(at: item.offset, in: current) ?? item.id
+                guard !wanted.isEmpty, wanted != old else { continue }
+                let candidate = PhotonPatch.Candidate(
+                    file: original, id: item.id, kind: .guid, offset: item.offset)
+                changes.append(PhotonPatch.Change(candidate: candidate, old: old,
+                                                  new: wanted))
+            }
+        }
+        return changes
+    }
+
+    /// The GUID the current file holds where the untouched copy had one. A second
+    /// edit replaces what the first one wrote, not the original value, so this is the
+    /// value that change has to name.
+    private static func currentID(at offset: Int, in data: Data) -> String? {
+        guard offset >= 0, offset + 36 <= data.count,
+              let text = String(data: data[offset..<(offset + 36)], encoding: .utf8),
+              isGUID(text) else { return nil }
+        return text
     }
 
     /// Puts every patched file back and drops the backups.
@@ -116,53 +213,4 @@ enum PhotonIDs {
                    options: .regularExpression) != nil
     }
 
-    // MARK: - Files
-
-    private struct Candidate {
-        let url: URL
-        let data: Data
-    }
-
-    /// The game's data files that could hold a Photon app id, read once.
-    private static func candidates(in folder: URL) -> [Candidate] {
-        let names: Set<String> = ["resources.assets", "globalgamemanagers.assets",
-                                  "global-metadata.dat", "level0"]
-        var out: [Candidate] = []
-        guard let enumerator = Paths.fm.enumerator(
-            at: folder,
-            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
-        for case let url as URL in enumerator {
-            if enumerator.level > 5 {
-                enumerator.skipDescendants()
-                continue
-            }
-            if url.lastPathComponent.hasSuffix(backupSuffix) { continue }
-            let name = url.lastPathComponent.lowercased()
-            let inManaged = url.path.lowercased().contains("/managed/")
-            guard names.contains(name)
-                || (inManaged && name.hasSuffix(".dll"))
-                || (url.path.contains(".app/Contents/MacOS/") && !inManaged) else { continue }
-            // A file patched before is compared through its untouched copy, so a second
-            // edit does not replace ids that are no longer there.
-            let backup = URL(fileURLWithPath: url.path + backupSuffix)
-            let base = Paths.fm.fileExists(atPath: backup.path) ? backup : url
-            guard let values = try? base.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-                  values.isRegularFile == true,
-                  let size = values.fileSize, size > 0, size <= 256 * 1024 * 1024,
-                  let data = try? Data(contentsOf: base, options: .mappedIfSafe) else { continue }
-            guard knownDefaults.contains(where: { data.range(of: Data($0.id.utf8)) != nil })
-            else { continue }
-            out.append(Candidate(url: url, data: data))
-        }
-        return out
-    }
-
-    private static func replacing(_ data: Data, old: String, new: String) -> Data {
-        guard old.utf8.count == new.utf8.count else { return data }
-        guard let range = data.range(of: Data(old.utf8)) else { return data }
-        var result = data
-        result.replaceSubrange(range, with: Data(new.utf8))
-        return result
-    }
 }

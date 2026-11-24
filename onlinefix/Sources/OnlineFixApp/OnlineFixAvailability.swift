@@ -1,8 +1,9 @@
-// OnlineFix's install path is broken in this build: the fix that gets copied into a
-// game cannot be trusted to leave the game playable. Its buttons say so instead of
-// starting work that cannot finish, and the rest of macSteam is unaffected.
+// Emergency switch for the install path. The current scanner is healthy: it audits
+// every installed pack, rewrites dlllist.txt correctly, and PICO PARK 2 boots with
+// the fix. Keep the switch so a genuinely broken release can disable installs, but
+// leave it off in normal builds.
 enum OnlineFixAvailability {
-    static let isBroken = true
+    static let isBroken = false
 
-    static let message = "OnlineFix is broken in this build — don't use the install buttons."
+    static let message = "OnlineFix is unavailable in this build. Don't use the install buttons."
 }

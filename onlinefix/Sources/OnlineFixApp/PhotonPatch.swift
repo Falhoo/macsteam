@@ -27,6 +27,14 @@ enum PhotonPatch {
         let file: URL
         let id: String
         let kind: Kind
+        /// Where the id begins in the file. Several fields can hold the same id (a
+        /// realtime and a voice field set alike), so a pair is patched by position
+        /// instead of by replacing every copy of one value.
+        var offset: Int = 0
+        /// True when this came from a `PhotonServerSettings` asset's length-prefixed
+        /// fields. That is the strong evidence: the class name and the values sit in
+        /// one object, while a plain GUID in a large file can be anything.
+        var settings: Bool = false
         /// True when this is the app OnlineFix's own patch points the game at, so there
         /// is nothing left to replace.
         var isOnlineFixShared: Bool {
@@ -64,9 +72,10 @@ enum PhotonPatch {
         knownStockIDs.contains(id)
     }
 
-    /// Files larger than this are not searched: an id is a string, and the files that
-    /// carry one are settings, assemblies and small asset bundles.
-    static let maxFileSize = 256 * 1024 * 1024
+    /// Files larger than this are not searched. A Unity game's `resources.assets`
+    /// can run past 300 MB, and its `PhotonServerSettings` asset sits inside it, so
+    /// the old 256 MB limit hid the only real id in R.E.P.O. and PEAK.
+    static let maxFileSize = 1024 * 1024 * 1024
     /// Deep enough for a Mac build, whose data sits inside its `.app`:
     /// `pico_park_2.app/Contents/Resources/Data/il2cpp_data/Metadata` is six folders
     /// down, and the metadata file in it is the seventh.
@@ -96,10 +105,26 @@ enum PhotonPatch {
     ]
 
     /// Extensions worth reading. An id lives in code or serialized assets.
+    ///
+    /// `resource` is left out on purpose: those files are the bulk of a Unity game's
+    /// size (a 166 MB `resources.resource` is typical) and hold texture and audio
+    /// blobs, never settings. Reading them cost 10–15 seconds a scan and found nothing.
     static let readExtensions: Set<String> = [
-        "assets", "dat", "dll", "dylib", "exe", "so", "json", "txt", "ini", "bundle",
-        "resource", "xml", "cfg",
+        "assets", "dat", "dll", "dylib", "exe", "json", "txt", "ini", "xml", "cfg",
+        "settings", "unity3d",
     ]
+
+    /// True for a file that can carry an id. `globalgamemanagers` has no extension,
+    /// and only `global-metadata.dat` is a metadata file, so a game's other `.dat`
+    /// blobs (sound banks, caches) are not read.
+    static func isReadable(_ url: URL) -> Bool {
+        let name = url.lastPathComponent.lowercased()
+        if name == "globalgamemanagers" || name == "global-metadata.dat" { return true }
+        let ext = url.pathExtension.lowercased()
+        guard readExtensions.contains(ext) else { return false }
+        if ext == "dat" { return name == "global-metadata.dat" }
+        return true
+    }
 
     private static let guidLength = 36
     private static let quantumLength = 64
@@ -123,11 +148,20 @@ enum PhotonPatch {
                 continue
             }
             let name = url.lastPathComponent.lowercased()
+            if name == ".macsteam-onlinefix" || name == "bepinex" || name == "doorstop" {
+                enumerator.skipDescendants()
+                continue
+            }
             if name.hasSuffix(backupSuffix) || skipNames.contains(name) { continue }
+            // A proxy exports OnlineFix; its strings are the fix's own, not the
+            // game's. A package can name its proxy d3d9.dll or anything else, so the
+            // export table is a safer marker than a list of names.
+            if name.hasSuffix(".dll"), PortableExecutable.read(url)?.exportsOnlineFix == true {
+                continue
+            }
             // A Mac build keeps its code and assets inside the bundle, a few
             // directories down from the game folder.
-            guard readExtensions.contains(url.pathExtension.lowercased())
-                    || name == "globalgamemanagers" else { continue }
+            guard isReadable(url) else { continue }
             guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
                   values.isRegularFile == true,
                   let size = values.fileSize, size > 0, size <= maxFileSize,
@@ -138,7 +172,7 @@ enum PhotonPatch {
             // says where each one starts and how long it is, which finds it anyway.
             let literals = quantumLiterals(in: data)
             let literalIDs = Set(literals.map(\.id))
-            for literal in literals where !items.contains(where: { $0.id == literal.id }) {
+            for literal in literals where !items.contains(where: { $0.id == literal.id && $0.offset == literal.offset }) {
                 items.append(literal)
             }
             // An id this knows by its bytes is the last resort, for a build whose table
@@ -148,13 +182,14 @@ enum PhotonPatch {
                 items.append(Found(id: stock, kind: .quantum, offset: 0))
             }
             // A Unity PhotonServerSettings asset keeps its app ids as length-prefixed
-            // strings with no field name beside them, which is the only place PEAK has
-            // one: the marker check below cannot see those.
+            // strings with no field name beside them. The class name is the evidence,
+            // and each value is kept with its offset so a realtime/voice pair that
+            // holds the same value twice is patched field by field.
             let fromSettings = assetIDs(in: data)
-            let settingsIDs = Set(fromSettings.map(\.id))
-            for item in fromSettings where !items.contains(where: { $0.id == item.id }) {
-                items.append(item)
-            }
+            let settingsOffsets = Set(fromSettings.map(\.offset))
+            // The general GUID pass sees the same bytes in the same asset; drop those
+            // copies so one field is not offered twice.
+            items.removeAll { $0.kind == .guid && settingsOffsets.contains($0.offset) }
             // A Quantum id is one literal among hundreds, so one taken from the table
             // counts by the file carrying Photon's name somewhere, which every Photon
             // build does and a build of something else does not.
@@ -166,13 +201,23 @@ enum PhotonPatch {
                     ? fieldMarkers
                     : fieldMarkers + libraryMarkers
                 guard isKnown(item.id) || isKnownStock(item.id)
-                        || settingsIDs.contains(item.id)
                         || hasMarker(data, at: item.offset, markers: markers)
                         || (item.kind == .quantum && photonNamed && literalIDs.contains(item.id))
                 else { continue }
-                let key = "\(url.path)|\(item.id)"
+                let key = "\(url.path)|\(item.id)|\(item.offset)"
                 guard seen.insert(key).inserted else { continue }
-                found.append(Candidate(file: url, id: item.id, kind: item.kind))
+                found.append(Candidate(file: url, id: item.id, kind: item.kind,
+                                       offset: item.offset))
+                perFile += 1
+                if perFile >= maxCandidatesPerFile { break }
+            }
+            // Settings values are already anchored to the class name, so they are taken
+            // even when no other marker is near.
+            for item in fromSettings {
+                let key = "\(url.path)|\(item.id)|\(item.offset)"
+                guard seen.insert(key).inserted else { continue }
+                found.append(Candidate(file: url, id: item.id, kind: item.kind,
+                                       offset: item.offset, settings: true))
                 perFile += 1
                 if perFile >= maxCandidatesPerFile { break }
             }
@@ -196,7 +241,14 @@ enum PhotonPatch {
             while index < bytes.count {
                 let byte = bytes[index]
                 if byte == dashByte {
-                    if let item = guid(at: index, in: bytes), seen.insert(item.id).inserted {
+                    // A Mono assembly stores its strings as UTF-16, so the same GUID
+                    // is there with a zero byte after every character. Without this
+                    // pass the scanner could not see an id in Assembly-CSharp.dll,
+                    // which is where R.E.P.O. keeps one.
+                    let ascii = guid(at: index, in: bytes)
+                    let wide = utf16Guid(at: index, in: bytes)
+                    for item in [ascii, wide].compactMap({ $0 })
+                    where seen.insert(item.id).inserted {
                         out.append(item)
                     }
                     index += 1
@@ -281,27 +333,49 @@ enum PhotonPatch {
     }
 
     /// The app ids of a Unity `PhotonServerSettings` asset: each is stored as a 32-bit
-    /// length of 36 followed by the GUID, in field order, with the class name written
-    /// once in the same file. Nothing names the field beside the value, so this is the
-    /// only way to find an id in a build that serialises it that way.
+    /// length of 36 followed by the GUID, in field order, and the class name is
+    /// written once in the same file.
+    ///
+    /// The class name alone is not enough. `globalgamemanagers` contains a game's
+    /// `productGUID` as the same length-prefixed string, and a build that mentions
+    /// `PhotonServerSettings` anywhere (as a preloaded asset, for example) made the
+    /// old rule take that unrelated GUID for a Photon id. R.E.P.O. was patched that
+    /// way and its real settings, in a 369 MB assets file, were never read. Only a
+    /// value in the short run after the class name counts.
     static func assetIDs(in data: Data) -> [Found] {
-        guard containsInsensitive(["photonserversettings"], in: data) else { return [] }
+        guard !data.isEmpty else { return [] }
+        let marker = Data("PhotonServerSettings".utf8)
         let prefix = Data([0x24, 0x00, 0x00, 0x00])
         var found: [Found] = []
+        var offsets = Set<Int>()
         var search = data.startIndex
         while search < data.endIndex,
-              let range = data.range(of: prefix, in: search..<data.endIndex) {
-            let start = range.upperBound
-            let end = data.index(start, offsetBy: 36, limitedBy: data.endIndex) ?? data.endIndex
-            if data.distance(from: start, to: end) == 36,
-               let text = String(data: data[start..<end], encoding: .utf8),
-               PhotonIDs.isGUID(text) {
-                found.append(Found(id: text.lowercased(), kind: .guid,
-                                   offset: data.distance(from: data.startIndex, to: start)))
+              let range = data.range(of: marker, in: search..<data.endIndex) {
+            // A serialized object puts its string values straight after its type
+            // name; 512 bytes covers the app ids and the short version string.
+            let windowStart = range.upperBound
+            let windowEnd = data.index(windowStart, offsetBy: 512, limitedBy: data.endIndex)
+                ?? data.endIndex
+            let window = data[windowStart..<windowEnd]
+            var cursor = window.startIndex
+            while cursor < window.endIndex,
+                  let match = window.range(of: prefix, in: cursor..<window.endIndex) {
+                let start = match.upperBound
+                let end = window.index(start, offsetBy: 36, limitedBy: window.endIndex)
+                    ?? window.endIndex
+                if window.distance(from: start, to: end) == 36,
+                   let text = String(data: window[start..<end], encoding: .utf8),
+                   PhotonIDs.isGUID(text) {
+                    let offset = data.distance(from: data.startIndex, to: start)
+                    if offsets.insert(offset).inserted {
+                        found.append(Found(id: text.lowercased(), kind: .guid, offset: offset))
+                    }
+                }
+                cursor = match.upperBound
             }
             search = range.upperBound
         }
-        return found
+        return found.sorted { $0.offset < $1.offset }
     }
 
     /// True when one of these names sits anywhere in the data, whatever capitals it is
@@ -344,8 +418,16 @@ enum PhotonPatch {
 
     // MARK: - Replace
 
-    /// Replaces one id with another in every file that carries it, and reports the
-    /// files written. Each file is kept once, beside itself, for `restore`.
+    /// One field to rewrite: the candidate says where, so two fields holding the same
+    /// value are still two changes.
+    struct Change: Sendable, Equatable, Hashable {
+        let candidate: Candidate
+        let old: String
+        let new: String
+    }
+
+    /// Replaces one id with another everywhere a scan offered it, and reports the files
+    /// written. Each file is kept once, beside itself, for `restore`.
     @discardableResult
     static func replace(_ old: String, with new: String, in folder: URL,
                         sign: (URL) throws -> Void = resign) throws -> [String] {
@@ -362,18 +444,90 @@ enum PhotonPatch {
                     + "length as the one it replaces, or the game's files break.")
         }
         guard old != new else { return [] }
+        let candidates = scan(in: folder).filter { $0.id == old }
+        guard !candidates.isEmpty else { return [] }
+        // In a PhotonServerSettings pair the two fields can hold the same value, and
+        // a global replace would write the realtime id into the voice field. Each
+        // field keeps its offset; other files still take every occurrence.
+        var seenSettingsFiles = Set<String>()
+        let settings = candidates.filter(\.settings).filter {
+            seenSettingsFiles.insert($0.file.path).inserted
+        }
+        let settingsFiles = Set(settings.map(\.file.path))
+        let otherFiles = Set(candidates.filter { !$0.settings }
+            .map(\.file.path)).subtracting(settingsFiles)
+        var written: [String] = []
+        if !settings.isEmpty {
+            written += try apply(settings.map {
+                Change(candidate: $0, old: old, new: new)
+            }, in: folder, sign: sign)
+        }
+        if !otherFiles.isEmpty {
+            written += try applyEverywhere(old, new,
+                to: otherFiles.map(URL.init(fileURLWithPath:)), sign: sign)
+        }
+        return Array(Set(written)).sorted()
+    }
+
+    /// Replaces the id at every place it occurs in these files, which is what a manual
+    /// edit asks for: settings and the code that reads them can both carry it.
+    @discardableResult
+    static func applyEverywhere(_ old: String, _ new: String, to files: [URL],
+                                sign: (URL) throws -> Void = resign) throws -> [String] {
         var written: [String] = []
         var bundles = Set<String>()
-        for candidate in scan(in: folder) where candidate.id == old {
-            let file = candidate.file
-            guard let data = try? Data(contentsOf: file, options: [.mappedIfSafe]) else { continue }
-            let patched = replacing(data, old: old, new: new)
-            guard patched != data else { continue }
+        for file in files.sorted(by: { $0.path < $1.path }) {
+            guard let original = try? Data(contentsOf: file, options: [.mappedIfSafe]) else { continue }
+            let patched = replacing(original, old: old, new: new)
+            guard patched != original else { continue }
             let backup = URL(fileURLWithPath: file.path + backupSuffix)
             if !Paths.fm.fileExists(atPath: backup.path) {
                 try Paths.fm.copyItem(at: file, to: backup)
             }
             try patched.write(to: file, options: .atomic)
+            written.append(file.path)
+            if let bundle = bundle(containing: file) { bundles.insert(bundle.path) }
+        }
+        for path in bundles.sorted() {
+            try sign(URL(fileURLWithPath: path))
+        }
+        return written
+    }
+
+    /// Writes each change at the offset the scan found it. A file is read once, its
+    /// untouched copy kept once, and a Mac bundle signed once at the end.
+    @discardableResult
+    static func apply(_ changes: [Change], in folder: URL,
+                      sign: (URL) throws -> Void = resign) throws -> [String] {
+        var byFile: [String: [Change]] = [:]
+        var order: [String] = []
+        for change in changes {
+            let path = change.candidate.file.path
+            if byFile[path] == nil { order.append(path) }
+            byFile[path, default: []].append(change)
+        }
+        var written: [String] = []
+        var bundles = Set<String>()
+        for path in order {
+            let file = URL(fileURLWithPath: path)
+            guard let original = try? Data(contentsOf: file, options: [.mappedIfSafe]) else { continue }
+            var data = original
+            for change in byFile[path] ?? [] {
+                if let patched = patching(data, at: change.candidate.offset,
+                                          old: change.old, new: change.new) {
+                    data = patched
+                } else if change.candidate.offset == 0 {
+                    // A stock id found by its bytes has no usable offset; fall back to
+                    // the old global replace for that one case.
+                    data = replacing(data, old: change.old, new: change.new)
+                }
+            }
+            guard data != original else { continue }
+            let backup = URL(fileURLWithPath: file.path + backupSuffix)
+            if !Paths.fm.fileExists(atPath: backup.path) {
+                try Paths.fm.copyItem(at: file, to: backup)
+            }
+            try data.write(to: file, options: .atomic)
             written.append(file.path)
             if let bundle = bundle(containing: file) { bundles.insert(bundle.path) }
         }
@@ -384,6 +538,26 @@ enum PhotonPatch {
         return written
     }
 
+    /// The id rewritten where it sits, ASCII or UTF-16. Nil when those bytes are not
+    /// the id any more, which is how a scan overtaken by another edit is skipped.
+    static func patching(_ data: Data, at offset: Int, old: String, new: String) -> Data? {
+        guard old.utf8.count == new.utf8.count, offset >= 0 else { return nil }
+        let ascii = Data(old.utf8)
+        if offset + ascii.count <= data.count,
+           data[offset..<(offset + ascii.count)].elementsEqual(ascii) {
+            var result = data
+            result.replaceSubrange(offset..<(offset + ascii.count), with: Data(new.utf8))
+            return result
+        }
+        let wide = Data(old.utf16.flatMap { [UInt8($0 & 0xFF), UInt8($0 >> 8)] })
+        guard offset + wide.count <= data.count,
+              data[offset..<(offset + wide.count)].elementsEqual(wide) else { return nil }
+        let replacement = Data(new.utf16.flatMap { [UInt8($0 & 0xFF), UInt8($0 >> 8)] })
+        var result = data
+        result.replaceSubrange(offset..<(offset + wide.count), with: replacement)
+        return result
+    }
+
     // MARK: - Automatic patch
 
     /// What one automatic pass did.
@@ -392,6 +566,11 @@ enum PhotonPatch {
         var written: [String] = []
         /// The id that was replaced.
         var replaced: String?
+        /// The voice id that was replaced, when the game stores the pair.
+        var voiceReplaced: String?
+        /// The ids the game is meant to carry afterwards, for a later check that the
+        /// patch is still in the files.
+        var targets: [String] = []
         /// Why nothing was changed, when that needs saying.
         var skipped: String?
     }
@@ -404,28 +583,101 @@ enum PhotonPatch {
         var kind: Kind?
         /// What it would be replaced by.
         var target: String?
+        /// The voice id, when the game stores a realtime/voice pair.
+        var voiceID: String?
+        var voiceTarget: String?
+        /// The fields to write, empty when the game already carries the target pair.
+        var changes: [Change] = []
         /// Why nothing would be changed, when that needs saying.
         var skipped: String?
     }
 
     /// Decides what an automatic patch would do, and changes nothing.
     ///
-    /// Two ids of different values leave it alone: which one the game actually connects
-    /// to cannot be told from the files, and guessing could patch the wrong one. The
-    /// patch sheet still offers both.
-    static func plan(for candidates: [PhotonPatch.Candidate]) -> Plan {
+    /// A `PhotonServerSettings` asset stores its realtime and voice ids in field
+    /// order. The pair is patched field by field, because R.E.P.O.'s two fields hold
+    /// the same value and a global replace would give both the realtime id. Without a
+    /// settings pair, one distinct id is patched; several from unrelated places still
+    /// leave it alone, since guessing could patch the wrong value.
+    static func plan(for candidates: [PhotonPatch.Candidate],
+                     realtime: String = PhotonIDs.realtime,
+                     voice: String = PhotonIDs.voice) -> Plan {
         var plan = Plan()
-        let candidates = candidates.filter { !$0.isOnlineFixShared }
-        let distinct = Set(candidates.map(\.id))
-        guard let candidate = candidates.first else { return plan }
-        guard distinct.count == 1 else {
-            plan.skipped = "This game carries \(distinct.count) different Photon app ids, "
-                + "so which one it connects to is unclear. Nothing was changed."
+        let settings = candidates
+            .filter { $0.settings && $0.kind == .guid }
+            .sorted { ($0.file.path, $0.offset) < ($1.file.path, $1.offset) }
+        if settings.count > 2 {
+            plan.skipped = "This game's Photon settings carry \(settings.count) app ids, "
+                + "more than a realtime/voice pair, so which two to change is unclear. "
+                + "Nothing was changed."
             return plan
         }
-        plan.id = candidate.id
-        plan.kind = candidate.kind
-        plan.target = onlineFixID(for: candidate.kind)
+        if settings.count == 2, settings[0].file.path != settings[1].file.path {
+            // Field order only means realtime-then-voice within one asset. Two files
+            // give no order, and swapping them would break the game's own connection.
+            plan.skipped = "This game keeps its Photon app ids in two different files, so "
+                + "which is the realtime id and which the voice id is unclear. Nothing was changed."
+            return plan
+        }
+
+        // A settings pair can hold OnlineFix's own defaults, which is exactly the pair
+        // a player asks the patch sheet to move to a custom app. The shared flag only
+        // says there is nothing to replace once the target is already there.
+        let live = candidates
+        guard let fallback = live.first else { return plan }
+        let realtimeField = settings.count == 2 ? settings[0] : (settings.first ?? fallback)
+        let voiceField = settings.count == 2 ? settings[1] : nil
+        let oldRealtime = realtimeField.id
+        let oldVoice = voiceField?.id
+        // An id that is neither the realtime nor the voice value says this game uses
+        // more than one Photon app, and guessing which one is live would be worse
+        // than leaving it alone.
+        var knownOld = Set([oldRealtime])
+        if let oldVoice { knownOld.insert(oldVoice) }
+        let foreign = Set(live.map(\.id)).subtracting(knownOld)
+        if !foreign.isEmpty {
+            plan.skipped = "This game carries \(foreign.count + knownOld.count) different "
+                + "Photon app ids, so which one it connects to is unclear. Nothing was changed."
+            return plan
+        }
+
+        plan.id = oldRealtime
+        plan.kind = realtimeField.kind
+        plan.target = realtimeField.kind == .quantum ? onlineFixID(for: .quantum) : realtime
+        if let voiceField {
+            plan.voiceID = voiceField.id
+            plan.voiceTarget = voice
+        }
+
+        // Every copy of the old value is written, not just the first one. A game can
+        // keep its app id in an assets file and in a managed assembly, and patching
+        // one of them leaves the other pointing at the game's own Photon app. The
+        // settings pair is still field by field: two fields holding the same value
+        // must become the realtime and voice ids, not the same value twice.
+        var byOffset: [String: Change] = [:]
+        for candidate in candidates {
+            let target: String?
+            if candidate.settings, candidate.file.path == realtimeField.file.path,
+               candidate.offset == realtimeField.offset {
+                target = realtime
+            } else if let voiceField, candidate.settings,
+                      candidate.file.path == voiceField.file.path,
+                      candidate.offset == voiceField.offset {
+                target = voice
+            } else if candidate.id == oldRealtime {
+                target = plan.target
+            } else if let oldVoice, candidate.id == oldVoice {
+                target = voice
+            } else {
+                target = nil
+            }
+            guard let target, target != candidate.id else { continue }
+            let key = "\(candidate.file.path)|\(candidate.offset)|\(candidate.id)"
+            byOffset[key] = Change(candidate: candidate, old: candidate.id, new: target)
+        }
+        plan.changes = byOffset.values.sorted {
+            ($0.candidate.file.path, $0.candidate.offset) < ($1.candidate.file.path, $1.candidate.offset)
+        }
         return plan
     }
 
@@ -434,17 +686,24 @@ enum PhotonPatch {
     /// every game a scan found an id in, and idempotent: once the game carries
     /// OnlineFix's id there is nothing left to replace.
     static func autoPatch(in folder: URL,
+                          realtime: String = PhotonIDs.realtime,
+                          voice: String = PhotonIDs.voice,
                           sign: (URL) throws -> Void = resign) -> AutoPatch {
         var report = AutoPatch()
-        let plan = plan(for: scan(in: folder))
+        let plan = plan(for: scan(in: folder), realtime: realtime, voice: voice)
         if let skipped = plan.skipped {
             report.skipped = skipped
             return report
         }
-        guard let id = plan.id, let target = plan.target, id != target else { return report }
+        report.targets = [plan.target, plan.voiceTarget].compactMap { $0 }
+        guard !plan.changes.isEmpty else { return report }
         do {
-            report.written = try replace(id, with: target, in: folder, sign: sign)
-            report.replaced = report.written.isEmpty ? nil : id
+            report.written = try apply(plan.changes, in: folder, sign: sign)
+            guard !report.written.isEmpty else { return report }
+            report.replaced = plan.id
+            if let voice = plan.voiceID, voice != plan.voiceTarget {
+                report.voiceReplaced = voice
+            }
         } catch {
             report.skipped = error.localizedDescription
         }
@@ -531,6 +790,34 @@ enum PhotonPatch {
         return Found(id: id, kind: .guid, offset: start)
     }
 
+    /// A GUID stored as UTF-16LE: each of its 36 characters followed by a zero byte.
+    /// `dash` is the position of the first dash, after eight two-byte characters.
+    private static func utf16Guid(at dash: Int, in bytes: UnsafeBufferPointer<UInt8>) -> Found? {
+        guard dash + 1 < bytes.count, bytes[dash + 1] == 0 else { return nil }
+        let start = dash - 8 * 2
+        let end = start + guidLength * 2
+        guard start >= 0, end <= bytes.count else { return nil }
+        // A window inside a longer run of hex is part of something else.
+        if start >= 2, bytes[start - 1] == 0, isHex(bytes[start - 2]) { return nil }
+        if end + 1 < bytes.count, bytes[end + 1] == 0, isHex(bytes[end]) { return nil }
+        var characters: [UInt8] = []
+        characters.reserveCapacity(guidLength)
+        for offset in 0..<guidLength {
+            let byte = bytes[start + offset * 2]
+            let high = bytes[start + offset * 2 + 1]
+            guard high == 0 else { return nil }
+            switch offset {
+            case 8, 13, 18, 23:
+                guard byte == dashByte else { return nil }
+            default:
+                guard isHex(byte) else { return nil }
+            }
+            characters.append(byte)
+        }
+        let id = String(decoding: characters, as: UTF8.self)
+        return Found(id: id, kind: .guid, offset: start)
+    }
+
     private static func quantum(at start: Int, in bytes: UnsafeBufferPointer<UInt8>) -> Found? {
         let end = start + quantumLength
         guard end <= bytes.count else { return nil }
@@ -540,29 +827,22 @@ enum PhotonPatch {
         return Found(id: id, kind: .quantum, offset: start)
     }
 
-    /// True when one of these names sits within `contextRadius` bytes of the id.
+    /// True when one of these names sits within `contextRadius` bytes of the id,
+    /// as ASCII or as the UTF-16 a Mono assembly writes.
     static func hasMarker(_ data: Data, at offset: Int,
                           markers: [String] = fieldMarkers + libraryMarkers) -> Bool {
         let start = max(0, offset - contextRadius)
         let end = min(data.count, offset + contextRadius)
         guard start < end else { return false }
-        return data.withUnsafeBytes { raw in
-            let bytes = raw.bindMemory(to: UInt8.self)
-            for marker in markers {
-                let needle = Array(marker.utf8)
-                guard needle.count <= end - start else { continue }
-                for position in start...(end - needle.count) {
-                    var matched = true
-                    for index in 0..<needle.count
-                    where lowercased(bytes[position + index]) != needle[index] {
-                        matched = false
-                        break
-                    }
-                    if matched { return true }
-                }
-            }
-            return false
+        if containsInsensitive(markers, in: data.subdata(in: start..<end)) { return true }
+        // The window can begin on either half of a UTF-16 character, so try both.
+        for shift in 0...1 where start + shift < end {
+            let slice = data.subdata(in: (start + shift)..<end)
+            guard let text = String(data: slice, encoding: .utf16LittleEndian) else { continue }
+            let lower = text.lowercased()
+            if markers.contains(where: { lower.contains($0) }) { return true }
         }
+        return false
     }
 
     private static func isHex(_ byte: UInt8) -> Bool {
@@ -608,21 +888,23 @@ enum PhotonPatch {
         }
     }
 
-    /// Every occurrence is replaced, since settings and the code that reads them can
-    /// both carry the same id.
+    /// Every occurrence is replaced, ASCII and UTF-16, since settings and the code
+    /// that reads them can both carry the same id.
     static func replacing(_ data: Data, old: String, new: String) -> Data {
-        let needle = Data(old.utf8)
-        let replacement = Data(new.utf8)
-        guard !needle.isEmpty, needle.count == replacement.count else { return data }
+        guard old.utf8.count == new.utf8.count else { return data }
+        let asciiOld = Data(old.utf8), asciiNew = Data(new.utf8)
+        let wideOld = Data(old.utf16.flatMap { [UInt8($0 & 0xFF), UInt8($0 >> 8)] })
+        let wideNew = Data(new.utf16.flatMap { [UInt8($0 & 0xFF), UInt8($0 >> 8)] })
         var result = data
-        var found = false
-        var position = result.startIndex
-        while position < result.endIndex,
-              let range = result.range(of: needle, in: position..<result.endIndex) {
-            result.replaceSubrange(range, with: replacement)
-            position = range.lowerBound + replacement.count
-            found = true
+        for (needle, replacement) in [(asciiOld, asciiNew), (wideOld, wideNew)]
+        where !needle.isEmpty {
+            var position = result.startIndex
+            while position < result.endIndex,
+                  let range = result.range(of: needle, in: position..<result.endIndex) {
+                result.replaceSubrange(range, with: replacement)
+                position = range.lowerBound + replacement.count
+            }
         }
-        return found ? result : data
+        return result
     }
 }

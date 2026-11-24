@@ -49,8 +49,16 @@ struct GameScan: Sendable {
     /// The game's own Steam API DLL, kept by the fix as `.of` or a backup.
     let originalSteamAPI: URL?
     let isPhoton: Bool
+    /// Every module the game's native binaries import, lowercased. This is the list
+    /// Windows resolves at load, so a doorway is in it only when the game really asks
+    /// for that DLL.
+    let importedDLLs: Set<String>
+    let isIL2CPP: Bool
     let usesSteamNetworking: Bool
     let isGDK: Bool
+    /// A real Microsoft Store manifest, which only a registered package has. The
+    /// GDK runtime files alone are not one: Steam builds such as PEAK ship those too.
+    let hasStoreManifest: Bool
     let hasAntiCheat: Bool
     let macBundle: URL?
     let prefix: URL?
@@ -103,32 +111,40 @@ struct GameScan: Sendable {
         } ?? []
 
         var loader: [String: URL] = [:]
-        for url in loaderCandidates(in: folder, launch: launch) where loader[url.lastPathComponent.lowercased()] == nil {
+        for url in loaderCandidates(in: folder, launch: launch, apiDLLs: apiDLLs)
+        where loader[url.lastPathComponent.lowercased()] == nil {
             loader[url.lastPathComponent.lowercased()] = url
         }
+        let is64Bit = executable.map(is64) ?? apiDLLs.contains {
+            $0.lastPathComponent.lowercased() == "steam_api64.dll"
+        }
+        let engine = engine(in: folder, executable: executable, launch: launch)
+        let imports = importedDLLs(in: folder, launch: launch, exe: executable)
 
         return GameScan(
             appID: appID,
             folder: folder,
             launchFolder: launch,
             exe: executable,
-            is64Bit: executable.map(is64) ?? apiDLLs.contains {
-                $0.lastPathComponent.lowercased() == "steam_api64.dll"
-            },
+            is64Bit: is64Bit,
             apiDLLs: apiDLLs,
-            apiFolder: apiFolder(in: folder, launch: launch, apiDLLs: apiDLLs),
+            apiFolder: apiFolder(in: folder, launch: launch, apiDLLs: apiDLLs,
+                                 prefer64: is64Bit),
             loaderFiles: loader,
             iniURL: loader["onlinefix.ini"],
             dllListURL: loader["dlllist.txt"],
             overlayDLLs: loader["steamoverlay64.dll"].map { [$0] } ?? [],
             strayOverlayRenderers: renderers(in: folder, launch: launch),
             rootLoaderFiles: rootLeftovers(in: folder, launch: launch),
-            engine: engine(in: folder, executable: executable, launch: launch),
+            engine: engine,
             usesDotNet: executable.map(usesDotNet) ?? false,
-            originalSteamAPI: originalSteamAPI(in: folder, launch: launch),
+            originalSteamAPI: originalSteamAPI(in: folder, launch: launch, apiDLLs: apiDLLs),
             isPhoton: PhotonFix.isPhotonGame(in: folder),
+            importedDLLs: imports,
+            isIL2CPP: engine == .unityIL2CPP,
             usesSteamNetworking: SteamNetworking.uses(appID: appID, gameFolder: folder),
             isGDK: !files.isDisjoint(with: gdkFiles),
+            hasStoreManifest: files.contains("appxmanifest.xml"),
             hasAntiCheat: !files.isDisjoint(with: antiCheatFiles),
             macBundle: FixInstaller.nativeMacBundle(in: folder),
             prefix: WineOverride.prefix(appID: appID),
@@ -164,10 +180,70 @@ struct GameScan: Sendable {
         return false
     }
 
+    /// Every module the game's own native binaries import. Managed assemblies have
+    /// no native import table, and fix files describe the fix rather than the game, so
+    /// both are left out. A game wrapped in a folder of its own is walked from the
+    /// launch folder, where the executable lives.
+    static func importedDLLs(in folder: URL, launch: URL, exe: URL?) -> Set<String> {
+        var files: [URL] = []
+        var seen = Set<String>()
+        func add(_ url: URL) {
+            let canonical = canonical(url)
+            guard seen.insert(canonical.path).inserted,
+                  Paths.fm.fileExists(atPath: canonical.path) else { return }
+            files.append(canonical)
+        }
+        if let exe { add(exe) }
+        for name in ["UnityPlayer.dll", "GameAssembly.dll"] {
+            add(launch.appendingPathComponent(name))
+            add(folder.appendingPathComponent(name))
+        }
+        if let enumerator = Paths.fm.enumerator(
+            at: launch,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let url as URL in enumerator {
+                if enumerator.level > 3 {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                let name = url.lastPathComponent.lowercased()
+                if ["bepinex", "doorstop", "managed", ".macsteam-onlinefix"]
+                    .contains(name) {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                guard ["exe", "dll"].contains(url.pathExtension.lowercased()),
+                      !FixPackage.loaderNames.contains(name),
+                      !fixNames.contains(name),
+                      name != "custom.dll", !name.hasPrefix("bepinex."),
+                      (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+                else { continue }
+                add(url)
+            }
+        }
+        var imports = Set<String>()
+        for file in files {
+            if let pe = PortableExecutable.read(file) {
+                if !pe.isManaged { imports.formUnion(pe.imports) }
+            } else {
+                imports.formUnion(PortableExecutable.fallbackImports(in: file))
+            }
+        }
+        return imports
+    }
+
     /// The game's own Steam API DLL, which a fix keeps beside the one it installs:
-    /// `steam_api.dll.onlinefix-backup`, or OnlineFix's own `steam_api.of`.
-    static func originalSteamAPI(in folder: URL, launch: URL) -> URL? {
-        for dir in [launch, folder] {
+    /// `steam_api.dll.onlinefix-backup`, or an older OnlineFix's `steam_api.of`.
+    /// The plugin folder counts too: a Unity fix can put its Steam API there, and the
+    /// untouched copy stays beside it.
+    static func originalSteamAPI(in folder: URL, launch: URL, apiDLLs: [URL] = []) -> URL? {
+        var dirs: [URL] = [launch]
+        dirs.append(contentsOf: apiDLLs.map { $0.deletingLastPathComponent() })
+        dirs.append(folder)
+        var seen = Set<String>()
+        for dir in dirs where seen.insert(dir.path).inserted {
             let entries = (try? Paths.fm.contentsOfDirectory(atPath: dir.path)) ?? []
             if let name = entries.first(where: {
                 let lower = $0.lowercased()
@@ -199,13 +275,13 @@ struct GameScan: Sendable {
 
     /// Every file the loader can be sitting in: the launch folder, the game root and
     /// the folder the game loads its Steam API DLL from.
-    private static func loaderCandidates(in folder: URL, launch: URL) -> [URL] {
+    private static func loaderCandidates(in folder: URL, launch: URL,
+                                        apiDLLs: [URL]) -> [URL] {
         var folders: [URL] = [launch, folder]
-        if let api = try? FixInstaller.findExistingAPIDLL(in: folder) {
-            folders.append(api.deletingLastPathComponent())
-        }
+        folders.append(contentsOf: apiDLLs.map { $0.deletingLastPathComponent() })
         var found: [URL] = []
-        for dir in folders {
+        var seen = Set<String>()
+        for dir in folders where seen.insert(dir.path).inserted {
             let entries = (try? Paths.fm.contentsOfDirectory(atPath: dir.path)) ?? []
             for entry in entries where FixPackage.loaderNames.contains(entry.lowercased()) {
                 found.append(dir.appendingPathComponent(entry))
@@ -239,10 +315,13 @@ struct GameScan: Sendable {
             .map { folder.appendingPathComponent($0) }
     }
 
-    /// The folder the game loads its Steam API DLL from: the folder of the copy it
-    /// already has, otherwise the plugins folder Unity uses, otherwise the exe's.
-    private static func apiFolder(in folder: URL, launch: URL, apiDLLs: [URL]) -> URL? {
-        if let existing = apiDLLs.min(by: { $0.path.count < $1.path.count }) {
+    /// The folder the game loads its Steam API DLL from: beside the exe when a copy
+    /// is there, otherwise Unity's plugin folder, otherwise the exe's own folder.
+    /// The shortest path is not the answer: a copy left at the game root is not the
+    /// one a game running from a folder inside it loads.
+    private static func apiFolder(in folder: URL, launch: URL, apiDLLs: [URL],
+                                  prefer64: Bool) -> URL? {
+        if let existing = bestAPI(apiDLLs, launch: launch, prefer64: prefer64) {
             return existing.deletingLastPathComponent()
         }
         let entries = (try? Paths.fm.contentsOfDirectory(
@@ -268,6 +347,26 @@ struct GameScan: Sendable {
             }
         }
         return launch
+    }
+
+    /// The Steam API DLL the game is most likely to load: beside the exe first, then
+    /// a Unity plugin folder, and the one matching the game's bitness on a tie.
+    static func bestAPI(_ apiDLLs: [URL], launch: URL, prefer64: Bool) -> URL? {
+        apiDLLs.max {
+            score($0, launch: launch, prefer64: prefer64)
+                < score($1, launch: launch, prefer64: prefer64)
+        }
+    }
+
+    private static func score(_ url: URL, launch: URL, prefer64: Bool) -> Int {
+        let lower = url.path.lowercased()
+        var score = url.pathComponents.count
+        if url.deletingLastPathComponent().path == launch.path { score += 32 }
+        if lower.contains("/plugins/") { score += 16 }
+        if lower.contains("_data/") { score += 4 }
+        let preferred = prefer64 ? "steam_api64.dll" : "steam_api.dll"
+        if url.lastPathComponent.lowercased() == preferred { score += 8 }
+        return score
     }
 
     private static func mainExecutable(in launch: URL) -> URL? {

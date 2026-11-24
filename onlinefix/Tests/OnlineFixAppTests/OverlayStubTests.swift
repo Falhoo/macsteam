@@ -91,5 +91,40 @@ struct OverlayStubTests {
         #expect(FixApply.enablePhotonIntegration(at: ini))
         let withoutMisc = try String(contentsOf: ini, encoding: .utf8)
         #expect(withoutMisc.contains("[Misc]\nPhotonIntegration=true"))
+
+        // A value already there but off is replaced, not duplicated: two keys would
+        // leave whichever one the payload reads last deciding the answer.
+        try Data("[Main]\nRealAppId=1\n\n[Misc]\nPhotonIntegration=false\nExtraProtection=false\n"
+            .utf8).write(to: ini)
+        #expect(FixApply.enablePhotonIntegration(at: ini))
+        let replaced = try String(contentsOf: ini, encoding: .utf8)
+        #expect(replaced.contains("PhotonIntegration=true"))
+        #expect(!replaced.lowercased().contains("photonintegration=false"))
+        #expect(replaced.components(separatedBy: "PhotonIntegration").count == 2)
+        #expect(replaced.contains("ExtraProtection=false"))
+        #expect(!FixApply.enablePhotonIntegration(at: ini))
+    }
+
+    /// A package can carry an ini from another game. A key that is present but
+    /// wrong is replaced in place, and a missing key is added under [Main].
+    @Test
+    func appIDsAreReplacedWhenTheyAreWrong() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let ini = root.appendingPathComponent("OnlineFix.ini")
+        try Data("[Main]\r\n  RealAppId = 123\r\nFakeAppId=480\r\n\r\n[Misc]\r\n"
+            .utf8).write(to: ini)
+
+        #expect(FixApply.setAppIDs(at: ini, appID: 42))
+        let text = try String(contentsOf: ini, encoding: .utf8)
+        #expect(text.contains("  RealAppId=42\r\n"))
+        #expect(!text.contains("123"))
+        #expect(!FixApply.setAppIDs(at: ini, appID: 42))
+
+        try Data("[Main]\n".utf8).write(to: ini)
+        #expect(FixApply.setAppIDs(at: ini, appID: 42))
+        let added = try String(contentsOf: ini, encoding: .utf8)
+        #expect(added.contains("RealAppId=42"))
+        #expect(added.contains("FakeAppId=480"))
     }
 }

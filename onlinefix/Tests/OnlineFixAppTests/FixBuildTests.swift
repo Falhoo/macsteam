@@ -82,13 +82,14 @@ struct FixBuildTests {
         #expect(contents(api) == "the fix's")
         #expect(contents(api.appendingPathExtension("onlinefix-backup")) == "the game's own")
 
-        // The ini names the game, and the overlay is dropped from the loader's list.
+        // The ini names the game, and the overlay stays in the loader's list: its
+        // DllMain is inert, and OnlineFix64 expects the first entry to be there.
         let ini = contents(game.appendingPathComponent("OnlineFix.ini"))
         #expect(ini.contains("RealAppId=99"))
         #expect(ini.contains("FakeAppId=480"))
         let list = contents(game.appendingPathComponent("dlllist.txt"))
         #expect(list.contains("OnlineFix64.dll"))
-        #expect(!list.lowercased().contains("steamoverlay64.dll"))
+        #expect(list.lowercased().contains("steamoverlay64.dll"))
     }
 
     /// A Photon game's chain has to keep its tree, and the loader has to be told
@@ -124,8 +125,106 @@ struct FixBuildTests {
         #expect(FileManager.default.fileExists(
             atPath: game.appendingPathComponent("BepInEx/core/BepInEx.Preloader.dll").path))
         let list = contents(game.appendingPathComponent("dlllist.txt"))
-        #expect(list.contains("Custom.net"))
+        #expect(list.contains("OnlineFix64.dll"))
+        #expect(!list.contains("Custom.net"))
         #expect(contents(game.appendingPathComponent("OnlineFix.ini")).contains("PhotonIntegration=true"))
+    }
+
+    /// A package can put Custom.dll beside the executable, where dlllist.txt loads it
+    /// through OnlineFix64. That layout must not also get BepInEx: the plugin would
+    /// run twice, and a game that never needed the chain gets a second loader.
+    @Test
+    func aRootPhotonPatchNeedsNoBepInExChain() throws {
+        let game = try folder("root-photon")
+        let package = try folder("root-photon-package")
+        defer {
+            try? FileManager.default.removeItem(at: game)
+            try? FileManager.default.removeItem(at: package)
+        }
+        try write("exe", to: game.appendingPathComponent("Game.exe"))
+        try write("managed", to: game.appendingPathComponent("Game_Data/Managed/PhotonRealtime.dll"))
+        try write("payload", to: package.appendingPathComponent("OnlineFix64.dll"))
+        try write("plugin", to: package.appendingPathComponent("Custom.dll"))
+        try write("[Main]\nRealAppId=7\nFakeAppId=480\n",
+                  to: package.appendingPathComponent("OnlineFix.ini"))
+        try write("OnlineFix64.dll\n", to: package.appendingPathComponent("dlllist.txt"))
+
+        let scan = GameScan.read(folder: game, appID: 7, name: "Game")
+        let plan = FixPlan.build(appID: 7, name: "Game", scan: scan,
+                                 package: FixPackage.read(root: package))
+        #expect(plan.photonSwap)
+        #expect(plan.copies.contains { $0.relative == "Custom.dll" })
+        #expect(!plan.copies.contains { $0.relative.lowercased().contains("bepinex") })
+        #expect(!plan.copies.contains { $0.destination.lastPathComponent.lowercased() == "winmm.dll" })
+
+        _ = try FixApply.apply(plan, appID: 7, folder: game)
+        let list = contents(game.appendingPathComponent("dlllist.txt"))
+        #expect(list.contains("Custom.dll"))
+        #expect(!list.contains("Custom.net"))
+        #expect(contents(game.appendingPathComponent("OnlineFix.ini")).contains("PhotonIntegration=true"))
+    }
+
+    /// Some packages say PhotonIntegration without shipping the patch. The package
+    /// is evidence, so the app's chain is added even when the game's own assemblies
+    /// were stripped or are hidden from the scan.
+    @Test
+    func aPackageThatSaysPhotonGetsTheBundledChain() throws {
+        let game = try folder("says-photon")
+        let package = try folder("says-photon-package")
+        defer {
+            try? FileManager.default.removeItem(at: game)
+            try? FileManager.default.removeItem(at: package)
+        }
+        try write("MZ", to: game.appendingPathComponent("Game.exe"))
+        try write("... WINHTTP.dll ...", to: game.appendingPathComponent("UnityPlayer.dll"))
+        try write("payload", to: package.appendingPathComponent("OnlineFix64.dll"))
+        try write("door", to: package.appendingPathComponent("winmm.dll"))
+        try write("[Main]\nRealAppId=7\nFakeAppId=480\nPhotonIntegration=true\n",
+                  to: package.appendingPathComponent("OnlineFix.ini"))
+        try write("OnlineFix64.dll\n", to: package.appendingPathComponent("dlllist.txt"))
+
+        let scan = GameScan.read(folder: game, appID: 7, name: "Game")
+        #expect(!scan.isPhoton)
+        let plan = FixPlan.build(appID: 7, name: "Game", scan: scan,
+                                 package: FixPackage.read(root: package))
+        #expect(plan.photonSwap)
+        #expect(plan.copies.contains { $0.relative == "winhttp.dll" })
+        #expect(plan.copies.contains { $0.relative == PhotonChain.plugin })
+        #expect(plan.copies.contains { $0.relative == "BepInEx/core/BepInEx.dll" })
+        #expect(plan.wineDLLs.contains("winhttp.dll"))
+    }
+
+    /// PEAK's GDK fix has no Custom.dll and registers a Microsoft Store package.
+    /// A generic BepInEx chain in that folder is not part of the fix and is not added.
+    @Test
+    func aStorePackageWithoutAPhotonPatchGetsNoChain() throws {
+        let game = try folder("photon-no-chain")
+        let package = try folder("photon-no-chain-package")
+        defer {
+            try? FileManager.default.removeItem(at: game)
+            try? FileManager.default.removeItem(at: package)
+        }
+        try write("exe", to: game.appendingPathComponent("Game.exe"))
+        try write("managed", to: game.appendingPathComponent("Game_Data/Managed/PhotonRealtime.dll"))
+
+        try write("payload", to: package.appendingPathComponent("OnlineFix64.dll"))
+        try write("doorstop", to: package.appendingPathComponent("winmm.dll"))
+        try write("gdk", to: package.appendingPathComponent("GDK_Helper.bat"))
+        try write("gdk", to: package.appendingPathComponent("wdapp.exe"))
+        try write("gdk", to: package.appendingPathComponent("xsapi.dll"))
+        try write("[Main]\nRealAppId=1\nFakeAppId=480\nProductId=9NMKF7LPVX44\n",
+                  to: package.appendingPathComponent("OnlineFix.ini"))
+        try write("OnlineFix64.dll\n", to: package.appendingPathComponent("dlllist.txt"))
+
+        let scan = GameScan.read(folder: game, appID: 1, name: "Game")
+        let plan = FixPlan.build(appID: 1, name: "Game", scan: scan,
+                                 package: FixPackage.read(root: package))
+        #expect(scan.isPhoton)
+        #expect(!plan.copies.contains { $0.relative.lowercased().contains("bepinex") })
+        #expect(!plan.copies.contains {
+            $0.destination.lastPathComponent.lowercased() == "custom.dll"
+        })
+        #expect(plan.notes.contains { $0.contains("has no Photon patch") })
     }
 
     /// Buckshot Roulette: Valve's renderer beside the game stops it before main().
@@ -248,5 +347,80 @@ struct FixBuildTests {
             atPath: game.appendingPathComponent("OnlineFix.dll").path))
         #expect(!FileManager.default.fileExists(
             atPath: game.appendingPathComponent("winmm.dll").path))
+    }
+
+    /// PEAK's package has no BepInEx chain and a winmm doorway, while UnityPlayer
+    /// imports WINHTTP. The plan adds the bundled chain behind the doorway the game
+    /// actually loads, so the Photon plugin can run.
+    @Test
+    func aPhotonPackageWithoutAChainGetsTheBundledOne() throws {
+        let game = try folder("photon-no-chain")
+        let package = try folder("photon-no-chain-package")
+        defer {
+            try? FileManager.default.removeItem(at: game)
+            try? FileManager.default.removeItem(at: package)
+        }
+        try write("MZ", to: game.appendingPathComponent("PEAK.exe"))
+        try write("... WINHTTP.dll ...",
+                  to: game.appendingPathComponent("UnityPlayer.dll"))
+        try write("managed", to: game.appendingPathComponent("PEAK_Data/Managed/PhotonRealtime.dll"))
+        try write("payload", to: package.appendingPathComponent("OnlineFix64.dll"))
+        try write("doorstop", to: package.appendingPathComponent("winmm.dll"))
+        try write("[Main]\nIsPackaged=false\nProductId=9NMKF7LPVX44\n",
+                  to: package.appendingPathComponent("OnlineFix.ini"))
+
+        let scan = GameScan.read(folder: game, appID: 1, name: "PEAK")
+        let read = FixPackage.read(root: package)
+        #expect(!read.hasPhotonChain)
+        let plan = FixPlan.build(appID: 1, name: "PEAK", scan: scan, package: read,
+                                 diagnosis: FixDiagnosis.run(scan: scan, package: read))
+        #expect(plan.copies.contains { $0.relative == "winhttp.dll" })
+        #expect(plan.copies.contains { $0.relative == PhotonChain.plugin })
+        #expect(plan.copies.contains { $0.relative == "BepInEx/core/BepInEx.dll" })
+        #expect(plan.wineDLLs.contains("winhttp.dll"))
+
+        _ = try FixApply.apply(plan, appID: 1, folder: game)
+        #expect(FileManager.default.fileExists(
+            atPath: game.appendingPathComponent("winhttp.dll").path))
+        #expect(FileManager.default.fileExists(
+            atPath: game.appendingPathComponent(PhotonChain.plugin).path))
+    }
+
+    /// OnlineFix64 reads an empty trailing line as an empty DLL name and stops with
+    /// error 126, and it expects the overlay first. A repaired list must have
+    /// neither a blank line nor the overlay in the middle.
+    @Test
+    func aListIsRewrittenWithoutABlankLineAndWithTheOverlayFirst() throws {
+        let game = try folder("list-shape")
+        defer { try? FileManager.default.removeItem(at: game) }
+        let list = game.appendingPathComponent("dlllist.txt")
+        try write("OnlineFix64.dll\r\nGameAssembly.dll\r\nSteamOverlay64.dll\r\n", to: list)
+
+        let changed = FixApply.ensureDLLListEntries(
+            ["OnlineFix64.dll", "SteamOverlay64.dll", "GameAssembly.dll", "Custom.dll"],
+            at: list)
+
+        #expect(changed)
+        #expect(contents(list) == "SteamOverlay64.dll\r\nOnlineFix64.dll\r\n"
+            + "GameAssembly.dll\r\nCustom.dll")
+    }
+
+    /// A list with every name and the overlay first can still fail: one trailing
+    /// newline is enough for OnlineFix64 to try an empty DLL name.
+    @Test
+    func aTrailingBlankLineIsTakenOffEvenWhenEveryNameIsThere() throws {
+        let game = try folder("list-trailing")
+        defer { try? FileManager.default.removeItem(at: game) }
+        let list = game.appendingPathComponent("dlllist.txt")
+        try write("SteamOverlay64.dll\r\nOnlineFix64.dll\r\n"
+            + "GameAssembly.dll\r\nCustom.dll\r\n", to: list)
+
+        let changed = FixApply.ensureDLLListEntries(
+            ["SteamOverlay64.dll", "OnlineFix64.dll", "GameAssembly.dll", "Custom.dll"],
+            at: list)
+
+        #expect(changed)
+        #expect(contents(list) == "SteamOverlay64.dll\r\nOnlineFix64.dll\r\n"
+            + "GameAssembly.dll\r\nCustom.dll")
     }
 }

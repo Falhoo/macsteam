@@ -54,6 +54,13 @@ enum WineOverride {
         native ? "\"\(dll)\"=\"native\"" : "\"\(dll)\"=\"native,builtin\""
     }
 
+    /// The same choice in `WINEDLLOVERRIDES` form, for a launch option. Wine
+    /// ignores the prefix registry whenever that variable is present, which the
+    /// compatibility tool always is, so the launch option is the path that works.
+    static func environment(_ dll: String) -> String {
+        "\(dll)=\(needsNative(dll) ? "n" : "n,b")"
+    }
+
     /// True when the prefix already asks for this DLL's native copy.
     static func has(appID: Int, dll: String) -> Bool {
         guard let reg = userReg(appID: appID),

@@ -76,6 +76,23 @@ if let index = CommandLine.arguments.firstIndex(of: "--onlinefix-diagnose"),
     exit(OnlineFixCommand.diagnose(appID: appID, name: name))
 }
 
+// Puts one game back the way its fix pack found it, then rewrites the routing:
+// --onlinefix-uninstall <appid> [--name <name>].
+if let index = CommandLine.arguments.firstIndex(of: "--onlinefix-uninstall"),
+   CommandLine.arguments.count > index + 1,
+   let appID = Int(CommandLine.arguments[index + 1]) {
+    var name = ""
+    if let nameIndex = CommandLine.arguments.firstIndex(of: "--name"),
+       CommandLine.arguments.count > nameIndex + 1 {
+        name = CommandLine.arguments[nameIndex + 1]
+    }
+    let removed = MainActor.assumeIsolated {
+        OnlineFixCommand.uninstallGame(appID: appID, name: name)
+    }
+    guard removed == 0 else { exit(removed) }
+    exit(OnlineFixSync.run())
+}
+
 // Keeps a game's own Steam API and relies on the routing, for a game whose fix loader
 // never opens it: --onlinefix-routing-only <appid>.
 if let index = CommandLine.arguments.firstIndex(of: "--onlinefix-routing-only"),

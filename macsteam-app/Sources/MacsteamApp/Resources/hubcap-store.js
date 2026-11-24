@@ -18,10 +18,6 @@
     // Whether macSteam has this app in its config, which is what the Remove button acts on.
     let configured = false;
     let onlineRoot, onlineButton, onlineStatus, onlineDesc, onlineNote, onlineChoices, onlineConfirmRow;
-    // OnlineFix's install path is broken in this build: the fix it copies into a game
-    // cannot be trusted to leave the game playable. The card says so, and its buttons
-    // do nothing rather than start work that cannot finish.
-    const ONLINE_FIX_BROKEN = 'OnlineFix is broken in this build — don\'t use these buttons.';
     // Tick "Show me anyway": the install runs only when it is on.
     let onlineConfirmed = false;
     let onlineGdk = false;
@@ -758,10 +754,6 @@
         title.className = 'title';
         title.textContent = 'Use OnlineFix';
         onlineRoot.appendChild(title);
-        const broken = document.createElement('div');
-        broken.textContent = ONLINE_FIX_BROKEN;
-        broken.style.cssText = 'font-size:12px;color:#e8a54b;margin:6px 0 0;max-width:560px;line-height:1.45';
-        onlineRoot.appendChild(broken);
         const row = document.createElement('div');
         row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0';
         const info = document.createElement('div');
@@ -1096,14 +1088,6 @@
     // A Mac build has no files to take: its Install is the AppID 480 routing, which
     // is the whole fix for it. Uninstall removes the game from My Games again.
     async function installOnlineRoute() {
-        if (ONLINE_FIX_BROKEN) {
-            if (onlineStatus) {
-                onlineStatus.hidden = false;
-                onlineStatus.style.color = '#e8a54b';
-                onlineStatus.textContent = ONLINE_FIX_BROKEN;
-            }
-            return;
-        }
         if (onlineBusy) return;
         onlineBusy = true;
         if (onlineButton) onlineButton.disabled = true;
@@ -1136,14 +1120,6 @@
     // `confirmed` is set when the player already said to install a fix the app
     // warned them about, so it does not ask twice.
     async function installOnlineFix(folderName, confirmed) {
-        if (ONLINE_FIX_BROKEN) {
-            if (onlineStatus) {
-                onlineStatus.hidden = false;
-                onlineStatus.style.color = '#e8a54b';
-                onlineStatus.textContent = ONLINE_FIX_BROKEN;
-            }
-            return;
-        }
         if (onlineBusy) return;
         // A Mac build takes the routing path, which has no archive to download.
         if (onlineNative) {

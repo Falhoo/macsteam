@@ -70,7 +70,7 @@ struct FixPackage: Sendable {
             let base = root.path
             let relative = path.hasPrefix(base + "/")
                 ? String(path.dropFirst(base.count + 1)) : url.lastPathComponent
-            guard !relative.isEmpty, relative != ".DS_Store" else { continue }
+            guard !relative.isEmpty, !isJunk(relative) else { continue }
             items.append(Item(url: url, relative: relative))
         }
         let iniItem = items.first { $0.name == "onlinefix.ini" }
@@ -82,6 +82,18 @@ struct FixPackage: Sendable {
             ini: iniItem.flatMap { text(at: $0.url) } ?? "",
             dllList: listItem.map { lines(of: $0.url) } ?? []
         )
+    }
+
+    /// Files a Mac archive picks up on the way to Windows and the fix never needs.
+    /// `__MACOSX` and `._name` are AppleDouble resource forks, not game files.
+    static func isJunk(_ relative: String) -> Bool {
+        let components = relative.split(separator: "/").map(String.init)
+        guard !components.isEmpty else { return true }
+        if components.contains(where: { $0 == "__MACOSX" || $0.hasPrefix("._") }) {
+            return true
+        }
+        let name = components.last!.lowercased()
+        return name == ".ds_store" || name == "thumbs.db" || name == "desktop.ini"
     }
 
     private static func text(at url: URL) -> String? {
@@ -139,7 +151,14 @@ struct FixPackage: Sendable {
     /// A fix built for the Microsoft Store (GDK) version of a game.
     var isGDK: Bool {
         !names.isDisjoint(with: FixPackage.gdkNames)
-            || ini.lowercased().contains("productid=")
+            || iniValues["productid"] != nil
+    }
+
+    /// A package that installs by registering an Appx manifest with GDK_Helper.
+    /// Copying its files into a Steam install cannot register it, and the game stays
+    /// a Steam copy to the services it talks to.
+    var requiresGDKRegistration: Bool {
+        isGDK && (item(named: "gdk_helper.bat") != nil || item(named: "wdapp.exe") != nil)
     }
 
     /// The hashes OnlineFix's loader checks against the game's own files. They are
@@ -159,6 +178,21 @@ struct FixPackage: Sendable {
             if value.count >= 64 { found.append(value.lowercased()) }
         }
         return found
+    }
+
+    /// The ini's values by lowercased key, so the package's game can be compared with
+    /// the game it is being installed into.
+    var iniValues: [String: String] {
+        var values: [String: String] = [:]
+        for raw in ini.components(separatedBy: .newlines) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard let equals = line.firstIndex(of: "=") else { continue }
+            let key = line[..<equals].trimmingCharacters(in: .whitespaces).lowercased()
+            let value = line[line.index(after: equals)...]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if values[key] == nil { values[key] = value }
+        }
+        return values
     }
 
     /// The ini keys and sections the package brought, lowercased.

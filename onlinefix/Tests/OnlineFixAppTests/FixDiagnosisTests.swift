@@ -125,6 +125,37 @@ struct FixDiagnosisTests {
         #expect(diagnosis.findings.first { $0.code == "OF003" }?.level == .notice)
     }
 
+    /// PEAK: the only fix online-fix.me has is the Microsoft Store package. Copying
+    /// it into the Steam install cannot register the Appx manifest, and Photon still
+    /// sees a Steam ticket.
+    @Test
+    func aStoreRegistrationFixIsRefusedForASteamCopy() throws {
+        let root = try game("gdk-steam-fix")
+        let packageRoot = try folder("gdk-package")
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: packageRoot)
+        }
+        try write("api", to: packageRoot.appendingPathComponent("steam_api64.dll"))
+        try write("payload", to: packageRoot.appendingPathComponent("OnlineFix64.dll"))
+        try write("doorstop", to: packageRoot.appendingPathComponent("winmm.dll"))
+        try write("gdk", to: packageRoot.appendingPathComponent("GDK_Helper.bat"))
+        try write("gdk", to: packageRoot.appendingPathComponent("wdapp.exe"))
+        try write("gdk", to: packageRoot.appendingPathComponent("xsapi.dll"))
+        try write("[Main]\nIsPackaged=false\nProductId=9NMKF7LPVX44\n",
+                  to: packageRoot.appendingPathComponent("OnlineFix.ini"))
+
+        let scan = GameScan.read(folder: root, appID: 3527290, name: "PEAK")
+        let package = FixPackage.read(root: packageRoot)
+        #expect(package.requiresGDKRegistration)
+        #expect(!scan.hasStoreManifest)
+
+        let diagnosis = FixDiagnosis.run(scan: scan, package: package)
+        #expect(diagnosis.isBlocked)
+        #expect(codes(diagnosis).contains("OF080"))
+        #expect(diagnosis.findings.first { $0.code == "OF080" }?.level == .blocking)
+    }
+
     @Test
     func anAntiCheatGameIsRefused() throws {
         let root = try game("ac")
@@ -191,7 +222,8 @@ struct FixDiagnosisTests {
 
         let diagnosis = FixDiagnosis.run(scan: scan, package: FixPackage.read(root: packageRoot))
         #expect(codes(diagnosis).contains("OF015"))
-        // The package has no Custom.dll, so the Photon patch is the warning.
+        // The game imports no doorway at all, so the bundled chain cannot be loaded:
+        // the missing Photon patch stays a warning.
         let photon = diagnosis.findings.first { $0.code == "OF021" }
         #expect(photon?.level == .warning)
     }
@@ -209,12 +241,121 @@ struct FixDiagnosisTests {
         #expect(relay?.title == "Steam relay game")
     }
 
-    /// Terraria's case: the loader's `[Hashes]` guard is of a build Steam has
-    /// replaced. That is a warning on its own, because every package made before an
-    /// update has one, and taking the loader away from a game it does start would
-    /// break a fix that works.
+    /// Two copies of the same DLL: Windows loads one, and a fix can end up in the
+    /// other, so the game runs the untouched one.
     @Test
-    func aFixMadeForAnotherBuildIsOnlyAWarning() throws {
+    func twoCopiesOfTheSteamAPIWarn() throws {
+        let gameFolder = try game("duplicate-api")
+        defer { try? FileManager.default.removeItem(at: gameFolder) }
+        try write("stale", to: gameFolder.appendingPathComponent("steam_api64.dll"))
+
+        let scan = GameScan.read(folder: gameFolder, appID: 1, name: "Game")
+        let diagnosis = FixDiagnosis.run(scan: scan, package: nil)
+        let duplicate = diagnosis.findings.first { $0.code == "OF034" }
+        #expect(duplicate?.level == .warning)
+        #expect(duplicate?.detail.contains("Game_Data/Plugins/x86_64/steam_api64.dll") == true)
+        #expect(duplicate?.detail.contains("steam_api64.dll") == true)
+    }
+
+    /// A package for another game would run that game's identity and meet its
+    /// players, not this game's.
+    @Test
+    func aPackageForAnotherGameWarns() throws {
+        let gameFolder = try game("mismatch")
+        let packageRoot = try package("mismatch")
+        defer {
+            try? FileManager.default.removeItem(at: gameFolder)
+            try? FileManager.default.removeItem(at: packageRoot)
+        }
+        try write("[Main]\nRealAppId=999\nFakeAppId=480\n",
+                  to: packageRoot.appendingPathComponent("OnlineFix.ini"))
+
+        let scan = GameScan.read(folder: gameFolder, appID: 100, name: "Game")
+        let diagnosis = FixDiagnosis.run(scan: scan, package: FixPackage.read(root: packageRoot))
+        let mismatch = diagnosis.findings.first { $0.code == "OF013" }
+        #expect(mismatch?.level == .warning)
+        #expect(mismatch?.title == "The fix belongs to another game")
+    }
+
+    /// A GDK package names a Store product, not a Steam AppID. Demanding RealAppId
+    /// would warn about every Microsoft Store fix.
+    @Test
+    func aGDKPackageDoesNotDemandSteamAppIDs() throws {
+        let gameFolder = try game("gdk")
+        let packageRoot = try package("gdk")
+        defer {
+            try? FileManager.default.removeItem(at: gameFolder)
+            try? FileManager.default.removeItem(at: packageRoot)
+        }
+        try write("x", to: gameFolder.appendingPathComponent("xsapi.dll"))
+        try write("x", to: packageRoot.appendingPathComponent("xsapi.dll"))
+        try write("[Main]\nIsPackaged=false\nProductId=9NMKF7LPVX44\n",
+                  to: packageRoot.appendingPathComponent("OnlineFix.ini"))
+
+        let scan = GameScan.read(folder: gameFolder, appID: 100, name: "Game")
+        let diagnosis = FixDiagnosis.run(scan: scan, package: FixPackage.read(root: packageRoot))
+        #expect(codes(diagnosis).contains("OF003"))
+        #expect(!codes(diagnosis).contains("OF013"))
+        // The game's own Steam API is the one the fix hooks, so a GDK package
+        // carrying none is not a missing-API warning.
+        #expect(!codes(diagnosis).contains("OF012"))
+    }
+
+    /// PEAK's package starts through winmm.dll, but its UnityPlayer imports WINHTTP.
+    /// The fix installs, the doorway never loads, and nothing it carries runs.
+    @Test
+    func aDoorwayTheGameDoesNotImportWarns() throws {
+        let gameFolder = try game("doorway")
+        let packageRoot = try package("doorway")
+        defer {
+            try? FileManager.default.removeItem(at: gameFolder)
+            try? FileManager.default.removeItem(at: packageRoot)
+        }
+        try write("\u{0}WINHTTP.dll\u{0}", to: gameFolder.appendingPathComponent("Game.exe"))
+
+        let scan = GameScan.read(folder: gameFolder, appID: 100, name: "Game")
+        let diagnosis = FixDiagnosis.run(scan: scan, package: FixPackage.read(root: packageRoot))
+        let doorway = diagnosis.findings.first { $0.code == "OF035" }
+        #expect(doorway?.level == .warning)
+        #expect(doorway?.detail.contains("winhttp.dll") == true)
+    }
+
+    /// R.E.P.O. and PEAK store their realtime and voice ids as a pair of fields.
+    /// They are not two servers, and calling them ambiguous hides the patch that
+    /// exists for exactly this layout.
+    @Test
+    func aRealtimeVoicePairIsNotAmbiguous() throws {
+        let gameFolder = try game("pair")
+        let packageRoot = try package("pair")
+        defer {
+            try? FileManager.default.removeItem(at: gameFolder)
+            try? FileManager.default.removeItem(at: packageRoot)
+        }
+        try write("assembly", to: gameFolder.appendingPathComponent("Game_Data/Managed/PhotonVoice.dll"))
+        let realtime = "11111111-2222-3333-4444-555555555555"
+        let voice = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+        var assets = Data("PhotonServerSettings".utf8)
+        for id in [realtime, voice] {
+            assets.append(Data([0x24, 0x00, 0x00, 0x00]))
+            assets.append(Data(id.utf8))
+        }
+        try writeBinary(assets, to: gameFolder.appendingPathComponent("Game_Data/resources.assets"))
+
+        let scan = GameScan.read(folder: gameFolder, appID: 100, name: "Game")
+        let candidates = PhotonPatch.scan(in: gameFolder)
+        let diagnosis = FixDiagnosis.run(scan: scan, package: FixPackage.read(root: packageRoot),
+                                         candidates: candidates)
+        let pair = diagnosis.findings.first { $0.code == "OF020" }
+        #expect(pair?.level == .notice)
+        #expect(pair?.title == "The game carries a Photon app-id pair")
+        #expect(PhotonPatch.plan(for: candidates).changes.count == 2)
+    }
+
+    /// OF055 is retired: a package's `[Hashes]` values name no file, so one that
+    /// matches nothing proves nothing. PEAK's GDK package hashes the Xbox build and
+    /// R.E.P.O.'s is older than the installed one, yet both fixes work.
+    @Test
+    func aFixsHashGuardIsNotGuessedAt() throws {
         let gameFolder = try game("stale")
         let packageRoot = try package("stale")
         defer {
@@ -226,7 +367,7 @@ struct FixDiagnosisTests {
 
         let scan = GameScan.read(folder: gameFolder, appID: 990001, name: "Game")
         let diagnosis = FixDiagnosis.run(scan: scan, package: FixPackage.read(root: packageRoot))
-        #expect(codes(diagnosis).contains("OF055"))
+        #expect(!codes(diagnosis).contains("OF055"))
         #expect(!codes(diagnosis).contains("OF061"))
     }
 

@@ -24,11 +24,22 @@ struct FixRecipe: Codable, Sendable, Equatable {
     var packageName: String
     var findings: [FixFinding]
     var entries: [Entry]
-    /// Files taken out, such as Valve's renderer beside the game.
+    /// Files taken out, as paths from the game folder, such as Valve's renderer
+    /// beside the game. Each is kept as `<path>.onlinefix-removed` for undo.
     var removed: [String]
     var keepRealAppID: Bool
     var photonSwap: Bool
     var picoPark2: Bool
+    /// Files the Photon swap changed in place, as paths from the game folder. Their
+    /// untouched copies are beside them with `.onlinefix-photon-backup`.
+    var photonPatched: [String]? = nil
+    /// The ids the Photon swap left in those files, so a Steam restore that puts the
+    /// game's own ids back is noticed without keeping a copy of a multi-gigabyte asset.
+    var photonIDs: [String]? = nil
+    /// Which of those ids each patched file carries. A game can keep a realtime id in
+    /// one file and a realtime/voice pair in another, so one global list cannot say
+    /// what a single file is supposed to hold.
+    var photonFileIDs: [String: [String]]? = nil
     var wineDLLs: [String]
     var notes: [String] = []
 
@@ -61,6 +72,22 @@ enum FixPack {
         Paths.fm.fileExists(atPath: recipeURL(in: gameFolder).path)
     }
 
+    /// A recipe path resolved under the game folder, or nil when it would leave it.
+    /// A recipe is written by this app, but it is a file in the game folder and can
+    /// be edited; no relative path in it may point outside the game.
+    static func file(_ relative: String, in gameFolder: URL) -> URL? {
+        guard !relative.isEmpty, !relative.hasPrefix("/"),
+              !relative.contains("\0") else { return nil }
+        let parts = relative.split(separator: "/", omittingEmptySubsequences: false)
+        guard !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
+            return nil
+        }
+        let base = GameScan.canonical(gameFolder)
+        let url = GameScan.canonical(base.appendingPathComponent(relative))
+        guard url.path.hasPrefix(base.path + "/") else { return nil }
+        return url
+    }
+
     // MARK: - Read and write
 
     static func read(in gameFolder: URL) -> FixRecipe? {
@@ -80,18 +107,128 @@ enum FixPack {
         try Paths.ensureDir(pack.appendingPathComponent(payloadName, isDirectory: true))
 
         for entry in recipe.entries {
-            let source = gameFolder.appendingPathComponent(entry.path)
-            guard Paths.fm.fileExists(atPath: source.path) else { continue }
-            let destination = payloadURL(in: gameFolder, for: entry.path)
+            guard let source = file(entry.path, in: gameFolder),
+                  Paths.fm.fileExists(atPath: source.path),
+                  let destination = file(entry.path, in: payloadURL(in: gameFolder, for: ""))
+            else { continue }
             try Paths.ensureDir(destination.deletingLastPathComponent())
             try? Paths.fm.removeItem(at: destination)
             try Paths.fm.copyItem(at: source, to: destination)
         }
 
+        try writeRecipe(recipe, in: gameFolder)
+    }
+
+    /// Rewrites only the recipe, leaving the payload alone. Used when a patch in the
+    /// game's own files changes and the pack has to remember the ids it now carries.
+    static func writeRecipe(_ recipe: FixRecipe, in gameFolder: URL) throws {
+        try Paths.ensureDir(folder(in: gameFolder))
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         try encoder.encode(recipe).write(to: recipeURL(in: gameFolder), options: .atomic)
+    }
+
+    /// Records the ids the game's Photon fields carry now, after a manual patch or a
+    /// restore, so a later verify or repair compares against what is really there.
+    ///
+    /// Pass `targets` when the patch wrote ids the scanner cannot know (a custom pair
+    /// from the patch sheet): the recipe has to point at those bytes, not at whatever
+    /// OnlineFix's defaults were. Pass an empty list after a restore to clear the
+    /// record; no argument rescans for the ids the scanner does know.
+    static func syncPhotonTargets(in gameFolder: URL, targets: [String]? = nil) {
+        guard var recipe = read(in: gameFolder), recipe.photonSwap else { return }
+
+        if let targets {
+            guard !targets.isEmpty else {
+                clearPhotonTargets(&recipe, in: gameFolder)
+                return
+            }
+            let ids = targets.filter { !$0.isEmpty }
+            guard !ids.isEmpty else {
+                clearPhotonTargets(&recipe, in: gameFolder)
+                return
+            }
+            let backups = photonBackupFiles(in: gameFolder)
+            var files = Set(recipe.photonPatched ?? [])
+            var fileIDs = recipe.photonFileIDs ?? [:]
+            for relative in backups {
+                guard let file = file(relative, in: gameFolder),
+                      let data = try? Data(contentsOf: file, options: [.mappedIfSafe])
+                else { continue }
+                let carrying = ids.filter { data.range(of: Data($0.utf8)) != nil }
+                if !carrying.isEmpty { files.insert(relative) }
+                let kept = (fileIDs[relative] ?? []).filter {
+                    data.range(of: Data($0.utf8)) != nil
+                }
+                if !carrying.isEmpty || !kept.isEmpty {
+                    fileIDs[relative] = Array(Set(carrying + kept)).sorted()
+                }
+            }
+            guard files.sorted() != recipe.photonPatched || ids != recipe.photonIDs
+                    || fileIDs != (recipe.photonFileIDs ?? [:]) else { return }
+            recipe.photonPatched = files.sorted()
+            recipe.photonIDs = ids
+            recipe.photonFileIDs = fileIDs
+            try? writeRecipe(recipe, in: gameFolder)
+            return
+        }
+
+        let candidates = PhotonPatch.scan(in: gameFolder)
+        let patched = Set(candidates.map(\.file.path)).filter {
+            Paths.fm.fileExists(atPath: $0 + ".onlinefix-photon-backup")
+        }
+        let plan = PhotonPatch.plan(for: candidates)
+        let ids = [plan.id, plan.voiceID].compactMap { $0 }
+        let files = patched.map { FixPlan.relative(URL(fileURLWithPath: $0), in: gameFolder) }
+            .sorted()
+        var fileIDs: [String: [String]] = [:]
+        for relative in files {
+            guard let file = file(relative, in: gameFolder),
+                  let data = try? Data(contentsOf: file, options: [.mappedIfSafe]) else {
+                continue
+            }
+            let carrying = ids.filter { data.range(of: Data($0.utf8)) != nil }
+            if !carrying.isEmpty { fileIDs[relative] = carrying }
+        }
+        if files.isEmpty || ids.isEmpty {
+            clearPhotonTargets(&recipe, in: gameFolder)
+            return
+        }
+        guard files != recipe.photonPatched || ids != recipe.photonIDs
+                || fileIDs != (recipe.photonFileIDs ?? [:]) else { return }
+        recipe.photonPatched = files
+        recipe.photonIDs = ids
+        recipe.photonFileIDs = fileIDs
+        try? writeRecipe(recipe, in: gameFolder)
+    }
+
+    private static func clearPhotonTargets(_ recipe: inout FixRecipe, in gameFolder: URL) {
+        guard recipe.photonPatched?.isEmpty == false || recipe.photonIDs?.isEmpty == false
+                || recipe.photonFileIDs?.isEmpty == false else { return }
+        recipe.photonPatched = []
+        recipe.photonIDs = []
+        recipe.photonFileIDs = [:]
+        try? writeRecipe(recipe, in: gameFolder)
+    }
+
+    /// Every untouched Photon copy in the game folder, as paths from its root.
+    private static func photonBackupFiles(in gameFolder: URL) -> [String] {
+        guard let enumerator = Paths.fm.enumerator(
+            at: gameFolder,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]) else { return [] }
+        var out: [String] = []
+        for case let url as URL in enumerator {
+            guard url.lastPathComponent.hasSuffix(".onlinefix-photon-backup") else { continue }
+            let relative = FixPlan.relative(
+                URL(fileURLWithPath: String(url.path.dropLast(".onlinefix-photon-backup".count))),
+                in: gameFolder)
+            if !relative.isEmpty, !relative.hasPrefix(".macsteam-onlinefix/") {
+                out.append(relative)
+            }
+        }
+        return out.sorted()
     }
 
     // MARK: - Verify
@@ -102,12 +239,31 @@ enum FixPack {
         guard let recipe = read(in: gameFolder) else { return [] }
         var changed: [String] = []
         for entry in recipe.entries {
-            let file = gameFolder.appendingPathComponent(entry.path)
+            guard let file = file(entry.path, in: gameFolder) else { continue }
             guard let values = try? file.resourceValues(forKeys: [.fileSizeKey]),
                   let size = values.fileSize, Int64(size) == entry.size,
                   let hash = Hash.sha256(file), hash == entry.sha256 else {
                 changed.append(entry.path)
                 continue
+            }
+        }
+        // A Steam verify puts the game's own assets back. The patch wrote ids, not a
+        // file, so look for the ids it left rather than hashing the whole asset.
+        if let ids = recipe.photonIDs, !ids.isEmpty {
+            for relative in recipe.photonPatched ?? [] {
+                guard let file = file(relative, in: gameFolder) else { continue }
+                let backup = file.appendingPathExtension("onlinefix-photon-backup")
+                // A game can keep its ids in more than one file (settings in
+                // resources.assets, a copy in an assembly), and each file carries
+                // only the fields it had. Require one recorded id, and require the
+                // file to differ from its untouched copy.
+                let wanted = recipe.photonFileIDs?[relative] ?? ids
+                guard Paths.fm.fileExists(atPath: backup.path),
+                      let data = try? Data(contentsOf: file, options: [.mappedIfSafe]),
+                      wanted.allSatisfy({ data.range(of: Data($0.utf8)) != nil }) else {
+                    changed.append(relative)
+                    continue
+                }
             }
         }
         return changed
@@ -118,9 +274,9 @@ enum FixPack {
     static func restore(_ paths: [String], in gameFolder: URL) -> [String] {
         var restored: [String] = []
         for relative in paths {
-            let source = payloadURL(in: gameFolder, for: relative)
-            guard Paths.fm.fileExists(atPath: source.path) else { continue }
-            let destination = gameFolder.appendingPathComponent(relative)
+            guard let destination = file(relative, in: gameFolder),
+                  let source = file(relative, in: payloadURL(in: gameFolder, for: "")),
+                  Paths.fm.fileExists(atPath: source.path) else { continue }
             do {
                 try Paths.ensureDir(destination.deletingLastPathComponent())
                 if Paths.fm.fileExists(atPath: destination.path) {
@@ -146,18 +302,109 @@ enum FixPack {
             return 0
         }
         var changed = 0
+        var failed: [String] = []
         for entry in recipe.entries.reversed() {
-            let file = gameFolder.appendingPathComponent(entry.path)
+            guard let file = file(entry.path, in: gameFolder) else {
+                failed.append(entry.path)
+                continue
+            }
             let backup = file.appendingPathExtension("onlinefix-backup")
             if Paths.fm.fileExists(atPath: backup.path) {
-                try? Paths.fm.removeItem(at: file)
-                if (try? Paths.fm.moveItem(at: backup, to: file)) != nil { changed += 1 }
-            } else if entry.created, Paths.fm.fileExists(atPath: file.path) {
-                try? Paths.fm.removeItem(at: file)
-                changed += 1
+                if putBack(backup, at: file) { changed += 1 } else { failed.append(entry.path) }
+            } else if entry.created {
+                if !Paths.fm.fileExists(atPath: file.path) { continue }
+                do {
+                    try Paths.fm.removeItem(at: file)
+                    changed += 1
+                } catch {
+                    failed.append(entry.path)
+                }
+            } else if Paths.fm.fileExists(atPath: file.path) {
+                // The fix replaced this file, but its untouched copy is gone. Removing
+                // the pack now would throw away the only way back.
+                failed.append(entry.path)
             }
         }
+
+        // The Photon swap edits the game's own assets, which no copy put in place.
+        for relative in (recipe.photonPatched ?? []).reversed() {
+            guard let file = file(relative, in: gameFolder) else {
+                failed.append(relative)
+                continue
+            }
+            let backup = file.appendingPathExtension("onlinefix-photon-backup")
+            guard Paths.fm.fileExists(atPath: backup.path) else {
+                if Paths.fm.fileExists(atPath: file.path) { failed.append(relative) }
+                continue
+            }
+            if putBack(backup, at: file) { changed += 1 } else { failed.append(relative) }
+        }
+
+        // Valve's renderer and the other files taken out were moved aside, not deleted.
+        for relative in recipe.removed.reversed() {
+            guard let file = file(relative, in: gameFolder) else {
+                failed.append(relative)
+                continue
+            }
+            let backup = file.appendingPathExtension("onlinefix-removed")
+            let fallback = gameFolder.appendingPathComponent(
+                (relative as NSString).lastPathComponent)
+            let candidates = [backup, fallback.appendingPathExtension("onlinefix-removed")]
+            guard let back = candidates.first(where: {
+                Paths.fm.fileExists(atPath: $0.path)
+            }) else {
+                if !Paths.fm.fileExists(atPath: file.path) { failed.append(relative) }
+                continue
+            }
+            if putBack(back, at: file) { changed += 1 } else { failed.append(relative) }
+        }
+
+        if recipe.picoPark2,
+           let bundle = FixInstaller.nativeMacBundle(in: gameFolder) {
+            do {
+                try PicoPark2Patch.setEnabled(false, app: bundle)
+                changed += 1
+            } catch {
+                failed.append("PICO PARK 2's patch")
+            }
+        }
+
+        guard failed.isEmpty else {
+            throw ManagerError("Could not put back \(failed.prefix(3).joined(separator: ", "))"
+                + (failed.count > 3 ? " and \(failed.count - 3) more" : "")
+                + ". The untouched copies and the fix pack are still in the game folder, so "
+                + "nothing is lost; fix the folder's permissions and undo again.")
+        }
+
+        // A prefix told to load the fix's DLLs would keep looking for them after the
+        // files are gone, which stops the game from starting.
+        _ = WineOverride.clear(appID: recipe.appID)
+
         try? Paths.fm.removeItem(at: folder(in: gameFolder))
         return changed
+    }
+
+    /// Moves a file aside, puts the backup in its place, and only then drops the
+    /// staged copy. A failed move leaves the game file where it was.
+    private static func putBack(_ backup: URL, at file: URL) -> Bool {
+        let staged = file.appendingPathExtension("onlinefix-undo")
+        try? Paths.fm.removeItem(at: staged)
+        do {
+            if Paths.fm.fileExists(atPath: file.path) {
+                try Paths.fm.moveItem(at: file, to: staged)
+            }
+            do {
+                try Paths.fm.moveItem(at: backup, to: file)
+            } catch {
+                if Paths.fm.fileExists(atPath: staged.path) {
+                    try? Paths.fm.moveItem(at: staged, to: file)
+                }
+                throw error
+            }
+            try? Paths.fm.removeItem(at: staged)
+            return true
+        } catch {
+            return false
+        }
     }
 }

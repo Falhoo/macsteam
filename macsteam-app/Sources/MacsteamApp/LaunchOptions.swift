@@ -37,6 +37,71 @@ enum LaunchOptions {
         return words.joined(separator: " ")
     }
 
+    // MARK: - One compatibility variable
+
+    /// Adds or updates `NAME=value` before `%command%`, keeping the rest of the
+    /// line. `WINEDLLOVERRIDES` itself is a semicolon list: the entries here win
+    /// over the same names already there, and names this does not mention stay.
+    static func mergingEnvironment(_ name: String, entries: [String],
+                                   into options: String) -> String {
+        var words = tokens(options)
+        let prefix = "\(name)="
+        var list: [(String, String)] = []
+        if let index = words.firstIndex(where: { $0.hasPrefix(prefix) }) {
+            list = environmentEntries(String(words[index].dropFirst(prefix.count)))
+            words.remove(at: index)
+        }
+        for entry in entries {
+            let pair = environmentEntry(entry)
+            guard !pair.0.isEmpty else { continue }
+            if let index = list.firstIndex(where: { $0.0.caseInsensitiveCompare(pair.0) == .orderedSame }) {
+                list[index].1 = pair.1
+            } else {
+                list.append(pair)
+            }
+        }
+        let value = list.map { "\($0.0)=\($0.1)" }.joined(separator: ";")
+        if !value.isEmpty {
+            let command = words.firstIndex(of: "%command%") ?? words.count
+            words.insert("\(prefix)\(value)", at: command)
+        }
+        if !words.contains("%command%") { words.append("%command%") }
+        return words.joined(separator: " ")
+    }
+
+    /// Takes these names out of `NAME=...`, and the variable itself when nothing
+    /// else was in it. Other names in the same list are left alone.
+    static func clearingEnvironment(_ name: String, entries: [String],
+                                    from options: String) -> String {
+        var words = tokens(options)
+        let prefix = "\(name)="
+        guard let index = words.firstIndex(where: { $0.hasPrefix(prefix) }) else {
+            return options
+        }
+        let drop = Set(entries.map { environmentEntry($0).0.lowercased() })
+        var list = environmentEntries(String(words[index].dropFirst(prefix.count)))
+        list.removeAll { drop.contains($0.0.lowercased()) }
+        if list.isEmpty {
+            words.remove(at: index)
+        } else {
+            words[index] = prefix + list.map { "\($0.0)=\($0.1)" }.joined(separator: ";")
+        }
+        return words.joined(separator: " ")
+    }
+
+    private static func environmentEntry(_ text: String) -> (String, String) {
+        guard let equals = text.firstIndex(of: "=") else { return (text, "n,b") }
+        return (String(text[..<equals]), String(text[text.index(after: equals)...]))
+    }
+
+    private static func environmentEntries(_ value: String) -> [(String, String)] {
+        value.split(separator: ";").compactMap { part in
+            let entry = String(part)
+            guard !entry.isEmpty else { return nil }
+            return environmentEntry(entry)
+        }
+    }
+
     // MARK: - Every game at once
 
     /// Every app whose launch options carry a Windows-only prefix while no compat
@@ -78,6 +143,43 @@ enum LaunchOptions {
             result.replaceSubrange(body.index(after: open)..<close, with: clean)
         }
         return result
+    }
+
+    /// One app's options in that text. The value is replaced where it stands so
+    /// the rest of the file keeps its shape; a missing key is added inside the
+    /// app's block.
+    static func setting(_ options: String, appID: Int, in text: String) -> String {
+        guard let block = appBlocks(in: text).first(where: { $0.appID == appID }) else { return text }
+        let body = text[block.range]
+        let escaped = options
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        var result = text
+        if let key = body.range(of: "\"LaunchOptions\""),
+           let open = body[key.upperBound...].firstIndex(of: "\""),
+           let close = body[body.index(after: open)...].firstIndex(of: "\"") {
+            result.replaceSubrange(body.index(after: open)..<close, with: escaped)
+            return result
+        }
+        guard let brace = body.firstIndex(of: "{") else { return text }
+        let insertion = "\n\t\t\t\t\"LaunchOptions\"\t\t\"\(escaped)\""
+        result.insert(contentsOf: insertion, at: text.index(after: brace))
+        return result
+    }
+
+    /// Writes launch options into Steam's own file. Only call this while Steam is
+    /// not running; its own copy would win when it next quits.
+    @discardableResult
+    static func set(_ options: String, appID: Int) -> Bool {
+        var wrote = false
+        for file in configFiles() {
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            let updated = setting(options, appID: appID, in: text)
+            guard updated != text else { continue }
+            guard (try? updated.write(to: file, atomically: true, encoding: .utf8)) != nil else { continue }
+            wrote = true
+        }
+        return wrote
     }
 
     /// Writes the cleared options into Steam's own file, and reports the apps

@@ -2761,6 +2761,56 @@ if [ -d "$bridge_src" ] && [ -n "$WINEPREFIX" ]; then
   # If the same DLL appears twice in WINEDLLOVERRIDES, the last entry wins.
   vc_overrides=$(native_vc_runtime)
   export WINEDLLOVERRIDES="${vc_overrides}${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}steamclient=n;steamclient64=n;lsteamclient=b"
+  # OnlineFix games ship their own proxy DLLs beside the game (winmm.dll,
+  # winhttp.dll, version.dll) and their loader. Wine answers those imports with
+  # built-in copies unless asked for the native ones, and this environment value
+  # is what it reads at launch, so the prefix registry alone is not enough.
+  np_onlinefix_dir=""
+  if [ -n "$launch_args" ]; then
+    np_game_exe=$(printf '%s' "$launch_args" | tr -d '"')
+    np_game_dir=$(dirname "$np_game_exe" 2>/dev/null || printf '.')
+    for np_try in "$np_game_dir" "$np_game_dir/.." "$np_game_dir/../.."; do
+      if [ -f "$np_try/OnlineFix64.dll" ] || [ -f "$np_try/OnlineFix.dll" ]; then
+        np_onlinefix_dir=$(cd "$np_try" 2>/dev/null && pwd)
+        break
+      fi
+    done
+  fi
+  if [ -n "$np_onlinefix_dir" ]; then
+    for np_dll in winmm winhttp version onlinefix64 onlinefix custom stubdrm64 steamoverlay64 steam_api64 steam_api dnet; do
+      [ -f "$np_onlinefix_dir/$np_dll.dll" ] || continue
+      case "$np_dll" in
+        winmm|winhttp|version) np_mode=n,b ;;
+        *) np_mode=n ;;
+      esac
+      export WINEDLLOVERRIDES="$WINEDLLOVERRIDES;$np_dll=$np_mode"
+    done
+    # The scanner also records its choice in the prefix registry. Wine ignores
+    # that file whenever this variable is set, so fold those entries in too.
+    np_reg="$WINEPREFIX/user.reg"
+    if [ -f "$np_reg" ]; then
+      np_reg_overrides=$(awk '
+        /^\[Software/ && /DllOverrides\]/ { inside=1; next }
+        /^\[/ { inside=0 }
+        inside && /^"/ {
+          split($0, a, "\"")
+          name=a[2]; value=a[4]
+          if (value ~ /native/ && value ~ /builtin/) value="n,b"
+          else if (value ~ /native/) value="n"
+          else if (value ~ /builtin/) value="b"
+          else next
+          printf "%s=%s;", name, value
+        }
+      ' "$np_reg")
+      [ -n "$np_reg_overrides" ] && export WINEDLLOVERRIDES="$WINEDLLOVERRIDES;$np_reg_overrides"
+    fi
+    printf 'onlinefix overrides: %s\n' "$WINEDLLOVERRIDES" >> "$log" 2>&1 || true
+  fi
+  # A marker in the game folder asks for Wine's loader trace in this log.
+  if [ -n "$np_onlinefix_dir" ] && [ -f "$np_onlinefix_dir/.macsteam-winelog" ]; then
+    export WINEDEBUG="+loaddll,err+all,fixme-all"
+    printf '=== loader trace on (WINEDEBUG=%s) ===\n' "$WINEDEBUG" >> "$log" 2>&1 || true
+  fi
   native_client="$STEAM_COMPAT_CLIENT_INSTALL_PATH"
   if [ -z "$native_client" ]; then
     native_client="$HOME/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS"

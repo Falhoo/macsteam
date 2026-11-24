@@ -72,6 +72,43 @@ struct PhotonFixTests {
         #expect(PhotonFix.status(gameFolder: game, fixInstalled: true).isComplete)
     }
 
+    /// Some packages load Custom.dll straight from dlllist.txt, without BepInEx.
+    /// That layout is complete with the plugin alone and must not be told it is
+    /// missing a doorstop the fix never shipped.
+    @Test
+    func aRootPatchIsCompleteWithoutTheChain() throws {
+        let game = try folder()
+        defer { try? FileManager.default.removeItem(at: game) }
+        try write("managed", to: game.appendingPathComponent("REPO_Data/Managed/PhotonRealtime.dll"))
+        try write("game", to: game.appendingPathComponent("REPO.exe"))
+        try write("plugin", to: game.appendingPathComponent("Custom.dll"))
+
+        let status = PhotonFix.status(gameFolder: game, fixInstalled: true,
+                                      fixFiles: ["Custom.dll", "OnlineFix64.dll"])
+        #expect(status.isPhoton)
+        #expect(status.isComplete)
+        #expect(status.message == nil)
+    }
+
+    /// A game that runs from a folder below its install root keeps the chain beside
+    /// the executable. Reading the install root instead reports a complete patch as
+    /// missing on every refresh.
+    @Test
+    func aChainInTheLaunchFolderIsFoundBelowTheRoot() throws {
+        let game = try folder()
+        defer { try? FileManager.default.removeItem(at: game) }
+        let launch = game.appendingPathComponent("Bin", isDirectory: true)
+        try write("managed", to: game.appendingPathComponent("Game_Data/Managed/PhotonRealtime.dll"))
+        try write("game", to: launch.appendingPathComponent("Game.exe"))
+        try write("plugin", to: launch.appendingPathComponent("Custom.dll"))
+
+        let status = PhotonFix.status(gameFolder: game, fixInstalled: true,
+                                      fixFiles: [launch.appendingPathComponent("Custom.dll").path])
+        #expect(status.isPhoton)
+        #expect(status.isComplete)
+        #expect(status.message == nil)
+    }
+
     /// A game with no fix, or one whose online play is not Photon, has nothing to say.
     @Test
     func onlyFixedPhotonGamesAreReported() throws {

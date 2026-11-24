@@ -31,6 +31,7 @@ public enum OnlineFixEmbed {
     @MainActor private static let model = AppModel()
     @MainActor private static var controllers: [Screen: NSViewController] = [:]
 
+
     // One view controller per page, created on first use and then reused.
     @MainActor
     public static func viewController(for screen: Screen) -> NSViewController {

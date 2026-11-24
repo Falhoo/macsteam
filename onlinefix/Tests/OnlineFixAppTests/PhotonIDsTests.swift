@@ -52,6 +52,43 @@ struct PhotonIDsTests {
             folder.appendingPathComponent("REPO_Data/resources.assets.onlinefix-photon-backup").path))
     }
 
+    /// R.E.P.O.'s two fields can hold the same value. Rebuilding the file from the
+    /// untouched copy and replacing one value would put that value back in the voice
+    /// field on every refresh.
+    @Test
+    func aPairHoldingTheSameValueKeepsBothFields() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("photonpair-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let data = root.appendingPathComponent("REPO_Data", isDirectory: true)
+        try FileManager.default.createDirectory(at: data, withIntermediateDirectories: true)
+        var blob = Data("PhotonServerSettings".utf8)
+        blob.append(contentsOf: [0, 0, 0, 0, 0, 0, 0, 0])
+        for _ in 0..<2 {
+            blob.append(contentsOf: [0x24, 0, 0, 0])
+            blob.append(Data(PhotonIDs.realtime.utf8))
+            blob.append(contentsOf: [0, 0, 0, 0])
+        }
+        let file = data.appendingPathComponent("resources.assets")
+        try blob.write(to: file)
+
+        let realtime = "11111111-2222-3333-4444-555555555555"
+        let voice = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+        _ = try PhotonIDs.apply(gameFolder: root, realtime: realtime, voice: voice)
+        var text = String(decoding: try Data(contentsOf: file), as: UTF8.self)
+        #expect(text.components(separatedBy: realtime).count - 1 == 1)
+        #expect(text.components(separatedBy: voice).count - 1 == 1)
+        #expect(!text.contains(PhotonIDs.realtime))
+
+        // The refresh sees the pair already carrying the wanted ids.
+        #expect(throws: Error.self) {
+            _ = try PhotonIDs.apply(gameFolder: root, realtime: realtime, voice: voice)
+        }
+        text = String(decoding: try Data(contentsOf: file), as: UTF8.self)
+        #expect(text.components(separatedBy: realtime).count - 1 == 1)
+        #expect(text.components(separatedBy: voice).count - 1 == 1)
+    }
+
     @Test
     func refusesWhatItCannotPatch() throws {
         let folder = try game()

@@ -61,12 +61,27 @@ struct FixDiagnosis: Sendable {
         }
         // OF003: a Microsoft Store (GDK) build needs the Xbox GDK runtime, which only
         // exists on Windows. A game that ships Steam's API as well is the Steam build
-        // with GDK support compiled in, which does run here: PEAK opens and reaches
-        // Photon, and its fix carries the runtime files the game looks for. Only a
-        // build with no Steam API at all has nothing to run as.
+        // with GDK support compiled in, and those files alone do not make it packaged.
+        // OF080: the fix is the other kind, a GDK package that installs by registering
+        // an Appx manifest. Its files can be copied into a Steam install, but nothing
+        // registers it, so it keeps authenticating as Steam and Photon refuses the
+        // handoff. PEAK is this case: its OnlineFix is the Microsoft Store fix.
         let gdk = scan.isGDK || package?.isGDK == true
         let hasSteamAPI = !scan.apiDLLs.isEmpty || package?.apiItems.isEmpty == false
-        if gdk, !hasSteamAPI {
+        let storeFixInSteamGame = package?.requiresGDKRegistration == true
+            && !scan.hasStoreManifest && !scan.apiDLLs.isEmpty
+        if storeFixInSteamGame {
+            diagnosis.add(FixFinding(
+                code: "OF080", level: .blocking,
+                title: "Microsoft Store fix, Steam copy",
+                detail: "This fix installs by registering a Microsoft Store (GDK) package with "
+                    + "GDK_Helper and an Appx manifest. The game in this folder is a Steam "
+                    + "install and has no Appx manifest, so copying the files cannot register "
+                    + "it. The game still authenticates as Steam, and Photon answers the "
+                    + "handoff with 32755 (error response from Steam).",
+                remedy: "Use the Microsoft Store build with GDK_Helper, or a Steam fix for this "
+                    + "game. Nothing was copied."))
+        } else if gdk, !hasSteamAPI {
             let why = package?.isGDK == true
                 ? "this fix is the Microsoft Store (GDK) package"
                 : "this game ships the Microsoft Store (GDK) runtime"
@@ -81,9 +96,9 @@ struct FixDiagnosis: Sendable {
                 code: "OF003", level: .notice,
                 title: "Microsoft Store build, with Steam's API beside it",
                 detail: "The game ships the Xbox GDK runtime and Steam's API both, so it runs "
-                    + "as the Steam build. The fix's own GDK files (xsapi.dll, wdapp.exe) are "
-                    + "copied with the rest and the prefix is told to load them.",
-                remedy: "Install as usual."))
+                    + "as the Steam build. Those runtime files are evidence of GDK support, "
+                    + "not of a registered package.",
+                remedy: "Install as usual when the package is a Steam fix."))
         }
         if scan.hasAntiCheat {
             diagnosis.add(FixFinding(
@@ -122,17 +137,10 @@ struct FixDiagnosis: Sendable {
         // would break a fix that works. The loader is left out only on evidence that
         // it does not start this game: its bitness and runtime, or a probe that saw
         // no window.
-        let packageHashes = package?.hashes ?? []
-        if !packageHashes.isEmpty, !FixDiagnosis.hashesMatch(packageHashes, scan: scan) {
-            diagnosis.add(FixFinding(
-                code: "OF055", level: .warning,
-                title: "The fix is for another build of the game",
-                detail: "OnlineFix's loader checks hashes of the game's own files, and none of "
-                    + "the \(packageHashes.count) in this package match the installed build. "
-                    + "It can refuse to start the game, or wait on a check that never passes.",
-                remedy: "Install it, then probe. If no window appears, run it with its own "
-                    + "Steam API as Spacewar instead."))
-        }
+        // OF055 is retired. A package's `[Hashes]` names no file, so a value that
+        // matches none of the game's exe, API or Unity data proves nothing: PEAK's GDK
+        // package hashes the Xbox build, and R.E.P.O.'s is from an older build. The
+        // warning fired on every real package and pointed at no action.
         let dotNet32 = !scan.is64Bit && scan.usesDotNet
         if dotNet32 {
             diagnosis.add(FixFinding(
@@ -186,12 +194,37 @@ struct FixDiagnosis: Sendable {
         }
 
 
+        // OF034: two copies of the same Steam API DLL. Windows loads the first it
+        // finds, so a stale copy left at the root can keep the fix's DLL from ever
+        // being used, or run the game under the wrong AppID. This is about the game,
+        // so it holds whether or not a package is in hand.
+        let apisByName = Dictionary(grouping: scan.apiDLLs) { $0.lastPathComponent.lowercased() }
+        let duplicateAPIs = apisByName.filter { $0.value.count > 1 }
+        if !duplicateAPIs.isEmpty {
+            let names = duplicateAPIs.keys.sorted().joined(separator: ", ")
+            let paths = duplicateAPIs.values.flatMap { $0 }
+                .map { $0.path.replacingOccurrences(of: scan.folder.path + "/", with: "") }
+                .sorted()
+                .joined(separator: ", ")
+            diagnosis.add(FixFinding(
+                code: "OF034", level: .warning,
+                title: "More than one copy of the Steam API DLL",
+                detail: "The game has \(names) in more than one folder (\(paths)). Windows loads "
+                    + "the first it finds, so one copy shadows the other and a fix can end up "
+                    + "installed into the copy the game never loads.",
+                remedy: "Keep the copy in \(scan.apiFolder?.lastPathComponent ?? "the folder the game loads it from") "
+                    + "and remove the others."))
+        }
+
         guard let package else { return diagnosis }
 
         // OF010, OF011: the Steam API DLL the game actually loads.
         let wanted = scan.is64Bit ? "steam_api64.dll" : "steam_api.dll"
         if package.apiItem(needs64: scan.is64Bit) == nil {
-            if package.apiItems.isEmpty {
+            if package.isGDK, !scan.apiDLLs.isEmpty {
+                // A GDK repair package hooks the Steam API the game already ships; it
+                // does not carry a second copy. OF003 says what the GDK files need.
+            } else if package.apiItems.isEmpty {
                 diagnosis.add(FixFinding(
                     code: "OF012", level: .warning,
                     title: "The package has no Steam API DLL",
@@ -252,12 +285,26 @@ struct FixDiagnosis: Sendable {
                 detail: "OnlineFix's payload reads the app ids and its own hashes from that file. "
                     + "Without it the fix cannot tell which game it belongs to.",
                 remedy: "Write one with RealAppId and FakeAppId; never invent the hashes."))
+        } else if package.isGDK {
+            // A GDK package names a Store ProductId instead of a Steam AppID; OF003
+            // already explains what that means. Requiring RealAppId here would warn
+            // about every Microsoft Store fix.
         } else if !package.iniKeys.contains("realappid") || !package.iniKeys.contains("fakeappid") {
             diagnosis.add(FixFinding(
                 code: "OF013", level: .notice,
                 title: "The ini is missing its app ids",
                 detail: "RealAppId and FakeAppId are what tell the payload which game this is.",
                 remedy: "Fill RealAppId=\(scan.appID) and FakeAppId=480."))
+        } else if let real = package.iniValues["realappid"]
+                    .flatMap({ Int($0.trimmingCharacters(in: .whitespaces)) }),
+                  real != scan.appID {
+            diagnosis.add(FixFinding(
+                code: "OF013", level: .warning,
+                title: "The fix belongs to another game",
+                detail: "Its OnlineFix.ini names RealAppId \(real), while Steam gave this game "
+                    + "\(scan.appID). The payload would run the other game's identity, so it "
+                    + "would not meet this game's players.",
+                remedy: "Use the package for AppID \(scan.appID), or route this game as itself."))
         }
         if package.carriesPayload,
            !package.dllList.contains(where: { $0.lowercased() == "onlinefix64.dll"
@@ -293,12 +340,21 @@ struct FixDiagnosis: Sendable {
 
         // OF020, OF021: Photon.
         if scan.isPhoton {
+            let gameDoorway = PhotonChain.doorway(in: scan.folder, exe: scan.exe)
+            let bundled = gameDoorway.map { bundleHas($0) } ?? false
             if package.hasPhotonChain {
                 diagnosis.add(FixFinding(
                     code: "OF021", level: .notice,
                     title: "Photon game with OnlineFix's Photon patch",
                     detail: "The package carries the doorstop, BepInEx's preloader and Custom.dll.",
                     remedy: "Install the chain and turn PhotonIntegration on."))
+            } else if bundled, let gameDoorway {
+                diagnosis.add(FixFinding(
+                    code: "OF021", level: .notice,
+                    title: "Photon game; the manager adds the missing patch",
+                    detail: "The package carries no Custom.dll and BepInEx preloader. The "
+                        + "manager ships the chain and copies it behind \(gameDoorway).",
+                    remedy: "Install the fix; the bundled chain is added with the package."))
             } else {
                 diagnosis.add(FixFinding(
                     code: "OF021", level: .warning,
@@ -308,20 +364,85 @@ struct FixDiagnosis: Sendable {
                     remedy: "Install the chain from another Photon game's package if there is one, "
                         + "and say what is missing otherwise."))
             }
-            let distinct = Set(candidates.filter { !$0.isOnlineFixShared }.map(\.id))
-            if distinct.count == 1, let id = distinct.first {
+            // A realtime/voice pair is not an ambiguity: Unity stores the two fields in
+            // order, and the patch writes each one. Only unrelated ids leave it unclear.
+            let photonPlan = PhotonPatch.plan(for: candidates)
+            if let voice = photonPlan.voiceID, let id = photonPlan.id {
                 diagnosis.add(FixFinding(
                     code: "OF020", level: .notice,
-                    title: "The game carries its own Photon app id",
-                    detail: "Online play only meets other players on OnlineFix's Photon app, "
-                        + "not the game's own.",
-                    remedy: "Replace \(id.prefix(12))… with OnlineFix's id in the game's files."))
-            } else if distinct.count > 1 {
+                    title: "The game carries a Photon app-id pair",
+                    detail: "Its Photon settings carry a realtime id (\(id.prefix(12))…) and a "
+                        + "voice id (\(voice.prefix(12))…), which the patch replaces in field order.",
+                    remedy: "Patch both fields; they are not two different servers."))
+            } else if let skipped = photonPlan.skipped {
                 diagnosis.add(FixFinding(
                     code: "OF020", level: .warning,
-                    title: "The game carries more than one Photon app id",
-                    detail: "Which one it connects to cannot be told from its files.",
+                    title: "The game's Photon ids are ambiguous",
+                    detail: skipped,
                     remedy: "Leave them alone and let the patch sheet choose."))
+            } else {
+                let distinct = Set(candidates.filter { !$0.isOnlineFixShared }.map(\.id))
+                if distinct.count == 1, let id = distinct.first {
+                    diagnosis.add(FixFinding(
+                        code: "OF020", level: .notice,
+                        title: "The game carries its own Photon app id",
+                        detail: "Online play only meets other players on OnlineFix's Photon app, "
+                            + "not the game's own.",
+                        remedy: "Replace \(id.prefix(12))… with OnlineFix's id in the game's files."))
+                } else if distinct.count > 1 {
+                    diagnosis.add(FixFinding(
+                        code: "OF020", level: .warning,
+                        title: "The game carries more than one Photon app id",
+                        detail: "Which one it connects to cannot be told from its files.",
+                        remedy: "Leave them alone and let the patch sheet choose."))
+                }
+            }
+        }
+
+        // OF035: a doorway the game never imports is a fix that installs and does
+        // nothing. PEAK's package ships winmm.dll, while UnityPlayer imports WINHTTP.
+        let shippedDoorways = ["winmm.dll", "winhttp.dll", "version.dll"]
+            .filter { package.item(named: $0) != nil }
+        let gameDoorway = PhotonChain.doorway(in: scan.folder, exe: scan.exe)
+        let canAddDoorway = scan.isPhoton && (gameDoorway.map { bundleHas($0) } ?? false)
+        if let gameDoorway, !shippedDoorways.isEmpty,
+           !shippedDoorways.contains(gameDoorway) {
+            if canAddDoorway {
+                diagnosis.add(FixFinding(
+                    code: "OF035", level: .notice,
+                    title: "The package's doorway is not the one the game imports",
+                    detail: "The package starts through "
+                        + "\(shippedDoorways.joined(separator: ", ")), but the game imports "
+                        + "\(gameDoorway). The manager adds the bundled \(gameDoorway) chain.",
+                    remedy: "Install the fix; the bundled chain supplies \(gameDoorway)."))
+            } else {
+                diagnosis.add(FixFinding(
+                    code: "OF035", level: .warning,
+                    title: "The fix's doorway is not one the game imports",
+                    detail: "The package starts through "
+                        + "\(shippedDoorways.joined(separator: ", ")), "
+                        + "but the game imports \(gameDoorway). Windows never loads a DLL the game "
+                        + "does not import, so none of the fix runs.",
+                    remedy: "Use a package with a \(gameDoorway) doorway, or put the fix's "
+                        + "loader behind \(gameDoorway)."))
+            }
+        } else if let gameDoorway, shippedDoorways.isEmpty,
+                  package.carriesPayload || package.hasPhotonChain {
+            if canAddDoorway {
+                diagnosis.add(FixFinding(
+                    code: "OF035", level: .notice,
+                    title: "The manager adds the doorway the game can load",
+                    detail: "The game imports \(gameDoorway), and the package carries no "
+                        + "winmm.dll, winhttp.dll or version.dll. The bundled chain has one.",
+                    remedy: "Install the fix; the bundled \(gameDoorway) starts the loader."))
+            } else {
+                diagnosis.add(FixFinding(
+                    code: "OF035", level: .warning,
+                    title: "The fix has no doorway the game can load",
+                    detail: "The game imports \(gameDoorway), but the package carries no "
+                        + "winmm.dll, winhttp.dll or version.dll for it to load.",
+                    remedy: "Add a \(gameDoorway) doorway beside the game; without one the "
+                        + "loader is never started."))
             }
         }
 
@@ -344,6 +465,12 @@ struct FixDiagnosis: Sendable {
             if hashes.contains(hash.lowercased()) { return true }
         }
         return false
+    }
+
+    /// True when the bundle the app ships carries this doorway.
+    private static func bundleHas(_ doorway: String) -> Bool {
+        guard let bundle = PhotonChain.bundle() else { return false }
+        return Paths.fm.fileExists(atPath: bundle.appendingPathComponent(doorway).path)
     }
 
     /// True when the Visual C++ runtime is beside the executable or not needed at all.

@@ -301,6 +301,15 @@ enum FixInstaller {
         var changed = 0
         for path in fix.files {
             let file = URL(fileURLWithPath: path)
+            // A Photon patch keeps the untouched asset under its own suffix; putting
+            // it back is not the same file as OnlineFix's copied-DLL backup.
+            let photon = file.appendingPathExtension("onlinefix-photon-backup")
+            if fm.fileExists(atPath: photon.path) {
+                if fm.fileExists(atPath: file.path) { try fm.removeItem(at: file) }
+                try fm.moveItem(at: photon, to: file)
+                changed += 1
+                continue
+            }
             let backup = file.appendingPathExtension("onlinefix-backup")
             if fm.fileExists(atPath: backup.path) {
                 if fm.fileExists(atPath: file.path) { try fm.removeItem(at: file) }
@@ -364,31 +373,6 @@ enum FixInstaller {
         return names.contains {
             Paths.fm.fileExists(atPath: system32.appendingPathComponent($0).path)
         }
-    }
-
-    /// Drops the Steam overlay from an installed `dlllist.txt`.
-    ///
-    /// OnlineFix's overlay loader needs Steam's `GameOverlayRenderer64.dll` in the
-    /// Wine prefix, and compatibility layers that manage that folder prune it on
-    /// every launch. The loader then stops with error 126 before it reaches
-    /// `Custom.dll`, so the Photon patch never runs. The overlay is cosmetic; the
-    /// rest of the fix matters, so its line is taken out of the list.
-    ///
-    /// Returns true when the list was changed.
-    @discardableResult
-    static func removingOverlayFromDLLList(at path: String) -> Bool {
-        let list = URL(fileURLWithPath: path)
-        guard let text = try? String(contentsOf: list, encoding: .utf8) else { return false }
-        let lines = text.components(separatedBy: "\n")
-        let kept = lines.filter {
-            !$0.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("steamoverlay64.dll")
-        }
-        guard kept.count != lines.count else { return false }
-        let backup = list.appendingPathExtension("onlinefix-backup")
-        if !Paths.fm.fileExists(atPath: backup.path) {
-            try? Paths.fm.copyItem(at: list, to: backup)
-        }
-        return (try? kept.joined(separator: "\n").data(using: .utf8)?.write(to: list, options: .atomic)) != nil
     }
 
     private static func overlayFolder(under folder: URL) -> URL? {

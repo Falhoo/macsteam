@@ -16,8 +16,11 @@ enum FixApply {
 
     struct Result: Sendable {
         var wrote: [Wrote] = []
+        /// The files actually moved aside, as paths from the game folder, so the pack
+        /// never claims to have removed one it could not.
+        var removed: [String] = []
         var notes: [String] = []
-        var changed: Bool { !wrote.isEmpty }
+        var changed: Bool { !wrote.isEmpty || !removed.isEmpty }
     }
 
     // MARK: - Apply
@@ -52,7 +55,8 @@ enum FixApply {
             case .iniPhotonIntegration:
                 changed = enablePhotonIntegration(at: edit.path)
             case .dllListEntries:
-                changed = ensureDLLListEntries(dllListNames(for: plan), at: edit.path)
+                let names = edit.names.isEmpty ? dllListNames(for: plan) : edit.names
+                changed = ensureDLLListEntries(names, at: edit.path)
             case .dllListDropOverlay:
                 changed = dropDLLListLine("steamoverlay64.dll", at: edit.path)
             }
@@ -68,8 +72,20 @@ enum FixApply {
 
         for removal in plan.removals {
             guard Paths.fm.fileExists(atPath: removal.path.path) else { continue }
-            try? Paths.fm.removeItem(at: removal.path)
-            result.notes.append("Removed \(removal.path.lastPathComponent): \(removal.reason).")
+            // Keep what is taken out. A removed file is often the only copy of
+            // something, and uninstall has to be able to put it back.
+            let backup = removal.path.appendingPathExtension("onlinefix-removed")
+            do {
+                if Paths.fm.fileExists(atPath: backup.path) {
+                    try Paths.fm.removeItem(at: backup)
+                }
+                try Paths.fm.moveItem(at: removal.path, to: backup)
+                result.removed.append(relative(removal.path, in: folder))
+                result.notes.append("Removed \(removal.path.lastPathComponent): \(removal.reason).")
+            } catch {
+                result.notes.append("Could not remove \(removal.path.lastPathComponent): "
+                    + error.localizedDescription)
+            }
         }
 
         // The prefix is Steam's, and it exists only after the game's first launch.
@@ -79,6 +95,11 @@ enum FixApply {
             }
         }
         return result
+    }
+
+    /// The path as the recipe stores it, from the game folder.
+    static func relative(_ url: URL, in folder: URL) -> String {
+        FixPlan.relative(url, in: folder)
     }
 
     private static func record(_ url: URL, created: Bool, folder: URL, in result: inout Result) {
@@ -91,15 +112,22 @@ enum FixApply {
         result.wrote.append(Wrote(relative: relative, created: created))
     }
 
-    /// The names dlllist.txt has to carry: the payload the package brought, and the
-    /// Photon patch when its preloader is there.
+    /// The native files dlllist.txt has to carry. Custom.net is deliberately not
+    /// here: it is the managed companion Custom.dll loads itself, not a library for
+    /// OnlineFix64 to load. Naming it makes OnlineFix64 stop with error 126.
     static func dllListNames(for plan: FixPlan) -> [String] {
         var names: [String] = []
         for copy in plan.copies {
             let name = copy.destination.lastPathComponent
             let lower = name.lowercased()
-            if FixPackage.payloadNames.contains(lower) { names.append(name) }
-            if lower == "custom.dll" { names.append("Custom.net") }
+            if FixPackage.payloadNames.contains(lower) || lower == "steamoverlay64.dll" {
+                names.append(name)
+            }
+            // A root Custom.dll is loaded through dlllist.txt. A plugin under
+            // BepInEx is started by the preloader instead.
+            if lower == "custom.dll", !copy.relative.lowercased().hasPrefix("bepinex/") {
+                names.append(name)
+            }
         }
         return names
     }
@@ -143,25 +171,52 @@ enum FixApply {
     static func setAppIDs(at url: URL, appID: Int) -> Bool {
         guard var text = read(url) else { return false }
         let wanted = [("RealAppId", "\(appID)"), ("FakeAppId", "480")]
-        let missing = wanted.filter { !hasKey($0.0, in: text) }
-        guard !missing.isEmpty else { return false }
-
+        let lineEnding = text.contains("\r\n") ? "\r" : ""
         var lines = text.components(separatedBy: "\n")
-        if let index = lines.firstIndex(where: {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "[main]"
-        }) {
-            var insertAt = index + 1
-            while insertAt < lines.count {
-                let trimmed = lines[insertAt].trimmingCharacters(in: .whitespaces)
-                guard trimmed.hasPrefix(";") || trimmed.hasPrefix("#") else { break }
-                insertAt += 1
+        var found = Set<String>()
+        var changed = false
+
+        // A package can carry an ini from another game, so a key that is present
+        // but wrong is as much of an inconsistency as a key that is absent. Replace
+        // every occurrence in place, preserving its indentation and CRLF.
+        for index in lines.indices {
+            let raw = lines[index]
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let equals = trimmed.firstIndex(of: "=") else { continue }
+            let name = trimmed[..<equals].trimmingCharacters(in: .whitespaces)
+            guard let match = wanted.first(where: {
+                $0.0.caseInsensitiveCompare(name) == .orderedSame
+            }) else { continue }
+            found.insert(match.0)
+            let value = trimmed[trimmed.index(after: equals)...]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard value != match.1 else { continue }
+            let indent = raw.prefix { $0 == " " || $0 == "\t" }
+            let carriageReturn = raw.hasSuffix("\r") ? "\r" : ""
+            lines[index] = "\(indent)\(match.0)=\(match.1)\(carriageReturn)"
+            changed = true
+        }
+
+        let missing = wanted.filter { !found.contains($0.0) }
+        guard !missing.isEmpty || changed else { return false }
+        if !missing.isEmpty {
+            if let index = lines.firstIndex(where: {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "[main]"
+            }) {
+                var insertAt = index + 1
+                while insertAt < lines.count {
+                    let trimmed = lines[insertAt].trimmingCharacters(in: .whitespaces)
+                    guard trimmed.hasPrefix(";") || trimmed.hasPrefix("#") else { break }
+                    insertAt += 1
+                }
+                for (key, value) in missing {
+                    lines.insert("\(key)=\(value)\(lineEnding)", at: insertAt)
+                    insertAt += 1
+                }
+            } else {
+                lines.insert(contentsOf: ["[Main]\(lineEnding)"]
+                    + missing.map { "\($0.0)=\($0.1)\(lineEnding)" }, at: 0)
             }
-            for (key, value) in missing {
-                lines.insert("\(key)=\(value)", at: insertAt)
-                insertAt += 1
-            }
-        } else {
-            lines.insert(contentsOf: ["[Main]"] + missing.map { "\($0.0)=\($0.1)" }, at: 0)
         }
         text = lines.joined(separator: "\n")
         return write(text, to: url)
@@ -172,17 +227,34 @@ enum FixApply {
     /// missing and grow a second section on every pass.
     @discardableResult
     static func enablePhotonIntegration(at url: URL) -> Bool {
-        guard var text = read(url), !hasPhotonIntegration(text) else { return false }
+        guard var text = read(url) else { return false }
+        let wanted = ["true", "yes", "1"]
         var lines = text.components(separatedBy: "\n")
-        let line = "PhotonIntegration=true"
+        // A value that is already on is left alone. A value that is off is
+        // replaced in place: adding a second key above it leaves whichever one
+        // the payload reads last deciding the answer.
         if let index = lines.firstIndex(where: {
+            let line = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            return line.split(separator: "=", maxSplits: 1).first?
+                .trimmingCharacters(in: .whitespaces)
+                .caseInsensitiveCompare("PhotonIntegration") == .orderedSame
+        }) {
+            let raw = lines[index]
+            let parts = raw.split(separator: "=", maxSplits: 1).map(String.init)
+            let value = parts.count == 2
+                ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() : ""
+            if wanted.contains(value) { return false }
+            let indent = raw.prefix { $0 == " " || $0 == "\t" }
+            let carriageReturn = raw.hasSuffix("\r") ? "\r" : ""
+            lines[index] = "\(indent)PhotonIntegration=true\(carriageReturn)"
+        } else if let index = lines.firstIndex(where: {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "[misc]"
         }) {
-            lines.insert(line, at: index + 1)
+            lines.insert("PhotonIntegration=true", at: index + 1)
         } else {
             if lines.last?.isEmpty == false { lines.append("") }
             lines.append("[Misc]")
-            lines.append(line)
+            lines.append("PhotonIntegration=true")
         }
         text = lines.joined(separator: "\n")
         return write(text, to: url)
@@ -216,15 +288,40 @@ enum FixApply {
     /// Adds the names the loader has to start, each once.
     @discardableResult
     static func ensureDLLListEntries(_ names: [String], at url: URL) -> Bool {
-        guard var text = read(url) else { return false }
-        let present = Set(text.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            .filter { !$0.isEmpty })
+        // A package can leave the list out entirely. Creating it with the payload
+        // and the Photon patch is what makes OnlineFix64 load either.
+        guard !names.isEmpty else { return false }
+        let original = read(url) ?? ""
+        let newline = original.isEmpty || original.contains("\r\n") ? "\r\n" : "\n"
+        let rawLines = original.components(separatedBy: .newlines)
+        var kept = rawLines.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let removedCustomNet = kept.contains { $0.lowercased() == "custom.net" }
+        kept.removeAll { $0.lowercased() == "custom.net" }
+        let present = Set(kept.map { $0.lowercased() })
         let missing = names.filter { !present.contains($0.lowercased()) }
-        guard !missing.isEmpty else { return false }
-        if !text.hasSuffix("\n") { text += "\n" }
-        text += missing.joined(separator: "\n") + "\n"
-        return write(text, to: url)
+        // A blank line at the end is not harmless: OnlineFix64 reads it as an empty
+        // DLL name and stops with "Failed to load  from the list. Error code: 126".
+        // So the list is rewritten without a trailing newline.
+        let overlayIndex = kept.firstIndex { $0.lowercased() == "steamoverlay64.dll" }
+        let needsReorder = overlayIndex != nil && overlayIndex != 0
+        // A blank line anywhere, and especially at the end, is read as an empty
+        // DLL name. Detect it even when every wanted name is already present.
+        let hadBlankLine = rawLines.contains {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard removedCustomNet || !missing.isEmpty || needsReorder || hadBlankLine else {
+            return false
+        }
+        kept.append(contentsOf: missing)
+        // OnlineFix64 expects the overlay first. A list repaired from an older pack
+        // may have it later, which fails the same way as leaving it out.
+        if let index = kept.firstIndex(where: { $0.lowercased() == "steamoverlay64.dll" }),
+           index != 0 {
+            let overlay = kept.remove(at: index)
+            kept.insert(overlay, at: 0)
+        }
+        return write(kept.joined(separator: newline), to: url)
     }
 
     /// Drops a line, such as the overlay loader that stops on error 126.
@@ -237,13 +334,6 @@ enum FixApply {
         }
         guard kept.count != lines.count else { return false }
         return write(kept.joined(separator: "\n"), to: url)
-    }
-
-    /// Adds `Custom.net` to the loader list, which is how OnlineFix64 learns to start
-    /// the Photon patch.
-    @discardableResult
-    static func addCustomToDLLList(at url: URL) -> Bool {
-        ensureDLLListEntries(["Custom.net"], at: url)
     }
 
     // MARK: - Text

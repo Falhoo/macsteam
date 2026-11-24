@@ -57,15 +57,24 @@ enum PhotonChain {
             candidates.append(resources.appendingPathComponent("photon", isDirectory: true))
         }
         // A command line run from a checkout has no Resources/photon; the sources'
-        // own vendor folder is the same files.
+        // own vendor folder is the same files. Both the directory the app runs from
+        // and the working directory are checked: a test bundle's executable lives in
+        // SwiftPM's helper, while its working directory is the package root.
+        var starts = [URL(fileURLWithPath: FileManager.default.currentDirectoryPath,
+                          isDirectory: true)]
         let executable = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
-        var directory = executable.deletingLastPathComponent()
-        for _ in 0..<8 {
-            candidates.append(directory.appendingPathComponent("onlinefix/vendor/photon",
-                                                               isDirectory: true))
-            let parent = directory.deletingLastPathComponent()
-            if parent.path == directory.path { break }
-            directory = parent
+        starts.append(executable.deletingLastPathComponent())
+        for start in starts {
+            var directory = start
+            for _ in 0..<8 {
+                for relative in ["vendor/photon", "onlinefix/vendor/photon"] {
+                    let candidate = directory.appendingPathComponent(relative, isDirectory: true)
+                    if !candidates.contains(candidate) { candidates.append(candidate) }
+                }
+                let parent = directory.deletingLastPathComponent()
+                if parent.path == directory.path { break }
+                directory = parent
+            }
         }
         return candidates.first { url in
             Paths.fm.fileExists(atPath: url.appendingPathComponent(config).path)
@@ -76,37 +85,68 @@ enum PhotonChain {
 
     /// True when one of the game's own binaries imports this doorway.
     static func imports(_ doorway: String, in folder: URL, exe: URL?) -> Bool {
-        guard let needle = doorways.first(where: { $0.file == doorway })?.needle else {
-            return false
-        }
-        var files: [URL] = []
-        if let exe { files.append(exe) }
-        for name in ["UnityPlayer.dll", "GameAssembly.dll"] {
-            let url = folder.appendingPathComponent(name)
-            if Paths.fm.fileExists(atPath: url.path) { files.append(url) }
-        }
-        // A game wrapped in a folder of its own keeps these one level down.
-        if let exe {
-            let launch = exe.deletingLastPathComponent()
-            for name in ["UnityPlayer.dll", "GameAssembly.dll"] {
-                let url = launch.appendingPathComponent(name)
-                if Paths.fm.fileExists(atPath: url.path) { files.append(url) }
-            }
-        }
-        // An import table spells the name in whatever case the linker wrote it:
-        // UnityPlayer.dll carries "WINHTTP.dll", so a lowercase needle alone misses it.
-        let needles = [Data(needle.utf8), Data(needle.uppercased().utf8)]
-        return files.contains { url in
-            guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else {
-                return false
-            }
-            return needles.contains { data.range(of: $0) != nil }
-        }
+        importedModules(in: folder, exe: exe).contains(doorway.lowercased())
     }
 
     /// The doorway this game can actually load, or nil when it imports none of them.
     static func doorway(in folder: URL, exe: URL?) -> String? {
-        doorways.first { imports($0.file, in: folder, exe: exe) }?.file
+        let imported = importedModules(in: folder, exe: exe)
+        return doorways.first { imported.contains($0.file) }?.file
+    }
+
+    /// Every module the executable and the engine binaries import. The canvas is the
+    /// launch folder and its immediate engine/plugin folders: a game's own import
+    /// table is there, while walking every asset would read files that can never
+    /// import a DLL. The PE reader, not a byte search, decides.
+    static func importedModules(in folder: URL, exe: URL?) -> Set<String> {
+        var files: [URL] = []
+        var seen = Set<String>()
+        func add(_ url: URL) {
+            let canonical = GameScan.canonical(url)
+            guard seen.insert(canonical.path).inserted,
+                  Paths.fm.fileExists(atPath: canonical.path) else { return }
+            files.append(canonical)
+        }
+        if let exe { add(exe) }
+        let launch = exe?.deletingLastPathComponent() ?? folder
+        for base in [folder, launch] {
+            for name in ["UnityPlayer.dll", "GameAssembly.dll"] {
+                add(base.appendingPathComponent(name))
+            }
+        }
+        if let enumerator = Paths.fm.enumerator(
+            at: launch,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let url as URL in enumerator {
+                if enumerator.level > 3 {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                let name = url.lastPathComponent.lowercased()
+                if ["bepinex", "doorstop", "managed", ".macsteam-onlinefix"].contains(name) {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                guard ["exe", "dll"].contains(url.pathExtension.lowercased()),
+                      !FixPackage.loaderNames.contains(name),
+                      !GameScan.fixNames.contains(name),
+                      name != "custom.dll", !name.hasPrefix("bepinex."),
+                      (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+                else { continue }
+                add(url)
+            }
+        }
+        var imports = Set<String>()
+        for file in files {
+            if let pe = PortableExecutable.read(file) {
+                if !pe.isManaged { imports.formUnion(pe.imports) }
+            } else {
+                imports.formUnion(PortableExecutable.fallbackImports(in: file))
+            }
+        }
+        return imports
     }
 
     // MARK: - What is on disk

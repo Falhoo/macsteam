@@ -492,9 +492,12 @@ final class AppModel: ObservableObject {
         }
         Task { @MainActor in
             do {
+                let photon = self.photonTargets(appID: game.id)
                 let outcome = try await FixService.install(
                     appID: game.id, name: game.name,
-                    archive: archiveURL, password: password, progress: note)
+                    archive: archiveURL, password: password,
+                    photonRealtime: photon.0, photonVoice: photon.1,
+                    progress: note)
                 self.recordFix(outcome, for: game)
                 self.showProgress(outcome.message)
             } catch {
@@ -625,9 +628,12 @@ final class AppModel: ObservableObject {
                 throw ManagerError("The server returned no archives for \(game.name).")
             }
 
+            let photon = photonTargets(appID: game.id)
             let outcome = try await FixService.install(
                 appID: game.id, name: game.name,
-                archive: entry, password: FixSource.defaultPassword, progress: note)
+                archive: entry, password: FixSource.defaultPassword,
+                photonRealtime: photon.0, photonVoice: photon.1,
+                progress: note)
             recordFix(outcome, for: game)
             let matched = folder.isExact ? "" : " (matched “\(folder.name)” on online-fix.me)"
             fixMessage = "Fetched from online-fix.me. " + outcome.message + matched
@@ -645,13 +651,32 @@ final class AppModel: ObservableObject {
                                sizes: FixInstaller.sizes(of: outcome.files)))
         removedFixes.remove(game.id)
         prepareWine(for: game)
+        // The plan knows whether Steam's relay needs the game's own AppID. The
+        // recipe carries that answer; routing reads it from the game's entry.
+        if let folder = Store.gameFolder(for: game.id, name: game.name),
+           let recipe = FixPack.read(in: folder),
+           let index = games.firstIndex(where: { $0.id == game.id }) {
+            games[index].keepRealAppID = recipe.keepRealAppID
+        }
         // Stored Photon app IDs are applied with the fix, so the player never has to
-        // press Apply.
+        // press Apply. The install already got them; this is for a package whose
+        // automatic patch skipped the game, where the older direct replace still can.
         if let folder = Store.gameFolder(for: game.id, name: game.name),
            !game.repoPhoton.realtime.isEmpty || !game.repoPhoton.voice.isEmpty {
-            _ = try? PhotonIDs.apply(gameFolder: folder,
-                                     realtime: game.repoPhoton.realtime,
-                                     voice: game.repoPhoton.voice)
+            let wanted = photonTargets(appID: game.id)
+            let applied = outcome.photonTargets.first == wanted.0
+                && (outcome.photonTargets.count < 2 || outcome.photonTargets[1] == wanted.1)
+            if !applied {
+                _ = try? PhotonIDs.apply(gameFolder: folder,
+                                         realtime: game.repoPhoton.realtime,
+                                         voice: game.repoPhoton.voice)
+                FixPack.syncPhotonTargets(in: folder, targets: [wanted.0, wanted.1])
+            }
+        }
+        // The fix may have brought the Photon assemblies: drop the cached "not a
+        // Photon game" answer before anything reads it again.
+        if let folder = Store.gameFolder(for: game.id, name: game.name) {
+            PhotonFix.forget(folder: folder)
         }
         // The fix's own files are in place now, so read the game for the Photon app id
         // it connects to. A game whose online play runs on Photon needs that id swapped
@@ -665,26 +690,13 @@ final class AppModel: ObservableObject {
     ///
     /// Two things hold a fix back on macOS, and they are not Photon-specific:
     /// Wine prefers its own built-in copy of a proxy DLL over the one the fix put
-    /// beside the game, and OnlineFix's `dlllist.txt` starts with the Steam overlay,
-    /// whose loader cannot find its renderer in a managed prefix and stops the rest
-    /// of the list with error 126. Every fix needs both handled, so every fix gets it.
+    /// beside the game, and OnlineFix64 refuses a `dlllist.txt` that does not name
+    /// the Steam overlay first. The overlay line stays; its DllMain is made inert
+    /// instead, because a missing renderer would otherwise stop the rest of the
+    /// list with error 126.
     private func prepareWine(for game: ManagedGame, fix: FixRecord? = nil) {
         guard let record = fix ?? fixes.first(where: { $0.id == game.id }) else { return }
         let folder = Store.gameFolder(for: game.id, name: game.name)
-
-        // The overlay is the in-game Steam UI. Its failure is not cosmetic: it
-        // aborts the loader before the fix's own files are touched. Look at the
-        // game folder too, since a fix installed by an older build may have a list
-        // the record does not name.
-        var lists = Set(record.files.filter {
-            ($0 as NSString).lastPathComponent == "dlllist.txt"
-        })
-        if let folder {
-            lists.insert(folder.appendingPathComponent("dlllist.txt").path)
-        }
-        for file in lists {
-            FixInstaller.removingOverlayFromDLLList(at: file)
-        }
         // An imported overlay stub (steam_api64.dll -> SteamOverlay64.dll) cannot be
         // taken out of a list, so it is made to do nothing instead.
         for path in record.files where (path as NSString).lastPathComponent == "SteamOverlay64.dll" {
@@ -721,12 +733,15 @@ final class AppModel: ObservableObject {
         for fix in fixes {
             guard let folder = Store.gameFolder(for: fix.id, name: fix.gameName) else { continue }
             prepareWine(for: ManagedGame(id: fix.id, name: fix.gameName), fix: fix)
+            FixService.refreshLaunchOverrides(appID: fix.id, name: fix.gameName)
             if let game = games.first(where: { $0.id == fix.id }),
                !game.repoPhoton.realtime.isEmpty || !game.repoPhoton.voice.isEmpty,
                PhotonFix.isPhotonGame(in: folder) {
                 _ = try? PhotonIDs.apply(gameFolder: folder,
                                          realtime: game.repoPhoton.realtime,
                                          voice: game.repoPhoton.voice)
+                let wanted = photonTargets(appID: game.id)
+                FixPack.syncPhotonTargets(in: folder, targets: [wanted.0, wanted.1])
             }
             changed = changed || repaired[fix.id] != nil
         }
@@ -762,6 +777,9 @@ final class AppModel: ObservableObject {
         let outcome = FixService.routingOnly(appID: appID, name: game.name)
         fixMessage = outcome.message
         guard !outcome.repaired.isEmpty else { return }
+        if let index = games.firstIndex(where: { $0.id == appID }) {
+            games[index].keepRealAppID = false
+        }
 
         // The file is the game's own again, so its size no longer says anything about
         // whether the fix is still in place: leaving it in the record would show the
@@ -831,6 +849,8 @@ final class AppModel: ObservableObject {
             let changed = try PhotonIDs.apply(gameFolder: folder,
                                               realtime: game.repoPhoton.realtime,
                                               voice: game.repoPhoton.voice)
+            let wanted = photonTargets(appID: game.id)
+            FixPack.syncPhotonTargets(in: folder, targets: [wanted.0, wanted.1])
             persist()
             fixMessage = changed.isEmpty
                 ? "Those are the IDs the game already carries."
@@ -911,13 +931,15 @@ final class AppModel: ObservableObject {
             }
             return nil
         }
-        guard PhotonFix.isPhotonGame(in: folder) else { return nil }
+        // The candidates are proof enough that this is a Photon game. Asking the
+        // filename cache as well could refuse a game whose fix supplied the Photon
+        // assemblies after that cache was filled.
+        let targets = photonTargets(appID: appID)
         let report = await Task.detached(priority: .userInitiated) {
-            PhotonPatch.autoPatch(in: folder)
+            PhotonPatch.autoPatch(in: folder, realtime: targets.0, voice: targets.1)
         }.value
         if report.replaced != nil {
-            fixMessage = "Patched \(name)'s Photon app id to OnlineFix's, so it can "
-                + "meet players on that app. The game's own files are kept beside them."
+            fixMessage = photonPatchMessage(name, report)
         } else if let skipped = report.skipped {
             fixMessage = skipped
         }
@@ -941,22 +963,45 @@ final class AppModel: ObservableObject {
             setPicoPark2Photon(true, game: game)
             return
         }
-        guard PhotonFix.isPhotonGame(in: folder) else { return }
+        let targets = photonTargets(appID: appID)
         photonScanning.insert(appID)
         Task { @MainActor [weak self] in
             let report = await Task.detached(priority: .userInitiated) {
-                PhotonPatch.autoPatch(in: folder)
+                PhotonPatch.autoPatch(in: folder, realtime: targets.0, voice: targets.1)
             }.value
             guard let self else { return }
             self.photonScanning.remove(appID)
             if report.replaced != nil {
-                self.fixMessage = "Patched \(name)'s Photon app id to OnlineFix's, so it can "
-                    + "meet players on that app. The game's own files are kept beside them."
+                self.fixMessage = self.photonPatchMessage(name, report)
                 self.scanPhotonIDs(appID: appID, name: name, force: true)
             } else if let skipped = report.skipped {
                 self.fixMessage = skipped
             }
         }
+    }
+
+    /// The ids a game should carry: the player's own when they set valid GUIDs, and
+    /// OnlineFix's published pair otherwise. The custom ids are written at install, so
+    /// the automatic pass must not put the defaults back over them.
+    private func photonTargets(appID: Int) -> (String, String) {
+        guard let game = games.first(where: { $0.id == appID }) else {
+            return (PhotonIDs.realtime, PhotonIDs.voice)
+        }
+        let realtime = PhotonIDs.isGUID(game.repoPhoton.realtime)
+            ? game.repoPhoton.realtime : PhotonIDs.realtime
+        let voice = PhotonIDs.isGUID(game.repoPhoton.voice)
+            ? game.repoPhoton.voice : PhotonIDs.voice
+        return (realtime, voice)
+    }
+
+    private func photonPatchMessage(_ name: String, _ report: PhotonPatch.AutoPatch) -> String {
+        if report.voiceReplaced != nil {
+            return "Patched \(name)'s Photon realtime and voice app ids to OnlineFix's, "
+                + "so it can meet players on that app. The game's own files are kept "
+                + "beside them."
+        }
+        return "Patched \(name)'s Photon app id to OnlineFix's, so it can meet players "
+            + "on that app. The game's own files are kept beside them."
     }
 
     /// Writes a Photon app id into the game's files, which is the patch itself: the id
@@ -986,6 +1031,9 @@ final class AppModel: ObservableObject {
                         + "was either patched already or has been verified since the scan."
                     : "Patched \(written.count) file(s) with the new Photon app id, and kept "
                         + "the untouched copies beside them. Launch the game from Steam."
+                if !written.isEmpty {
+                    FixPack.syncPhotonTargets(in: folder, targets: [wanted])
+                }
                 self?.scanPhotonIDs(appID: game.id, name: game.name, force: true)
             } catch {
                 message = error.localizedDescription
@@ -1014,6 +1062,7 @@ final class AppModel: ObservableObject {
                     ? "There was nothing to put back: no file here was patched from this screen."
                     : "Put \(restored.count) game file(s) back, and signed the game again if it "
                         + "is a Mac build."
+                if !restored.isEmpty { FixPack.syncPhotonTargets(in: folder, targets: []) }
                 self?.scanPhotonIDs(appID: game.id, name: game.name, force: true)
             } catch {
                 message = error.localizedDescription
@@ -1033,6 +1082,7 @@ final class AppModel: ObservableObject {
         }
         do {
             _ = try PhotonIDs.apply(gameFolder: folder, realtime: "", voice: "")
+            FixPack.syncPhotonTargets(in: folder, targets: [])
             fixMessage = "R.E.P.O.'s Photon app IDs are back to the defaults."
         } catch {
             fixMessage = error.localizedDescription
@@ -1164,12 +1214,18 @@ final class AppModel: ObservableObject {
             }
 
             progress("Installing \(entry.lastPathComponent)…")
+            let photon = photonTargets(appID: appID)
             let outcome = try await FixService.install(
                 appID: appID, name: display,
-                archive: entry, password: FixSource.defaultPassword, progress: progress)
+                archive: entry, password: FixSource.defaultPassword,
+                photonRealtime: photon.0, photonVoice: photon.1,
+                progress: progress)
             recordFix(outcome, for: game)
+            let identity = outcome.keepRealAppID
+                ? "its own AppID, which Steam's relay needs"
+                : "AppID 480"
             let message = outcome.message
-                + " Launch \(display) from Steam. It runs as AppID 480."
+                + " Launch \(display) from Steam. It runs as \(identity)."
             return OnlineFixStoreOutcome(message: message, error: nil,
                                          needsGame: false, installed: true)
         } catch {
@@ -1195,7 +1251,13 @@ final class AppModel: ObservableObject {
         if let folder, FixPack.hasPack(in: folder) {
             // The pack holds every file the fix wrote and what each one replaced, so
             // it puts the game back exactly; the old sweep would guess.
-            restored = FixService.uninstall(appID: appID, name: name)
+            do {
+                restored = try FixService.uninstall(appID: appID, name: name)
+            } catch {
+                return OnlineFixStoreOutcome(message: nil,
+                                             error: error.localizedDescription,
+                                             needsGame: false, installed: true)
+            }
         } else if let record {
             do {
                 restored = try FixInstaller.uninstall(record)

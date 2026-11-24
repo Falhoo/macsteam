@@ -85,6 +85,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 _ = OnlineFixRoutingBridge.merge(entries, into: &cfg)
             }
         }
+        OnlineFixLaunchBridge.writer = { appID, assignments in
+            await OnlineFixLaunchOptions.apply(appID: appID, assignments: assignments)
+        }
+        OnlineFixLaunchBridge.clearer = { appID, assignments in
+            await OnlineFixLaunchOptions.clear(appID: appID, assignments: assignments)
+        }
+        NSLog("OnlineFixLaunch bridge writer=%d", OnlineFixLaunchBridge.writer == nil ? 0 : 1)
         OnlineFixEmbed.pushRouting()
     }
 

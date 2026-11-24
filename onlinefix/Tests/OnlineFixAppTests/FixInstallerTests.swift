@@ -42,6 +42,21 @@ struct FixInstallerTests {
     /// A Steam verify puts the game's own file back at the same path, so a record
     /// that only remembers paths would call it fixed.
     @Test
+    func legacyUninstallRestoresAPhotonBackup() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let asset = root.appendingPathComponent("Game_Data/resources.assets")
+        try write("patched", to: asset)
+        try write("stock", to: asset.appendingPathExtension("onlinefix-photon-backup"))
+        let record = FixRecord(id: 1, gameName: "Game", files: [asset.path])
+
+        #expect(try FixInstaller.uninstall(record) == 1)
+        #expect((try? String(contentsOf: asset, encoding: .utf8)) == "stock")
+        #expect(!FileManager.default.fileExists(
+            atPath: asset.appendingPathExtension("onlinefix-photon-backup").path))
+    }
+
+    @Test
     func stateNoticesAFileSteamPutBack() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
