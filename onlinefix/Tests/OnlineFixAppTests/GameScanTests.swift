@@ -85,6 +85,21 @@ struct GameScanTests {
         #expect(scan.exe?.lastPathComponent == "Game.exe")
     }
 
+    /// A tiny `Game.exe` is a launcher when the real binary is
+    /// `Game-Win64-Shipping.exe`. The name alone must not win over the game itself.
+    @Test
+    func aTinyNamedLauncherDoesNotBeatTheRealGame() throws {
+        let game = GameScan.canonical(try folder())
+        defer { try? FileManager.default.removeItem(at: game) }
+        try write("exe", to: game.appendingPathComponent("Game.exe"))
+        try write(String(repeating: "x", count: 5_000_000),
+                  to: game.appendingPathComponent("Game-Win64-Shipping.exe"))
+        try write("api", to: game.appendingPathComponent("steam_api64.dll"))
+
+        let scan = GameScan.read(folder: game, appID: 1, name: "Game")
+        #expect(scan.exe?.lastPathComponent == "Game-Win64-Shipping.exe")
+    }
+
     /// `steam_appid.txt` overrides the AppID Steam passes on the command line, so
     /// the scan keeps the value rather than leaving the routing to guess.
     @Test

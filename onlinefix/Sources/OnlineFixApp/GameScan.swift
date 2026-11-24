@@ -404,31 +404,56 @@ struct GameScan: Sendable {
 
         let gameName = Store.normalized(name)
         let folderName = Store.normalized(launch.lastPathComponent)
-        func sizeScore(_ url: URL) -> Int {
+        let launchers = ["launcher", "launch", "start", "play", "setup"]
+        let sizes = Dictionary(uniqueKeysWithValues: executables.map { url -> (String, Int) in
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            return Int(min(Int64(size) / 1_000_000, 50))
-        }
+            return (url.path, Int(size))
+        })
+        let largestMB = max((sizes.values.max() ?? 0) / 1_000_000, 1)
+        // A name is a good hint, but a 1 MB `Game.exe` beside a 100 MB
+        // `Game-Win64-Shipping.exe` is a launcher, not the game. The bonus is
+        // proportional to the largest binary, so size still decides when the name is
+        // ambiguous, and an exact name wins when its file is a real share of the game.
+        let namedBonus = max(20, largestMB / 3)
         func rank(_ url: URL) -> Int {
             let stem = Store.normalized(url.deletingPathExtension().lastPathComponent)
-            // The name is decisive, and this path reads no PE data, which keeps a
-            // folder full of launchers from being read in full just to pick one.
-            if !gameName.isEmpty, stem == gameName { return 1_000 + sizeScore(url) }
-            if !folderName.isEmpty, stem == folderName { return 600 + sizeScore(url) }
-
-            var score = 0
-            if gameName.count >= 4, stem.contains(gameName) { score += 300 }
-            let imports = PortableExecutable.read(url)?.imports
-                ?? PortableExecutable.fallbackImports(in: url)
-            if imports.contains("steam_api64.dll") || imports.contains("steam_api.dll") {
-                score += 200
+            let bytes = sizes[url.path] ?? 0
+            let size = bytes / 1_000_000
+            let isLauncher = launchers.contains(stem)
+            if !isLauncher, !gameName.isEmpty, stem == gameName,
+               size * 3 >= largestMB {
+                return size + namedBonus
             }
-            if !imports.isDisjoint(with: ["winhttp.dll", "winmm.dll", "version.dll"]) {
+
+            var score = size
+            if !gameName.isEmpty, stem == gameName { score += namedBonus }
+            else if !folderName.isEmpty, stem == folderName { score += namedBonus / 2 }
+            else if gameName.count >= 4, stem.contains(gameName) {
+                score += max(30, largestMB / 4)
+            }
+            if isLauncher { score -= namedBonus }
+
+            // Steam's API is the strongest byte-level signal, but a Unity game can
+            // load it through a plugin without importing it, so this only breaks ties.
+            let imports: Set<String>
+            if let pe = PortableExecutable.read(url) {
+                imports = pe.imports
+            } else if bytes <= 512 * 1024 {
+                // The fallback scans the whole file with a regular expression. It is
+                // useful for a small, malformed binary; on a multi-megabyte file it
+                // turns picking an executable into a minute of work. A real PE takes
+                // the fast path above.
+                imports = PortableExecutable.fallbackImports(in: url)
+            } else {
+                imports = []
+            }
+            if imports.contains("steam_api64.dll") || imports.contains("steam_api.dll") {
                 score += 20
             }
-            if ["launcher", "launch", "start", "play", "setup"].contains(stem) {
-                score -= 200
+            if !imports.isDisjoint(with: ["winhttp.dll", "winmm.dll", "version.dll"]) {
+                score += 5
             }
-            return score + sizeScore(url)
+            return score
         }
         return executables.max { rank($0) < rank($1) }
     }

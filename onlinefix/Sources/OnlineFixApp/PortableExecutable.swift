@@ -37,8 +37,11 @@ struct PortableExecutable: Sendable, Equatable {
     /// stripped, non-standard binary can still spell the DLL it loads; the PE reader
     /// stays authoritative whenever it can read the file.
     static func fallbackImports(in url: URL) -> Set<String> {
+        // A real PE is read by `read` above and never comes here. This path is for a
+        // small, malformed binary whose import names are still in its strings; the
+        // regex over a multi-megabyte file is slow enough to stall a library scan.
         guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]),
-              data.count > 0, data.count <= 16 * 1024 * 1024,
+              data.count > 0, data.count <= 512 * 1024,
               let text = String(data: data, encoding: .isoLatin1) else { return [] }
         let pattern = "[A-Za-z0-9_.-]{1,80}\\.dll"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
