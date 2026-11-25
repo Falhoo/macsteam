@@ -52,7 +52,11 @@ public enum OnlineFixCommand {
         // background; a script needs that finished before it launches the game.
         await model.finishPhotonPatch(appID: appID, name: display)
         if !model.fixMessage.isEmpty { print(model.fixMessage) }
-        if outcome.installed { print("The fix for \(display) is installed.") }
+        if outcome.installed {
+            let tested = await model.testInstalledFix(appID: appID, name: display) { print($0) }
+            print(tested)
+            print("The fix for \(display) is installed.")
+        }
         return outcome.installed ? 0 : 1
     }
 

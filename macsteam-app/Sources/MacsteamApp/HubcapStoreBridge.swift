@@ -445,6 +445,15 @@ private final class HubcapStorePage {
                         : "This game now starts as Spacewar (480) again. Restart Steam and launch it again.")
                     : "That is not a Steam AppID macSteam can route."
                 response = reply
+            case "onlinefix-test":
+                let message = await OnlineFixEmbed.storeTest(
+                    appID: request.appID, name: request.name ?? "") { @Sendable text in
+                    Task { await self.pushOnlineFixProgress(text, context: context) }
+                }
+                response = ["message": message]
+            case "onlinefix-test-cancel":
+                OnlineFixEmbed.storeCancelTest()
+                response = ["stopping": true]
             case "onlinefix-install":
                 let outcome = await OnlineFixEmbed.storeInstall(
                     appID: request.appID,
@@ -552,6 +561,7 @@ private final class HubcapStorePage {
                                            "onlinefix-probe",
                                            "onlinefix-route", "onlinefix-windows",
                                            "onlinefix-status", "onlinefix-install",
+                                           "onlinefix-test", "onlinefix-test-cancel",
                                            "onlinefix-uninstall", "onlinefix-keep-id",
                                            "onlinefix-spacewar"]
     }

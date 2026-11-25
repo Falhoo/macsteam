@@ -17,7 +17,7 @@
     const freeCache = new Map();
     // Whether macSteam has this app in its config, which is what the Remove button acts on.
     let configured = false;
-    let onlineRoot, onlineButton, onlineStatus, onlineDesc, onlineNote, onlineChoices, onlineConfirmRow;
+    let onlineRoot, onlineButton, onlineTestButton, onlineStatus, onlineDesc, onlineNote, onlineChoices, onlineConfirmRow;
     // Tick "Show me anyway": the install runs only when it is on.
     let onlineConfirmed = false;
     let onlineGdk = false;
@@ -40,6 +40,8 @@
     let onlineRouteRow = null;
     let onlineReroute = null;
     let onlineBusy = false;
+    // A test launch is running: the Test button becomes Stop test.
+    let onlineTesting = false;
     let restarting = false;
     // Restart belongs to the card that just added this game, not to a game that
     // was already in the library: opening its page later must not offer it.
@@ -110,7 +112,9 @@
                 resolve({ error: action === 'restart'
                     ? 'macSteam did not answer. Quit and reopen macSteam Config, then try again.'
                     : 'macSteam did not respond. Open macSteam Config and try again.' });
-            }, action === 'onlinefix-install' ? 600000 : action === 'restart' ? 20000 : 180000);
+            }, action === 'onlinefix-install' ? 600000
+                : action === 'onlinefix-test' ? 300000
+                : action === 'restart' ? 20000 : 180000);
             pending.set(id, { resolve, timer });
             bridge(JSON.stringify({ id, appID, action, fixID, name: name || '', folder: folder || '',
                 confirmed: !!extra }));
@@ -517,6 +521,7 @@
         onlineRoot?.remove();
         onlineRoot = null;
         onlineButton = null;
+        onlineTestButton = null;
         onlineStatus = null;
         onlineDesc = null;
         onlineNote = null;
@@ -799,6 +804,14 @@
         const actions = document.createElement('div');
         actions.style.cssText = 'white-space:nowrap';
         if (result.fixInstalled || onlineRouteInstalled) {
+            // A test starts the game and checks the installed fix. A Mac build that is
+            // only routed has no fix files to test, so it gets no Test button.
+            if (result.fixInstalled && !onlineNative) {
+                onlineTestButton = actionButton('Test', () => { void testOnlineFix(); });
+                onlineTestButton.disabled = !result.gameInstalled;
+                onlineTestButton.title = 'Start the game once and check the fix without reinstalling it.';
+                actions.appendChild(onlineTestButton);
+            }
             const remove = actionButton('Uninstall', () => uninstallOnlineFix());
             actions.appendChild(remove);
         }
@@ -995,6 +1008,60 @@
         if (requestedApp !== appID) return;
         if (result.error || result.inList === undefined) return;
         renderOnlineFix(result);
+    }
+    // Starts the installed fix once, reports the result and repairs only a known
+    // failure. The same request is used by the manager's Test button.
+    async function testOnlineFix() {
+        if (onlineTesting) {
+            await cancelOnlineTest();
+            return;
+        }
+        if (onlineBusy) return;
+        onlineBusy = true;
+        onlineTesting = true;
+        const requestedApp = appID;
+        if (onlineTestButton) {
+            onlineTestButton.querySelector('span').textContent = 'Stop test';
+            onlineTestButton.disabled = false;
+        }
+        if (onlineButton) onlineButton.disabled = true;
+        if (onlineStatus) {
+            onlineStatus.hidden = false;
+            onlineStatus.style.color = '#acb2b8';
+            onlineStatus.textContent = 'Starting the game for a test…';
+        }
+        const reply = await request('onlinefix-test', null, gameName());
+        onlineBusy = false;
+        onlineTesting = false;
+        if (requestedApp !== appID || !onlineRoot) return;
+        if (onlineTestButton) {
+            onlineTestButton.querySelector('span').textContent = 'Test';
+            onlineTestButton.disabled = !onlineGameInstalled;
+        }
+        if (onlineButton) refreshOnlineButton();
+        if (!onlineStatus) return;
+        if (reply.error) {
+            onlineStatus.style.color = '#e8a54b';
+            onlineStatus.textContent = 'Could not test the OnlineFix — ' + reply.error;
+            return;
+        }
+        onlineStatus.style.color = '#acb2b8';
+        onlineStatus.textContent = reply.message || 'The test finished.';
+    }
+    async function cancelOnlineTest() {
+        if (!onlineTesting) return;
+        if (onlineTestButton) onlineTestButton.disabled = true;
+        if (onlineStatus) {
+            onlineStatus.hidden = false;
+            onlineStatus.style.color = '#acb2b8';
+            onlineStatus.textContent = 'Stopping the test…';
+        }
+        const reply = await request('onlinefix-test-cancel');
+        if (reply.error && onlineStatus) {
+            onlineStatus.style.color = '#e8a54b';
+            onlineStatus.textContent = 'Could not stop the test — ' + reply.error;
+            if (onlineTestButton) onlineTestButton.disabled = false;
+        }
     }
     async function uninstallOnlineFix() {
         if (onlineBusy) return;

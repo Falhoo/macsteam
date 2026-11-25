@@ -99,12 +99,14 @@ unescaped `;` list, which made Steam launch nothing or the wrong command.
 
 ## The install test
 
-Files in the right place are not proof that a game runs. A foreground install now
-starts the game through Steam once, waits for its window, reads the compatibility
-runner's log and Wine's log, and stops only the process it started. The result goes to
+Files in the right place are not proof that a game runs. Installing from the manager,
+from a game's Properties window, or from the Steam store page now starts the game
+through Steam once, waits for its window, reads the compatibility runner's log and
+Wine's log, and stops only the process it started. The result goes to
 `~/Library/Application Support/OnlineFixManager/launch-test-<appid>.json`
 and is summarized in `recipe.json`. The switch is on by default and can be
-turned off before an install; the test can also be run later from the fix card or with
+turned off before an install; the test can also be run later from the fix card, the
+game's Properties window, the Steam store card's **Test** button, or with
 `--onlinefix-test <appid> [--repair]`.
 
 The test classifies only known signatures and maps them to repairs that already exist

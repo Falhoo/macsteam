@@ -94,7 +94,23 @@ public enum OnlineFixEmbed {
         async -> OnlineFixStoreOutcome {
         await model.installFromStore(appID: appID, name: name,
                                      folderName: folderName, confirmed: confirmed,
+                                     testAfterInstall: true,
                                      progress: progress)
+    }
+
+    /// Runs the install test for a fix that is already on disk. Returns the message
+    /// the store page or Properties window shows.
+    @MainActor
+    public static func storeTest(appID: Int, name: String,
+                                 progress: @escaping @Sendable (String) -> Void)
+        async -> String {
+        await model.testInstalledFix(appID: appID, name: name, progress: progress)
+    }
+
+    /// Stops a test started from the store page or Properties window.
+    @MainActor
+    public static func storeCancelTest() {
+        model.cancelLaunchTest()
     }
 
     @MainActor

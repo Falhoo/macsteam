@@ -492,6 +492,33 @@ final class AppModel: ObservableObject {
         showProgress("Cancelling the test…")
     }
 
+    /// Tests an installed fix without reinstalling it. The control is kept on the
+    /// model so the manager's Cancel button stops this test too.
+    func testInstalledFix(appID: Int, name: String,
+                          progress: @escaping @Sendable (String) -> Void) async -> String {
+        guard !launchTestRunning else { return "A test is already running." }
+        guard let folder = Store.gameFolder(for: appID, name: name),
+              FixPack.hasPack(in: folder) else {
+            return "Install the fix first."
+        }
+        let control = LaunchTest.Control()
+        launchTestControl = control
+        launchTestRunning = true
+        defer {
+            launchTestRunning = false
+            if launchTestControl === control { launchTestControl = nil }
+        }
+        let scan = GameScan.read(folder: folder, appID: appID, name: name)
+        let result = await LaunchTest.run(appID: appID, name: name, exe: scan.exe,
+                                          cancel: { control.isCancelled() },
+                                          progress: progress)
+        if var recipe = FixPack.read(in: folder) {
+            recipe.launchTest = result
+            try? FixPack.writeRecipe(recipe, in: folder)
+        }
+        return result.message
+    }
+
     /// Tests an installed fix without reinstalling it.
     func testFixNow(appID: Int, name: String) {
         guard !busy else { return }
@@ -500,27 +527,15 @@ final class AppModel: ObservableObject {
             fixMessage = "Install the fix first."
             return
         }
-        let control = LaunchTest.Control()
-        launchTestControl = control
-        launchTestRunning = true
         busy = true
         fixMessage = "Testing \(name)…"
         Task { @MainActor in
             let note: @Sendable (String) -> Void = { [weak self] text in
                 self?.showProgress(text)
             }
-            let scan = GameScan.read(folder: folder, appID: appID, name: name)
-            let result = await LaunchTest.run(appID: appID, name: name, exe: scan.exe,
-                                              cancel: { control.isCancelled() },
-                                              progress: note)
-            if var recipe = FixPack.read(in: folder) {
-                recipe.launchTest = result
-                try? FixPack.writeRecipe(recipe, in: folder)
-            }
-            self.launchTestRunning = false
-            self.launchTestControl = nil
+            let message = await self.testInstalledFix(appID: appID, name: name, progress: note)
             self.busy = false
-            self.fixMessage = result.message
+            self.fixMessage = message
             self.refresh()
         }
     }
@@ -1178,6 +1193,7 @@ final class AppModel: ObservableObject {
     /// installs it. Used by the "Use OnlineFix" button on Steam's store pages.
     func installFromStore(appID: Int, name: String, imageURL: String? = nil,
                           folderName: String? = nil, confirmed: Bool = false,
+                          testAfterInstall: Bool = false,
                           progress: @escaping @Sendable (String) -> Void = { _ in })
         async -> OnlineFixStoreOutcome {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1283,10 +1299,23 @@ final class AppModel: ObservableObject {
 
             progress("Installing \(entry.lastPathComponent)…")
             let photon = photonTargets(appID: appID)
-            let outcome = try await FixService.install(
+            let test = testAfterInstall && self.testAfterInstall
+            let control = LaunchTest.Control()
+            if test {
+                launchTestControl = control
+                launchTestRunning = true
+            }
+            defer {
+                if test {
+                    launchTestRunning = false
+                    if launchTestControl === control { launchTestControl = nil }
+                }
+            }
+            let outcome = try await FixService.installAndTest(
                 appID: appID, name: display,
                 archive: entry, password: FixSource.defaultPassword,
                 photonRealtime: photon.0, photonVoice: photon.1,
+                test: test, control: control,
                 progress: progress)
             recordFix(outcome, for: game)
             let identity = outcome.keepRealAppID

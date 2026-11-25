@@ -101,6 +101,8 @@ final class AppsPropertiesModel: ObservableObject {
     @Published private(set) var onlineInstallTitle = "Install OnlineFix"
     @Published private(set) var canInstallOnlineFix = false
     @Published private(set) var canUninstallOnlineFix = false
+    @Published private(set) var canTestOnlineFix = false
+    @Published private(set) var onlineTesting = false
     @Published private(set) var onlineBusy = false
 
     // LuaTools tab
@@ -148,6 +150,7 @@ final class AppsPropertiesModel: ObservableObject {
         onlineInstallTitle = status.fixInstalled ? "Reinstall OnlineFix" : "Install OnlineFix"
         canInstallOnlineFix = status.gameInstalled
         canUninstallOnlineFix = status.fixInstalled
+        canTestOnlineFix = status.fixInstalled && !status.nativeMacBuild
     }
 
     func installOnlineFix() {
@@ -165,10 +168,14 @@ final class AppsPropertiesModel: ObservableObject {
         Task { @MainActor [weak self] in
             let outcome = await OnlineFixEmbed.storeInstall(
                 appID: appID, name: name, confirmed: confirmed) { [weak self] text in
-                Task { @MainActor in self?.onlineMessage = text }
+                Task { @MainActor in
+                    self?.onlineMessage = text
+                    if text.hasPrefix("Testing the game") { self?.onlineTesting = true }
+                }
             }
             guard let self else { return }
             self.onlineBusy = false
+            self.onlineTesting = false
             // The fix may not work: ask before downloading it.
             if let confirmation = outcome.confirmation {
                 self.askToInstallAnyway(confirmation: confirmation, name: name)
@@ -187,6 +194,35 @@ final class AppsPropertiesModel: ObservableObject {
         } else {
             refreshOnlineFix()
         }
+    }
+
+    /// Starts the installed fix once and reports what happened, without downloading
+    /// or reinstalling it.
+    func testOnlineFix() {
+        guard !onlineBusy, canTestOnlineFix else { return }
+        onlineBusy = true
+        onlineTesting = true
+        onlineMessageTone = .secondary
+        onlineMessage = "Starting the game…"
+        let name = gameName
+        let appID = appID
+        Task { @MainActor [weak self] in
+            let message = await OnlineFixEmbed.storeTest(appID: appID, name: name) { text in
+                Task { @MainActor in self?.onlineMessage = text }
+            }
+            guard let self else { return }
+            self.onlineBusy = false
+            self.onlineTesting = false
+            self.onlineMessageTone = .secondary
+            self.onlineMessage = message
+            self.refreshOnlineFix()
+        }
+    }
+
+    func cancelOnlineTest() {
+        guard onlineTesting else { return }
+        OnlineFixEmbed.storeCancelTest()
+        onlineMessage = "Cancelling the test…"
     }
 
     func uninstallOnlineFix() {
@@ -429,10 +465,19 @@ struct AppsPropertiesView: View {
                 Button(model.onlineInstallTitle) { model.installOnlineFix() }
                     .buttonStyle(.glassProminent)
                     .disabled(!model.canInstallOnlineFix || model.onlineBusy)
+                Button("Test fix") { model.testOnlineFix() }
+                    .buttonStyle(.glass)
+                    .disabled(!model.canTestOnlineFix || model.onlineBusy)
+                    .help("Start the game once and check the fix without reinstalling it.")
                 Button("Uninstall", role: .destructive) { model.uninstallOnlineFix() }
                     .buttonStyle(.glass)
                     .disabled(!model.canUninstallOnlineFix || model.onlineBusy)
-                if model.onlineBusy {
+                if model.onlineTesting {
+                    Button("Cancel test") { model.cancelOnlineTest() }
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                    ProgressView().controlSize(.small)
+                } else if model.onlineBusy {
                     ProgressView().controlSize(.small)
                 }
                 Spacer()
@@ -454,8 +499,9 @@ struct AppsPropertiesView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Text("Install downloads the game's fix from online-fix.me and installs it. "
-                + "Uninstall restores the files the fix replaced and deletes the ones it added. "
-                + "Routing through AppID 480 is set up automatically.")
+                + "Test fix starts the game once, checks the fix and repairs only a known "
+                + "failure. Uninstall restores the files the fix replaced and deletes the "
+                + "ones it added. Routing through AppID 480 is set up automatically.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
