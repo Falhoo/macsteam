@@ -64,6 +64,9 @@ enum FixService {
                         photonVoice: String = PhotonIDs.voice,
                         progress: @escaping @Sendable (String) -> Void = { _ in }) throws -> Outcome {
         var outcome = Outcome()
+        // The Steam compatibility tool has its own copy of the runner. Repair it
+        // before the game reads it, not only when the tool is first installed.
+        _ = CompatibilityRunner.ensure()
         guard let folder = Store.gameFolder(for: appID, name: name) else {
             outcome.error = "Install \(name) in Steam first: OnlineFix needs its game folder "
                 + "to put its files in."
@@ -284,6 +287,7 @@ enum FixService {
 
     static func repair(appID: Int, name: String) -> Outcome {
         var outcome = Outcome()
+        _ = CompatibilityRunner.ensure()
         guard let folder = Store.gameFolder(for: appID, name: name) else {
             outcome.error = "Install \(name) in Steam first."
             return outcome

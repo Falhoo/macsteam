@@ -18,6 +18,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HubcapStoreBridge.registerExecutable()
         updaterManager.start()
         NotProtonEmbed.start()
+        // Steam keeps its own generated copy of NotProton's runner. An older tool
+        // splits a game path with spaces, so repair it on every start.
+        _ = CompatibilityRunner.ensure()
 
         // A game that went back to a native launch keeps NotProton's Windows-only
         // launch options, and Steam's macOS client cannot run them: the game stops
