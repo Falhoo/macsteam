@@ -1049,6 +1049,16 @@ struct PatchSheetView: View {
                 Button("Install from archive") { model.importFix() }
                     .buttonStyle(.glass)
                     .disabled(model.busy || model.archiveURL == nil || OnlineFixAvailability.isBroken)
+                Toggle("Test the game after install", isOn: Binding(
+                    get: { model.testAfterInstall },
+                    set: { model.setTestAfterInstall($0) }))
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .disabled(model.busy)
+                Text("The game opens once for up to two minutes so the fix can be checked. "
+                     + "You can cancel.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 15)
@@ -1069,6 +1079,11 @@ struct PatchSheetView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .contentTransition(.opacity)
             Spacer(minLength: 0)
+            if model.launchTestRunning {
+                Button("Cancel test") { model.cancelLaunchTest() }
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
+            }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
@@ -1111,6 +1126,11 @@ struct PatchSheetView: View {
                 }
                 Spacer(minLength: 12)
                 HStack(spacing: 8) {
+                    Button("Test") {
+                        model.testFixNow(appID: fix.id, name: fix.gameName)
+                    }
+                    .disabled(model.busy)
+                    .help("Start the game once and check the fix without reinstalling it.")
                     Button("Repair") {
                         model.repairFix(appID: fix.id)
                     }

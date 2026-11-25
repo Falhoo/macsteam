@@ -97,13 +97,48 @@ are repaired: the names are removed from `localconfig.vdf`, leaving the player's
 arguments, and a stale OF111 finding is dropped. This avoids the `/bin/sh` split of an
 unescaped `;` list, which made Steam launch nothing or the wrong command.
 
-## The launch probe
+## The install test
 
-Files in the right place are not proof that a game runs. `--onlinefix-probe <appid>`
-starts the game through Steam, watches for a window owned by the compatibility layer,
-stops it again and writes the result to
-`~/Library/Application Support/OnlineFixManager/probe-<appid>.json`. The next
-diagnosis reads that file, so a game that never opened is routed instead of patched.
+Files in the right place are not proof that a game runs. A foreground install now
+starts the game through Steam once, waits for its window, reads the compatibility
+runner's log and Wine's log, and stops only the process it started. The result goes to
+`~/Library/Application Support/OnlineFixManager/launch-test-<appid>.json`
+and is summarized in `recipe.json`. The switch is on by default and can be
+turned off before an install; the test can also be run later from the fix card or with
+`--onlinefix-test <appid> [--repair]`.
+
+The test classifies only known signatures and maps them to repairs that already exist
+in the fix plan:
+
+- A missing DRM stub is restored from its untouched copy, with its `dlllist.txt` line.
+- A Unity crash reporter that started is moved to `.onlinefix-removed`.
+- Overlay error 126, a broken loader list and a missing OnlineFix interface are sent
+  through the same post-install audit as a repair.
+- A missing fix file is copied back from `.macsteam-onlinefix/payload`.
+- A missing Visual C++ runtime, wrong architecture or a crash in the game's own code is
+  reported and left alone. It is not an OnlineFix file, so changing DLLs for it would
+  be guessing.
+
+The test runs at most twice. If the same signature returns, the second result is kept
+and the fix is left installed. A timeout with the process still alive is not treated as
+proof that the loader is wrong, and it never automatically switches an install to
+routing-only. That choice remains the **Own Steam API** action.
+
+Cancelling the test stops the game process and removes the temporary
+`.macsteam-winelog` marker. It does not uninstall or modify the fix. The
+online check reads `macsteam.log` for
+`[onlinefix] launch game=<appid>` and
+`[onlinefix] networking active: matchmaking uses 480`. That proves the
+OnlineFix hook is active; only entering a real lobby proves that another player can
+join. Photon games also get their own log verdict (OF070).
+
+The older `--onlinefix-probe <appid>` remains for a quick window-only check.
+
+## Packs written before the test
+
+`launchTest` is optional in `recipe.json`, so a pack written by an older build
+still decodes and repairs. The field is only a record; the files in the pack do not
+change when a launch succeeds.
 
 ## The fix pack
 

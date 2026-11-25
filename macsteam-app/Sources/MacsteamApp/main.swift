@@ -121,6 +121,40 @@ if let index = CommandLine.arguments.firstIndex(of: "--onlinefix-probe"),
     exit(OnlineFixCommand.probe(appID: appID, seconds: seconds, settle: settle))
 }
 
+// The install test without a window: --onlinefix-test <appid> [--seconds N]
+// [--settle N] [--repair]. It launches once, reads the failure, and with --repair
+// applies one known-safe fix and tests once more.
+if let index = CommandLine.arguments.firstIndex(of: "--onlinefix-test"),
+   CommandLine.arguments.count > index + 1,
+   let appID = Int(CommandLine.arguments[index + 1]) {
+    var seconds: Double = 120
+    if let secondsIndex = CommandLine.arguments.firstIndex(of: "--seconds"),
+       CommandLine.arguments.count > secondsIndex + 1,
+       let value = Double(CommandLine.arguments[secondsIndex + 1]) {
+        seconds = value
+    }
+    var settle: Double = 12
+    if let settleIndex = CommandLine.arguments.firstIndex(of: "--settle"),
+       CommandLine.arguments.count > settleIndex + 1,
+       let value = Double(CommandLine.arguments[settleIndex + 1]) {
+        settle = value
+    }
+    var name = ""
+    if let nameIndex = CommandLine.arguments.firstIndex(of: "--name"),
+       CommandLine.arguments.count > nameIndex + 1 {
+        name = CommandLine.arguments[nameIndex + 1]
+    }
+    var code: Int32 = 1
+    Task { @MainActor in
+        code = await OnlineFixCommand.test(appID: appID, name: name, seconds: seconds,
+                                           settle: settle,
+                                           repair: CommandLine.arguments.contains("--repair"))
+        CFRunLoopStop(CFRunLoopGetMain())
+    }
+    CFRunLoopRun()
+    exit(code)
+}
+
 // Reads the game's own log and says what Photon made of its last connection:
 // --onlinefix-photon <appid> [--name <name>]. Read only.
 if let index = CommandLine.arguments.firstIndex(of: "--onlinefix-photon"),

@@ -175,6 +175,47 @@ public enum OnlineFixCommand {
         return result.opened ? 0 : 1
     }
 
+    /// The install test without a window: launch once, read the real failure, and
+    /// optionally apply one safe repair and retest.
+    @MainActor
+    public static func test(appID: Int, name: String = "", seconds: Double = 120,
+                            settle: Double = 12, repair: Bool = false) async -> Int32 {
+        let stored = Store.load().games.first { $0.id == appID }?.name ?? ""
+        let typed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let display = typed.isEmpty ? (stored.isEmpty ? "App \(appID)" : stored) : typed
+        guard let folder = Store.gameFolder(for: appID, name: display) else {
+            FileHandle.standardError.write(Data(
+                "\(display) (\(appID)) has no folder in this Steam library.\n".utf8))
+            return 1
+        }
+        let scan = GameScan.read(folder: folder, appID: appID, name: display)
+        var result = await LaunchTest.run(appID: appID, name: display, exe: scan.exe,
+                                          timeout: seconds, settle: settle,
+                                          progress: { print($0) })
+        print(result.message)
+        if result.outcome == .failed, result.issue.repairable, repair {
+            let applied = LaunchTestRepair.apply(result, appID: appID, name: display,
+                                                progress: { print($0) })
+            print(applied.notes.joined(separator: " "))
+            if applied.changed {
+                print("Testing again after the repair…")
+                result = await LaunchTest.run(appID: appID, name: display, exe: scan.exe,
+                                              timeout: seconds, settle: settle,
+                                              progress: { print($0) })
+                print(result.message)
+            }
+        }
+        if var recipe = FixPack.read(in: folder) {
+            recipe.launchTest = result
+            try? FixPack.writeRecipe(recipe, in: folder)
+        }
+        if !result.evidence.isEmpty {
+            print("Evidence:")
+            for line in result.evidence.suffix(12) { print("  \(line)") }
+        }
+        return result.opened ? 0 : 1
+    }
+
     /// What the game's own log says Photon made of its last connection. Read only:
     /// the log is the game's, and this only says what it means.
     public static func photon(appID: Int, name: String = "") -> Int32 {

@@ -152,16 +152,32 @@ struct FixDiagnosis: Sendable {
                 remedy: "Prefer the routing: keep the game's own Steam API and run it as Spacewar."))
         }
         let probeResult = probe ?? LaunchProbe.savedResult(appID: scan.appID)
-        let probeFailed = probeResult != nil && probeResult?.windowSeconds == nil
         if let probeResult, probeResult.windowSeconds == nil {
             diagnosis.add(FixFinding(
                 code: "OF060", level: .warning,
                 title: "The last launch never showed a window",
                 detail: "The launch probe started the game and no window appeared within "
-                    + "\(Int(probeResult.waited))s.",
-                remedy: "Use the routing-only fix, then probe again."))
+                    + "\(Int(probeResult.waited))s. A slow first launch is not proof that "
+                    + "the loader is wrong.",
+                remedy: "Try the game again. If it still never opens, use “Own Steam API” "
+                    + "to keep the game's own API and run it as Spacewar."))
         }
-        if dotNet32 || probeFailed {
+        if probeResult == nil,
+           let test = LaunchTest.savedResult(appID: scan.appID),
+           test.windowSeconds == nil,
+           test.outcome == .timedOut || test.outcome == .failed {
+            diagnosis.add(FixFinding(
+                code: "OF060", level: .warning,
+                title: "The install test never showed a window",
+                detail: "The test ran for \(Int(test.runtimeSeconds))s and read: "
+                    + "\(test.issueDetail).",
+                remedy: "Read the test report. A timeout is not proof that the fix's "
+                    + "loader is wrong; a slow first launch looks the same."))
+        }
+        // A timeout is not proof the loader is wrong. Only a confirmed 32-bit .NET
+        // game gets the automatic routing-only plan; every other no-window result
+        // is reported and the installed fix is left alone.
+        if dotNet32 {
             diagnosis.add(FixFinding(
                 code: "OF061", level: .notice,
                 title: "Run this game with its own Steam API",
@@ -499,6 +515,21 @@ struct FixDiagnosis: Sendable {
                     + "window stays open.",
                 remedy: "Move the crash reporter aside. The install does this, and "
                     + "uninstall puts it back."))
+        }
+
+        // OF114: the last install test reached a failure that no safe file repair
+        // covered. Report it with the lines it read; never translate an unknown error
+        // into a random binary change.
+        if let test = LaunchTest.savedResult(appID: scan.appID),
+           test.outcome == .failed, !test.issue.repairable, test.issue != .online {
+            diagnosis.add(FixFinding(
+                code: "OF114", level: .warning,
+                title: "The install test found a failure with no safe repair",
+                detail: "The test read: \(test.issueDetail). The fix was left in place. "
+                    + "Open the test report before changing any file.",
+                remedy: "Read the saved log lines. A missing Visual C++ runtime, a wrong "
+                    + "architecture or a crash in the game's own code is not something "
+                    + "the OnlineFix package can patch safely."))
         }
 
         // OF016: the Wine prefix's DLL override.

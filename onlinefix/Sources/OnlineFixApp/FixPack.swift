@@ -41,6 +41,9 @@ struct FixRecipe: Codable, Sendable, Equatable {
     /// what a single file is supposed to hold.
     var photonFileIDs: [String: [String]]? = nil
     var wineDLLs: [String]
+    /// The last install test and the evidence it read. Optional so packs written by
+    /// older builds still decode.
+    var launchTest: LaunchTest.Result? = nil
     var notes: [String] = []
 
     var summary: String {

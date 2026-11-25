@@ -22,6 +22,12 @@ final class AppModel: ObservableObject {
     @Published var busy = false
     @Published var status = ""
     @Published var logText = ""
+    /// Whether a foreground install starts the game once afterwards.
+    @Published var testAfterInstall: Bool
+    /// True while the install test is the part that is running, so the UI can offer
+    /// Cancel without offering it for a download or an unpack.
+    @Published var launchTestRunning = false
+    private var launchTestControl: LaunchTest.Control?
 
     // Add game sheet
     @Published var showAddGame = false
@@ -60,6 +66,7 @@ final class AppModel: ObservableObject {
     private var photonScanFolders: [Int: String] = [:]
 
     init() {
+        testAfterInstall = UserDefaults.standard.object(forKey: "onlinefix.testAfterInstall") as? Bool ?? true
         let file = Store.load()
         games = file.games
         fixes = file.fixes
@@ -475,6 +482,49 @@ final class AppModel: ObservableObject {
         performArchiveImport()
     }
 
+    func setTestAfterInstall(_ value: Bool) {
+        testAfterInstall = value
+        UserDefaults.standard.set(value, forKey: "onlinefix.testAfterInstall")
+    }
+
+    func cancelLaunchTest() {
+        launchTestControl?.cancel()
+        showProgress("Cancelling the test…")
+    }
+
+    /// Tests an installed fix without reinstalling it.
+    func testFixNow(appID: Int, name: String) {
+        guard !busy else { return }
+        guard let folder = Store.gameFolder(for: appID, name: name),
+              FixPack.hasPack(in: folder) else {
+            fixMessage = "Install the fix first."
+            return
+        }
+        let control = LaunchTest.Control()
+        launchTestControl = control
+        launchTestRunning = true
+        busy = true
+        fixMessage = "Testing \(name)…"
+        Task { @MainActor in
+            let note: @Sendable (String) -> Void = { [weak self] text in
+                self?.showProgress(text)
+            }
+            let scan = GameScan.read(folder: folder, appID: appID, name: name)
+            let result = await LaunchTest.run(appID: appID, name: name, exe: scan.exe,
+                                              cancel: { control.isCancelled() },
+                                              progress: note)
+            if var recipe = FixPack.read(in: folder) {
+                recipe.launchTest = result
+                try? FixPack.writeRecipe(recipe, in: folder)
+            }
+            self.launchTestRunning = false
+            self.launchTestControl = nil
+            self.busy = false
+            self.fixMessage = result.message
+            self.refresh()
+        }
+    }
+
     /// Installs the picked archive, which the compatibility check has cleared.
     private func performArchiveImport() {
         guard let archiveURL else { return }
@@ -490,13 +540,23 @@ final class AppModel: ObservableObject {
         let note: @Sendable (String) -> Void = { [weak self] text in
             self?.showProgress(text)
         }
+        let control = LaunchTest.Control()
+        if testAfterInstall {
+            launchTestControl = control
+            launchTestRunning = true
+        }
         Task { @MainActor in
+            defer {
+                self.launchTestRunning = false
+                self.launchTestControl = nil
+            }
             do {
                 let photon = self.photonTargets(appID: game.id)
-                let outcome = try await FixService.install(
+                let outcome = try await FixService.installAndTest(
                     appID: game.id, name: game.name,
                     archive: archiveURL, password: password,
                     photonRealtime: photon.0, photonVoice: photon.1,
+                    test: self.testAfterInstall, control: control,
                     progress: note)
                 self.recordFix(outcome, for: game)
                 self.showProgress(outcome.message)
@@ -601,8 +661,15 @@ final class AppModel: ObservableObject {
     private func applyFix(game: ManagedGame, folder: FixSource.FolderMatch,
                           note: @escaping @Sendable (String) -> Void) async {
         var downloadDir: URL?
+        let control = LaunchTest.Control()
+        if testAfterInstall {
+            launchTestControl = control
+            launchTestRunning = true
+        }
         defer {
             if let downloadDir { try? Paths.fm.removeItem(at: downloadDir) }
+            launchTestRunning = false
+            launchTestControl = nil
         }
         do {
             let archives = try await FixSource.fixArchives(inFolder: folder.url, progress: note)
@@ -629,10 +696,11 @@ final class AppModel: ObservableObject {
             }
 
             let photon = photonTargets(appID: game.id)
-            let outcome = try await FixService.install(
+            let outcome = try await FixService.installAndTest(
                 appID: game.id, name: game.name,
                 archive: entry, password: FixSource.defaultPassword,
                 photonRealtime: photon.0, photonVoice: photon.1,
+                test: testAfterInstall, control: control,
                 progress: note)
             recordFix(outcome, for: game)
             let matched = folder.isExact ? "" : " (matched “\(folder.name)” on online-fix.me)"

@@ -461,9 +461,10 @@ struct FixDiagnosisTests {
         #expect(!diagnosis.isBlocked)
     }
 
-    /// A probe that saw no window is the proof the files in place were not enough.
+    /// A probe that saw no window is reported, but it is not proof the loader is
+    /// wrong: a slow first launch looks exactly the same. Routing stays opt-in.
     @Test
-    func aLaunchWithNoWindowAsksForRouting() throws {
+    func aLaunchWithNoWindowIsReportedWithoutRouting() throws {
         let gameFolder = try game("nowindow")
         defer { try? FileManager.default.removeItem(at: gameFolder) }
         let scan = GameScan.read(folder: gameFolder, appID: 990003, name: "Game")
@@ -473,7 +474,7 @@ struct FixDiagnosisTests {
 
         let diagnosis = FixDiagnosis.run(scan: scan, package: nil, probe: probe)
         #expect(codes(diagnosis).contains("OF060"))
-        #expect(codes(diagnosis).contains("OF061"))
+        #expect(!codes(diagnosis).contains("OF061"))
     }
 
     /// A probe that saw the window leaves a working fix alone.

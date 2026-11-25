@@ -20,6 +20,11 @@ enum FixService {
         var keepRealAppID = false
         var error: String?
         var installed = false
+        /// The install test, when one ran.
+        var launchTest: LaunchTest.Result?
+        /// Changes the test made after seeing a known failure.
+        var testRepairs: [String] = []
+        var testNote: String?
 
         var message: String {
             if let error { return error }
@@ -29,6 +34,14 @@ enum FixService {
             }
             if !repaired.isEmpty {
                 parts.append("Put \(repaired.count) file(s) back from the fix pack.")
+            }
+            if !testRepairs.isEmpty {
+                parts.append("The test run repaired: \(testRepairs.joined(separator: ", ")).")
+            }
+            if let launchTest {
+                parts.append(launchTest.message)
+            } else if let testNote {
+                parts.append(testNote)
             }
             if parts.isEmpty {
                 parts.append("The fix is in place; nothing needed changing.")
@@ -56,6 +69,81 @@ enum FixService {
                            packageName: archive.lastPathComponent,
                            photonRealtime: photonRealtime, photonVoice: photonVoice,
                            progress: progress)
+    }
+
+    /// Installs, then starts the game once. A known failure gets one audited repair
+    /// and one more launch; success leaves every game and fix file untouched.
+    static func installAndTest(appID: Int, name: String, archive: URL, password: String?,
+                               photonRealtime: String = PhotonIDs.realtime,
+                               photonVoice: String = PhotonIDs.voice,
+                               test: Bool = true,
+                               control: LaunchTest.Control = LaunchTest.Control(),
+                               progress: @escaping @Sendable (String) -> Void) async throws -> Outcome {
+        var outcome = try await install(appID: appID, name: name, archive: archive,
+                                        password: password,
+                                        photonRealtime: photonRealtime,
+                                        photonVoice: photonVoice, progress: progress)
+        guard test, outcome.error == nil, outcome.installed else { return outcome }
+        outcome = await testInstalled(outcome, appID: appID, name: name,
+                                      control: control, progress: progress)
+        return outcome
+    }
+
+    /// Runs the install test for an outcome that is already on disk.
+    static func testInstalled(_ outcome: Outcome, appID: Int, name: String,
+                              control: LaunchTest.Control = LaunchTest.Control(),
+                              progress: @escaping @Sendable (String) -> Void = { _ in }) async -> Outcome {
+        var outcome = outcome
+        guard let folder = Store.gameFolder(for: appID, name: name) else { return outcome }
+        let scan = GameScan.read(folder: folder, appID: appID, name: name)
+        guard let exe = scan.exe else {
+            outcome.testNote = "The game has no Windows executable to test."
+            return outcome
+        }
+        progress("Testing the game (up to 2 minutes)…")
+        var result = await LaunchTest.run(appID: appID, name: name, exe: exe,
+                                          cancel: { control.isCancelled() },
+                                          progress: progress)
+        outcome.launchTest = result
+        if result.outcome == .failed, result.issue.repairable {
+            let repair = LaunchTestRepair.apply(result, appID: appID, name: name, progress: progress)
+            outcome.testRepairs = repair.actions
+            if repair.changed {
+                outcome.testNote = repair.notes.joined(separator: " ")
+                // The runner and wineserver need a moment to let the first process
+                // go; without it the second test can mistake the old process for a
+                // game the player already has open.
+                _ = await LaunchTest.waitUntilStopped(
+                    exe: exe, stem: exe.deletingPathExtension().lastPathComponent.lowercased(),
+                    timeout: 10)
+                progress("The fix was repaired. Testing it again…")
+                result = await LaunchTest.run(appID: appID, name: name, exe: exe,
+                                              cancel: { control.isCancelled() },
+                                              progress: progress)
+                outcome.launchTest = result
+            } else if !repair.notes.isEmpty {
+                outcome.testNote = repair.notes.joined(separator: " ")
+            }
+        }
+        if var recipe = FixPack.read(in: folder) {
+            recipe.launchTest = outcome.launchTest
+            if !repairNotes(outcome).isEmpty {
+                recipe.notes.append("Install test: " + repairNotes(outcome))
+            }
+            try? FixPack.writeRecipe(recipe, in: folder)
+        }
+        return outcome
+    }
+
+    private static func repairNotes(_ outcome: Outcome) -> String {
+        var parts: [String] = []
+        if !outcome.testRepairs.isEmpty {
+            parts.append(outcome.testRepairs.joined(separator: "; "))
+        }
+        if let test = outcome.launchTest, !test.issueDetail.isEmpty, test.outcome != .launched {
+            parts.append(test.issueDetail)
+        }
+        return parts.joined(separator: ". ")
     }
 
     /// The same, from an already extracted package (the tests use this).
