@@ -130,10 +130,10 @@ enum FixService {
         // A fix is not a single copy step: placing the loader can change what the
         // game imports, a proxy can reveal a second Steam API folder, and a Photon
         // chain can appear only after the loader is beside it. Read the folder again
-        // after every repair, up to four rounds, instead of trusting the first read.
+        // after every repair, up to six rounds, instead of trusting the first read.
         var latestScan = scan
         var reported = Set<String>()
-        for round in 1...4 {
+        for round in 1...6 {
             let audit = FixAudit.run(appID: appID, name: name, scan: latestScan,
                                      package: package, installed: plan,
                                      expectedAPI: expectedAPI)

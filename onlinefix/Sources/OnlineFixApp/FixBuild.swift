@@ -36,6 +36,8 @@ struct FixPlan: Sendable {
             case dllListEntries
             /// Drop the overlay from dlllist.txt.
             case dllListDropOverlay
+            /// Put the real AppID back in steam_appid.txt.
+            case steamAppID
         }
         let kind: Kind
         let path: URL
@@ -85,6 +87,15 @@ struct FixPlan: Sendable {
         guard let package else {
             plan.keepRealAppID = scan.usesSteamNetworking
             return plan
+        }
+
+        // A steam_appid.txt left by another game overrides the AppID Steam passes
+        // on, so OnlineFix authenticates as that game and the real one refuses the
+        // session. 480 is Spacewar and is left as the routing writes it.
+        if let file = scan.steamAppIDFile, let id = scan.steamAppID,
+           id != appID, id != 480 {
+            plan.edits.append(Edit(kind: .steamAppID, path: file))
+            plan.notes.append("steam_appid.txt is put back to \(appID).")
         }
 
         // Leftovers that stop a Godot or Unity game before main().

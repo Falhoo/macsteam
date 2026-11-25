@@ -56,9 +56,13 @@ enum FixApply {
                 changed = enablePhotonIntegration(at: edit.path)
             case .dllListEntries:
                 let names = edit.names.isEmpty ? dllListNames(for: plan) : edit.names
-                changed = ensureDLLListEntries(names, at: edit.path)
+                let ensured = ensureDLLListEntries(names, at: edit.path)
+                let pruned = pruneDLLList(at: edit.path, folder: folder)
+                changed = ensured || pruned
             case .dllListDropOverlay:
                 changed = dropDLLListLine("steamoverlay64.dll", at: edit.path)
+            case .steamAppID:
+                changed = setSteamAppID(at: edit.path, appID: appID)
             }
             if changed { record(edit.path, created: false, folder: folder, in: &result) }
         }
@@ -160,6 +164,20 @@ enum FixApply {
             throw error
         }
         return created
+    }
+
+    // MARK: - steam_appid.txt
+
+    /// Puts the game's real AppID back in the text file beside the executable.
+    /// Steam reads that file before the AppID it was started with, so a copy left
+    /// by another game makes OnlineFix answer as that game.
+    @discardableResult
+    static func setSteamAppID(at url: URL, appID: Int) -> Bool {
+        let original = TextFile.read(url)
+        let current = (original?.text ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard current != "\(appID)" else { return false }
+        return TextFile.write("\(appID)", to: url, like: original)
     }
 
     // MARK: - OnlineFix.ini
@@ -333,6 +351,32 @@ enum FixApply {
             .components(separatedBy: "\n")
     }
 
+    /// Drops a name whose DLL is not beside the list or the game. A list carried
+    /// over from another game names libraries that are not here, and OnlineFix64
+    /// stops on the first one it cannot load with error 126.
+    @discardableResult
+    static func pruneDLLList(at url: URL, folder: URL) -> Bool {
+        guard let text = read(url) else { return false }
+        let lines = dllListLines(text)
+        let listFolder = url.deletingLastPathComponent()
+        let kept = lines.filter { line in
+            let name = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { return false }
+            let lower = name.lowercased()
+            // The overlay and payload are written by the fix itself; keep them even
+            // when a copy is still in progress.
+            if FixPackage.payloadNames.contains(lower) || lower == "steamoverlay64.dll" {
+                return true
+            }
+            // A path is relative to the game or the list, not a bare file name.
+            let relative = name.replacingOccurrences(of: "\\", with: "/")
+            let candidates = [listFolder, folder].map { $0.appendingPathComponent(relative) }
+            return candidates.contains { Paths.fm.fileExists(atPath: $0.path) }
+        }
+        guard kept.count != lines.count else { return false }
+        return write(kept.joined(separator: "\n"), to: url)
+    }
+
     /// Drops a line, such as the overlay loader that stops on error 126.
     @discardableResult
     static func dropDLLListLine(_ prefix: String, at url: URL) -> Bool {
@@ -348,11 +392,13 @@ enum FixApply {
     // MARK: - Text
 
     private static func read(_ url: URL) -> String? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+        TextFile.text(url)
     }
 
     private static func write(_ text: String, to url: URL) -> Bool {
-        (try? text.data(using: .utf8)?.write(to: url, options: .atomic)) != nil
+        // Keep the ini or list in the encoding it arrived in. A UTF-16 OnlineFix.ini
+        // rewritten as UTF-8 is still readable, but converting it back is one less
+        // difference between the file the package shipped and the one left here.
+        TextFile.write(text, to: url, like: TextFile.read(url))
     }
 }

@@ -27,6 +27,13 @@ struct PortableExecutableTests {
         #expect(!pe.isManaged)
         #expect(pe.exportsOnlineFix)
         #expect(pe.imports.contains("kernel32.dll"))
+        // Imports are read by function too: a doorway that exports OnlineFix but
+        // not the function the game calls stops Windows at the import table.
+        let kernel = try #require(pe.importedFunctions["kernel32.dll"])
+        #expect(kernel.contains("GetLastError"))
+        #expect(pe.covers("timeGetTime"))
+        #expect(pe.covers("_timeGetTime@0"))
+        #expect(!pe.covers("NoSuchExport"))
     }
 
     /// BepInEx and the OnlineFix plugin are managed assemblies. The parser has to

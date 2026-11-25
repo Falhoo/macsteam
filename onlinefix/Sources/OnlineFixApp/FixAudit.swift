@@ -75,6 +75,11 @@ enum FixAudit {
             return needs64 ? !pe.is64BitNative : !pe.is32BitNative
         }
 
+        func missingExports(_ needed: Set<String>,
+                            from pe: PortableExecutable) -> [String] {
+            needed.filter { !pe.covers($0) }.sorted()
+        }
+
         func hasEdit(_ kind: FixPlan.Edit.Kind, at url: URL) -> Bool {
             report.plan.edits.contains { $0.kind == kind && $0.path.path == url.path }
         }
@@ -177,6 +182,27 @@ enum FixAudit {
                     detail: "\(apiDestination.lastPathComponent) is "
                         + "\(pe.architecture.rawValue) but the game runs as "
                         + "\(scan.is64Bit ? "64" : "32")-bit.",
+                    remedy: "Use the package made for this build of the game."))
+            }
+        }
+
+        // OF112: the file has the right name and bitness but not the function
+        // this game imports. Windows stops while loading the DLL, so no amount
+        // of file placement repairs it.
+        let apiToCheck = report.plan.copies.first {
+            $0.destination.standardizedFileURL.path == apiDestination.standardizedFileURL.path
+        }?.source ?? apiDestination
+        if let pe = PortableExecutable.read(apiToCheck), !pe.isManaged,
+           let needed = scan.coreImportedFunctions[expectedName], !needed.isEmpty {
+            let missing = missingExports(needed, from: pe)
+            if !missing.isEmpty {
+                report.findings.append(FixFinding(
+                    code: "OF112", level: .blocking,
+                    title: "The fix's Steam API is missing a function the game imports",
+                    detail: "\(expectedName) does not export "
+                        + missing.prefix(4).joined(separator: ", ")
+                        + (missing.count > 4 ? " and \(missing.count - 4) more" : "")
+                        + ", which the game's import table names.",
                     remedy: "Use the package made for this build of the game."))
             }
         }
@@ -296,6 +322,25 @@ enum FixAudit {
                     }
                 }
             }
+            // OF112: the doorway exports OnlineFix but not a function this
+            // game calls. Loading stops at the import table.
+            let proxyToCheck = report.plan.copies.first {
+                $0.destination.standardizedFileURL.path == target.standardizedFileURL.path
+            }?.source ?? target
+            if let pe = PortableExecutable.read(proxyToCheck), !pe.isManaged,
+               let needed = scan.coreImportedFunctions[proxy.name], !needed.isEmpty {
+                let missing = missingExports(needed, from: pe)
+                if !missing.isEmpty {
+                    report.findings.append(FixFinding(
+                        code: "OF112", level: .blocking,
+                        title: "The fix's \(proxy.name) is missing a function the game imports",
+                        detail: "\(proxy.name) does not export "
+                            + missing.prefix(4).joined(separator: ", ")
+                            + (missing.count > 4 ? " and \(missing.count - 4) more" : "")
+                            + ", which the game's import table names.",
+                        remedy: "Use a package whose doorway covers this game."))
+                }
+            }
             if !report.plan.wineDLLs.contains(target.lastPathComponent.lowercased()) {
                 report.plan.wineDLLs.append(target.lastPathComponent.lowercased())
             }
@@ -314,6 +359,18 @@ enum FixAudit {
                     + "import table names none of the fix's proxies.",
                 remedy: "The Steam API replacement can still work; if the game has no online "
                     + "play, run it with its own API and macSteam's routing."))
+        }
+
+        // A steam_appid.txt beside the executable overrides the AppID Steam passes
+        // to the game. If the package left one naming another game, the fix and the
+        // real game authenticate as two different apps.
+        if let file = scan.steamAppIDFile, let id = scan.steamAppID,
+           id != appID, id != 480 {
+            addEdit(.steamAppID, at: file, code: "OF018",
+                    title: "steam_appid.txt names another game",
+                    detail: "\(file.lastPathComponent) is read before the AppID Steam starts "
+                        + "the game with, so the game and the fix answer as the wrong app.",
+                    remedy: "Put the real AppID back in the file.")
         }
 
         // MARK: The Photon patch
@@ -390,7 +447,7 @@ enum FixAudit {
                 $0.destination.lastPathComponent.lowercased() == "onlinefix.ini"
             })?.destination ?? (exists(launchINI) ? launchINI : nil) {
                 if exists(ini) {
-                    let text = (try? String(contentsOf: ini, encoding: .utf8)) ?? ""
+                    let text = TextFile.text(ini) ?? ""
                     if !FixApply.hasPhotonIntegration(text) {
                         addEdit(.iniPhotonIntegration, at: ini, code: "OF109",
                                 title: "Photon is not switched on in OnlineFix.ini",
@@ -424,7 +481,7 @@ enum FixAudit {
                         remedy: "Copy the ini back from the package.")
             }
             if willExist(ini) {
-                let text = (try? String(contentsOf: ini, encoding: .utf8)) ?? ""
+                let text = TextFile.text(ini) ?? ""
                 func value(_ key: String) -> String? {
                     for raw in text.components(separatedBy: "\n") {
                         let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -475,7 +532,7 @@ enum FixAudit {
                         detail: "OnlineFix64 loads the payloads named in this list.",
                         remedy: "Copy the list back from the package.")
             }
-            let text = (try? String(contentsOf: list, encoding: .utf8)) ?? ""
+            let text = TextFile.text(list) ?? ""
             let lines = Set(text.components(separatedBy: .newlines)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
             var wanted: [String] = []
@@ -499,13 +556,34 @@ enum FixAudit {
             let hasBlankLine = rawLines.contains {
                 $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
+            // A name left by another game is not harmless: OnlineFix64 stops on
+            // the first DLL in the list it cannot load, with error 126.
+            let listFolder = list.deletingLastPathComponent()
+            let wantedLower = Set(wanted.map { $0.lowercased() })
+            let stale = ordered.contains { line in
+                let lower = line.lowercased()
+                if wantedLower.contains(lower) || FixPackage.payloadNames.contains(lower) {
+                    return false
+                }
+                let relative = line.replacingOccurrences(of: "\\", with: "/")
+                let candidates = [listFolder, launch, folder].map {
+                    $0.appendingPathComponent(relative)
+                }
+                return !candidates.contains { exists($0) }
+            }
             if !wanted.isEmpty,
-               !exists(list) || hasCustomNet || overlayOutOfPlace || hasBlankLine
+               !exists(list) || hasCustomNet || overlayOutOfPlace || hasBlankLine || stale
                 || wanted.contains(where: { !lines.contains($0.lowercased()) }) {
+                let title = stale ? "The loader's list names a file that is not here"
+                    : "The loader's list is incomplete"
+                let detail = stale
+                    ? "dlllist.txt names a DLL this game does not have, so OnlineFix64 "
+                        + "stops with error 126 before the game opens."
+                    : "dlllist.txt is missing " + wanted.joined(separator: ", ") + "."
                 addEdit(.dllListEntries, at: list, code: "OF110",
-                        title: "The loader's list is incomplete",
-                        detail: "dlllist.txt is missing " + wanted.joined(separator: ", ") + ".",
-                        remedy: "Add the missing names to dlllist.txt.", names: wanted,
+                        title: title, detail: detail,
+                        remedy: stale ? "Remove the names whose DLL is not here."
+                            : "Add the missing names to dlllist.txt.", names: wanted,
                         allowMissing: !exists(list))
             }
         }

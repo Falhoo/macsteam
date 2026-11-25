@@ -441,4 +441,59 @@ struct FixBuildTests {
         #expect(!changed)
         #expect(contents(list) == text)
     }
+
+    /// A loader list brought from another game names libraries that are not in
+    /// this folder. OnlineFix64 stops on the first one it cannot load.
+    @Test
+    func aLoaderListNameWithNoFileIsDropped() throws {
+        let game = try folder()
+        defer { try? FileManager.default.removeItem(at: game) }
+        let list = game.appendingPathComponent("dlllist.txt")
+        try write("OnlineFix64.dll\r\nSteamOverlay64.dll\r\nOtherGame.dll", to: list)
+        #expect(FixApply.pruneDLLList(at: list, folder: game))
+        let text = contents(list)
+        #expect(text.contains("OnlineFix64.dll"))
+        #expect(text.contains("SteamOverlay64.dll"))
+        #expect(!text.contains("OtherGame.dll"))
+        #expect(!FixApply.pruneDLLList(at: list, folder: game))
+    }
+
+    /// A DLL that is in the game folder is kept, even when it is not one of the
+    /// names the fix itself placed.
+    @Test
+    func aLoaderListNameWithAFileIsKept() throws {
+        let game = try folder()
+        defer { try? FileManager.default.removeItem(at: game) }
+        try write("plugin", to: game.appendingPathComponent("GamePlugin.dll"))
+        let list = game.appendingPathComponent("dlllist.txt")
+        try write("OnlineFix64.dll\nGamePlugin.dll", to: list)
+        #expect(!FixApply.pruneDLLList(at: list, folder: game))
+        #expect(contents(list).contains("GamePlugin.dll"))
+    }
+    /// Steam reads steam_appid.txt before the AppID it started the game with.
+    /// A file left by another game makes the fix and the game answer as different
+    /// apps, so the install puts the real one back.
+    @Test
+    func aWrongSteamAppIDFileIsPutBack() throws {
+        let game = try folder()
+        let package = try folder("package")
+        defer {
+            try? FileManager.default.removeItem(at: game)
+            try? FileManager.default.removeItem(at: package)
+        }
+        try write("exe", to: game.appendingPathComponent("Game.exe"))
+        let idFile = game.appendingPathComponent("steam_appid.txt")
+        try write("999", to: idFile)
+        try write("payload", to: package.appendingPathComponent("OnlineFix64.dll"))
+
+        let scan = GameScan.read(folder: game, appID: 42, name: "Game")
+        #expect(scan.steamAppID == 999)
+        let plan = FixPlan.build(appID: 42, name: "Game", scan: scan,
+                                 package: FixPackage.read(root: package))
+        #expect(plan.edits.contains { $0.kind == .steamAppID })
+        _ = try FixApply.apply(plan, appID: 42, folder: game)
+        #expect(contents(idFile) == "42")
+        #expect(GameScan.read(folder: game, appID: 42, name: "Game").steamAppID == 42)
+    }
+
 }

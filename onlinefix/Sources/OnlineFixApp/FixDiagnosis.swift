@@ -230,8 +230,8 @@ struct FixDiagnosis: Sendable {
                     detail: "\(file.lastPathComponent) asks Steam to report AppID \(id), but "
                         + "this game is \(scan.appID). The payload and the routing both answer "
                         + "for the wrong game, so online play cannot meet the right players.",
-                    remedy: "Remove \(file.lastPathComponent), or set it to \(scan.appID). "
-                        + "Steam's routing is the only AppID the fix should see."))
+                    remedy: "Put \(scan.appID) back in the file. The install does this "
+                        + "before the fix is copied, so the game and the fix answer as one app."))
             } else if scan.steamAppID == nil {
                 diagnosis.add(FixFinding(
                     code: "OF018", level: .notice,
@@ -318,6 +318,46 @@ struct FixDiagnosis: Sendable {
                 detail: "The fix's \(wanted) is put in \(scan.apiFolder?.lastPathComponent ?? "the game folder"), "
                     + "which is where the game looks for it.",
                 remedy: "Copy the fix's DLL there and keep the game's own file as a backup."))
+        }
+
+        // OF112: a game that names a function in its import table needs that
+        // exact export from the fix's DLL. A DLL of the right bitness with the
+        // wrong export set is the failure Windows reports as "procedure entry
+        // point not found" before any game code runs, and a copy of the fix for
+        // another build is the usual cause.
+        let importedAPI = scan.coreImportedFunctions[wanted] ?? []
+        if let api = package.apiItem(needs64: scan.is64Bit), !importedAPI.isEmpty,
+           let pe = PortableExecutable.read(api.url), !pe.isManaged {
+            let missing = importedAPI.filter { !pe.covers($0) }.sorted()
+            if !missing.isEmpty {
+                diagnosis.add(FixFinding(
+                    code: "OF112", level: .blocking,
+                    title: "The fix's Steam API is missing a function the game imports",
+                    detail: "The game imports " + missing.prefix(4).joined(separator: ", ")
+                        + (missing.count > 4 ? " and \(missing.count - 4) more" : "")
+                        + " from \(wanted), but the package's DLL does not export "
+                        + (missing.count == 1 ? "it" : "them") + ".",
+                    remedy: "Use the package made for this build of the game; this one "
+                        + "would stop with a missing entry point."))
+            }
+        }
+        // The same check for the doorway. A proxy commonly forwards the whole
+        // system DLL, but a package built for a newer Windows can be missing the
+        // one function this game calls.
+        for name in ["winmm.dll", "winhttp.dll", "version.dll", "dinput8.dll"] {
+            guard let item = package.item(named: name),
+                  let needed = scan.coreImportedFunctions[name], !needed.isEmpty,
+                  let pe = PortableExecutable.read(item.url), !pe.isManaged else { continue }
+            let missing = needed.filter { !pe.covers($0) }.sorted()
+            guard !missing.isEmpty else { continue }
+            diagnosis.add(FixFinding(
+                code: "OF112", level: .blocking,
+                title: "The fix's \(name) is missing a function the game imports",
+                detail: "The game imports " + missing.prefix(4).joined(separator: ", ")
+                    + " from \(name), but the package's doorway does not export "
+                    + (missing.count == 1 ? "it" : "them") + ".",
+                remedy: "Use a package whose \(name) covers this game, or one whose "
+                    + "Steam API replacement works without that doorway."))
         }
 
         // OF017: Valve's renderer beside the game.

@@ -53,6 +53,14 @@ struct GameScan: Sendable {
     /// Windows resolves at load, so a doorway is in it only when the game really asks
     /// for that DLL.
     let importedDLLs: Set<String>
+    /// The functions each imported module supplies, from every game executable and
+    /// helper DLL the scan read. An import the fix's DLL does not export is a load
+    /// failure, not a missing file.
+    let importedFunctions: [String: Set<String>]
+    /// The same, limited to the executable, the engine DLL and the DLLs beside
+    /// them. A bundled editor or server that the game never launches must not
+    /// decide which exports the running game needs.
+    let coreImportedFunctions: [String: Set<String>]
     let isIL2CPP: Bool
     let usesSteamNetworking: Bool
     let isGDK: Bool
@@ -130,7 +138,7 @@ struct GameScan: Sendable {
             $0.lastPathComponent.lowercased() == "steam_api64.dll"
         }
         let engine = engine(in: folder, executable: executable, launch: launch)
-        let imports = importedDLLs(in: folder, launch: launch, exe: executable)
+        let imported = imports(in: folder, launch: launch, exe: executable)
         let prefix = WineOverride.prefix(appID: appID)
         let appIDFile = steamAppIDFile(in: launch, folder: folder)
 
@@ -153,7 +161,9 @@ struct GameScan: Sendable {
             usesDotNet: executable.map(usesDotNet) ?? false,
             originalSteamAPI: originalSteamAPI(in: folder, launch: launch, apiDLLs: apiDLLs),
             isPhoton: PhotonFix.isPhotonGame(in: folder),
-            importedDLLs: imports,
+            importedDLLs: imported.dlls,
+            importedFunctions: imported.functions,
+            coreImportedFunctions: imported.coreFunctions,
             isIL2CPP: engine == .unityIL2CPP,
             usesSteamNetworking: SteamNetworking.uses(appID: appID, gameFolder: folder),
             isGDK: !files.isDisjoint(with: gdkFiles),
@@ -202,7 +212,13 @@ struct GameScan: Sendable {
     /// no native import table, and fix files describe the fix rather than the game, so
     /// both are left out. A game wrapped in a folder of its own is walked from the
     /// launch folder, where the executable lives.
-    static func importedDLLs(in folder: URL, launch: URL, exe: URL?) -> Set<String> {
+    struct ImportScan: Sendable {
+        var dlls: Set<String>
+        var functions: [String: Set<String>]
+        var coreFunctions: [String: Set<String>]
+    }
+
+    static func imports(in folder: URL, launch: URL, exe: URL?) -> ImportScan {
         var files: [URL] = []
         var seen = Set<String>()
         func add(_ url: URL) {
@@ -242,14 +258,35 @@ struct GameScan: Sendable {
             }
         }
         var imports = Set<String>()
+        var functions: [String: Set<String>] = [:]
+        var coreFunctions: [String: Set<String>] = [:]
         for file in files {
             if let pe = PortableExecutable.read(file) {
-                if !pe.isManaged { imports.formUnion(pe.imports) }
+                if !pe.isManaged {
+                    imports.formUnion(pe.imports)
+                    let name = file.lastPathComponent.lowercased()
+                    let core = file == exe
+                        || ["unityplayer.dll", "gameassembly.dll"].contains(name)
+                        || file.deletingLastPathComponent().standardizedFileURL
+                            == launch.standardizedFileURL
+                    for (module, names) in pe.importedFunctions {
+                        functions[module, default: []].formUnion(names)
+                        if core {
+                            coreFunctions[module, default: []].formUnion(names)
+                        }
+                    }
+                }
             } else {
                 imports.formUnion(PortableExecutable.fallbackImports(in: file))
             }
         }
-        return imports
+        return ImportScan(dlls: imports, functions: functions,
+                         coreFunctions: coreFunctions)
+    }
+
+    /// The names only, for the callers that decide which DLL is a doorway.
+    static func importedDLLs(in folder: URL, launch: URL, exe: URL?) -> Set<String> {
+        imports(in: folder, launch: launch, exe: exe).dlls
     }
 
     /// The game's own Steam API DLL, which a fix keeps beside the one it installs:
@@ -281,12 +318,11 @@ struct GameScan: Sendable {
     }
 
     private static func text(_ url: URL) -> String? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+        TextFile.text(url)
     }
 
     private static func lines(_ url: URL) -> [String] {
-        (text(url) ?? "").components(separatedBy: .newlines)
+        FixApply.dllListLines(text(url) ?? "")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
     }

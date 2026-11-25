@@ -26,12 +26,27 @@ struct PortableExecutable: Sendable, Equatable {
     let isDLL: Bool
     /// Lowercased module names, without a path: "kernel32.dll", "winhttp.dll".
     let imports: Set<String>
+    /// The functions imported from each module, keyed by the lowercased module
+    /// name. A proxy that does not export one of these makes Windows stop with
+    /// "procedure entry point not found" before the game opens.
+    let importedFunctions: [String: Set<String>]
     /// Export names, as the binary spells them. Proxies export "OnlineFix".
     let exports: Set<String>
 
     var is64BitNative: Bool { architecture == .x64 || architecture == .arm64 }
     var is32BitNative: Bool { architecture == .x86 }
     var exportsOnlineFix: Bool { exports.contains("OnlineFix") }
+
+    /// True when this binary exports a function under the name an import table
+    /// spells. A 32-bit C import is decorated (`_timeGetTime@0`); the export is
+    /// plain (`timeGetTime`), so both spellings name the same entry point.
+    func covers(_ imported: String) -> Bool {
+        if exports.contains(imported) { return true }
+        var bare = imported
+        if bare.hasPrefix("_") { bare.removeFirst() }
+        if let at = bare.firstIndex(of: "@") { bare = String(bare[..<at]) }
+        return exports.contains(bare)
+    }
 
     /// Last-resort names from a file the PE reader rejects. A test fixture or a
     /// stripped, non-standard binary can still spell the DLL it loads; the PE reader
@@ -103,6 +118,7 @@ struct PortableExecutable: Sendable, Equatable {
         let sections = sectionTable(data, start: tableStart, count: Int(sectionCount))
 
         var imports = Set<String>()
+        var importedFunctions: [String: Set<String>] = [:]
         if directoryCount > 1,
            let importRVA = u32(data, directoryStart + 8), importRVA != 0,
            let importOffset = rvaToOffset(importRVA, sections: sections) {
@@ -115,7 +131,17 @@ struct PortableExecutable: Sendable, Equatable {
                 if originalFirstThunk == 0, nameRVA == 0, firstThunk == 0 { break }
                 if nameRVA != 0, let offset = rvaToOffset(nameRVA, sections: sections),
                    let name = cString(data, at: offset) {
-                    imports.insert(name.lowercased())
+                    let module = name.lowercased()
+                    imports.insert(module)
+                    // The first thunk names the functions; the import address
+                    // table is the same list after the loader binds it. Use the
+                    // first when the linker wrote one, the other otherwise.
+                    let table = originalFirstThunk != 0 ? originalFirstThunk : firstThunk
+                    let names = importedNames(data: data, thunkRVA: table,
+                                              is64: is64Header, sections: sections)
+                    if !names.isEmpty {
+                        importedFunctions[module, default: []].formUnion(names)
+                    }
                 }
                 descriptor += 20
             }
@@ -196,6 +222,7 @@ struct PortableExecutable: Sendable, Equatable {
             isManaged: managed,
             isDLL: characteristics & 0x2000 != 0,
             imports: imports,
+            importedFunctions: importedFunctions,
             exports: exports
         )
     }
@@ -227,6 +254,37 @@ struct PortableExecutable: Sendable, Equatable {
         return sections
     }
 
+    /// The function names in one import thunk table. An ordinal import has no
+    /// name to compare against an export, so it is left out rather than guessed.
+    private static func importedNames(data: Data, thunkRVA: UInt32, is64: Bool,
+                                      sections: [Section]) -> Set<String> {
+        guard thunkRVA != 0, let table = rvaToOffset(thunkRVA, sections: sections)
+        else { return [] }
+        let entrySize = is64 ? 8 : 4
+        let ordinal: UInt64 = is64 ? 0x8000_0000_0000_0000 : 0x8000_0000
+        var names = Set<String>()
+        for index in 0..<4096 {
+            let entry = table + index * entrySize
+            guard entry + entrySize <= data.count else { break }
+            let value: UInt64
+            if is64 {
+                guard let raw = u64(data, entry) else { break }
+                value = raw
+            } else {
+                guard let raw = u32(data, entry) else { break }
+                value = UInt64(raw)
+            }
+            if value == 0 { break }
+            guard value & ordinal == 0 else { continue }
+            let nameRVA = UInt32(value & 0x7FFF_FFFF)
+            guard let offset = rvaToOffset(nameRVA, sections: sections),
+                  offset + 2 < data.count,
+                  let name = cString(data, at: offset + 2) else { continue }
+            names.insert(name)
+        }
+        return names
+    }
+
     private static func rvaToOffset(_ rva: UInt32, sections: [Section]) -> Int? {
         for section in sections {
             let span = max(section.virtualSize, section.rawSize)
@@ -251,6 +309,15 @@ struct PortableExecutable: Sendable, Equatable {
     private static func u16(_ data: Data, _ offset: Int) -> UInt16? {
         guard offset >= 0, offset + 2 <= data.count else { return nil }
         return UInt16(data[offset]) | UInt16(data[offset + 1]) << 8
+    }
+
+    private static func u64(_ data: Data, _ offset: Int) -> UInt64? {
+        guard offset >= 0, offset + 8 <= data.count else { return nil }
+        var value: UInt64 = 0
+        for index in 0..<8 {
+            value |= UInt64(data[offset + index]) << (8 * index)
+        }
+        return value
     }
 
     private static func u32(_ data: Data, _ offset: Int) -> UInt32? {
