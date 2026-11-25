@@ -366,6 +366,7 @@ struct FixBuildTests {
         try write("managed", to: game.appendingPathComponent("PEAK_Data/Managed/PhotonRealtime.dll"))
         try write("payload", to: package.appendingPathComponent("OnlineFix64.dll"))
         try write("doorstop", to: package.appendingPathComponent("winmm.dll"))
+        try write("drm", to: package.appendingPathComponent("StubDRM64.dll"))
         try write("[Main]\nIsPackaged=false\nProductId=9NMKF7LPVX44\n",
                   to: package.appendingPathComponent("OnlineFix.ini"))
 
@@ -375,6 +376,7 @@ struct FixBuildTests {
         let plan = FixPlan.build(appID: 1, name: "PEAK", scan: scan, package: read,
                                  diagnosis: FixDiagnosis.run(scan: scan, package: read))
         #expect(plan.copies.contains { $0.relative == "winhttp.dll" })
+        #expect(plan.copies.contains { $0.relative == "StubDRM64.dll" })
         #expect(plan.copies.contains { $0.relative == PhotonChain.plugin })
         #expect(plan.copies.contains { $0.relative == "BepInEx/core/BepInEx.dll" })
         #expect(plan.wineDLLs.contains("winhttp.dll"))
@@ -440,6 +442,49 @@ struct FixBuildTests {
 
         #expect(!changed)
         #expect(contents(list) == text)
+    }
+
+    /// Steam's DRM stub does load under Wine. Removing it makes a protected
+    /// game answer with Application load error 3, so a complete list keeps it.
+    @Test
+    func aStubDRMLineIsKept() throws {
+        let game = try folder("list-stubdrm")
+        defer { try? FileManager.default.removeItem(at: game) }
+        let list = game.appendingPathComponent("dlllist.txt")
+        let text = "SteamOverlay64.dll\r\nOnlineFix64.dll\r\nStubDRM64.dll"
+        try write(text, to: list)
+
+        #expect(!FixApply.ensureDLLListEntries(
+            ["SteamOverlay64.dll", "OnlineFix64.dll", "StubDRM64.dll"], at: list))
+        #expect(contents(list) == text)
+    }
+
+    /// A Unity crash reporter beside a game that loads the DRM stub is moved
+    /// aside. It is a crash reporter, not part of the game, and uninstall
+    /// restores it.
+    @Test
+    func aUnityCrashReporterIsMovedAsideForTheDRMStub() throws {
+        let game = try folder("stubdrm-crash-handler")
+        let package = try folder("stubdrm-crash-package")
+        defer {
+            try? FileManager.default.removeItem(at: game)
+            try? FileManager.default.removeItem(at: package)
+        }
+        try write("MZ", to: game.appendingPathComponent("Game.exe"))
+        try write("crash", to: game.appendingPathComponent("UnityCrashHandler64.exe"))
+        try write("payload", to: package.appendingPathComponent("OnlineFix64.dll"))
+        try write("drm", to: package.appendingPathComponent("StubDRM64.dll"))
+        try write("[Main]\nRealAppId=1\nFakeAppId=480\n",
+                  to: package.appendingPathComponent("OnlineFix.ini"))
+
+        let scan = GameScan.read(folder: game, appID: 1, name: "Game")
+        let read = FixPackage.read(root: package)
+        let plan = FixPlan.build(appID: 1, name: "Game", scan: scan, package: read,
+                                 diagnosis: FixDiagnosis.run(scan: scan, package: read))
+        #expect(plan.copies.contains { $0.relative == "StubDRM64.dll" })
+        #expect(plan.removals.contains {
+            $0.path.lastPathComponent == "UnityCrashHandler64.exe"
+        })
     }
 
     /// A loader list brought from another game names libraries that are not in

@@ -505,6 +505,24 @@ struct FixDiagnosisTests {
         #expect(diagnosis.findings.first { $0.code == "OF018" }?.level == .warning)
     }
 
+    /// Steam's DRM stub does load, but Unity's crash reporter ends the game
+    /// under Wine while the stub is working. The reporter is the thing to move.
+    @Test
+    func aUnityCrashReporterIsReportedForTheDRMStub() throws {
+        let gameFolder = try game("drm-handler")
+        let packageRoot = try package("drm-handler", extra: ["StubDRM64.dll"])
+        defer {
+            try? FileManager.default.removeItem(at: gameFolder)
+            try? FileManager.default.removeItem(at: packageRoot)
+        }
+        try write("crash", to: gameFolder.appendingPathComponent("UnityCrashHandler64.exe"))
+
+        let scan = GameScan.read(folder: gameFolder, appID: 1, name: "Game")
+        let diagnosis = FixDiagnosis.run(scan: scan, package: FixPackage.read(root: packageRoot))
+        #expect(codes(diagnosis).contains("OF113"))
+        #expect(diagnosis.findings.first { $0.code == "OF113" }?.level == .warning)
+    }
+
     /// An earlier install's list is read before a package is in hand. A trailing
     /// newline is enough to make OnlineFix64 treat it as an empty DLL name.
     @Test

@@ -189,6 +189,19 @@ struct FixPlan: Sendable {
             && !rootCustomOnly
             ? addVendorChain(to: &plan, scan: scan, package: package) : false
 
+        // Steam's DRM stub is allowed to load; Unity's crash reporter is what
+        // turns its work under Wine into a dead process. Move the reporter aside
+        // only for a game that actually receives the stub.
+        if plan.copies.contains(where: { FixApply.isDRMStubName($0.destination.lastPathComponent) }) {
+            for handler in FixApply.unityCrashHandlers(in: scan.launchFolder) {
+                plan.removals.append(Removal(
+                    path: handler,
+                    reason: "Unity's crash reporter stops the game while Steam's DRM stub loads"))
+                plan.notes.append("Moved \(handler.lastPathComponent) aside so the DRM stub "
+                    + "can finish without Unity's crash reporter ending the game.")
+            }
+        }
+
         // A stray copy at the game root is not where Windows looks.
         for leftover in scan.rootLoaderFiles {
             plan.removals.append(Removal(

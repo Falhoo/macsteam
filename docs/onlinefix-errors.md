@@ -29,9 +29,10 @@ safe repair with the files at hand; it does not invent a file.
 | OF106 | `SteamAPI_Init` fails, or the game exits at once | the package has the right `steam_api` DLL but it is not in the folder the game loads it from | copies it to the API destination the scan found |
 | OF107 | the game loads the untouched Steam API | two `steam_api` DLLs are reachable from the game | reports both and keeps the fix's copy where the game loads it |
 | OF109 | `SteamAPI_Init` fails, or Photon stays off | `OnlineFix.ini` is missing, has wrong app ids, or says `PhotonIntegration=false` | copies the package's ini back, corrects missing or wrong app ids, and replaces a false Photon value in place |
-| OF110 | the game starts but the payload or Photon patch never starts, or a box says `Failed to load  from the list. Error code: 126` | `dlllist.txt` is missing or does not name the payload; it names `Custom.net`; `SteamOverlay64.dll` is missing or is not the first line; a stale name from another game has no DLL here; or a blank line, usually a trailing newline, is read as an empty DLL name | creates or completes the list, removes `Custom.net` and names whose DLL is not beside the game, keeps `SteamOverlay64.dll` first when it exists, and writes the list with no blank lines or trailing newline |
-| OF111 | the game runs, but Wine loads its own proxy instead of the fix, or online stays off | NotProton exports its own `WINEDLLOVERRIDES`, so the prefix registry is not enough; the game's Steam launch options do not carry the same names; or Steam's generated compatibility runner splits a game path with spaces | writes the names into `localconfig.vdf` before asking Steam's live UI, repairs the installed runner so the executable stays whole, and reports it when no Steam account config could be written |
+| OF110 | the game starts but the payload or Photon patch never starts, or a box says `Failed to load  from the list. Error code: 126` | `dlllist.txt` is missing or does not name the payload; it names `Custom.net`; `SteamOverlay64.dll` is missing or is not the first line; a stale name from another game has no DLL here; or a blank line, usually a trailing newline, is read as an empty DLL name | creates or completes the list, removes `Custom.net` and names whose DLL is not beside the game, keeps `SteamOverlay64.dll` first when it exists and `StubDRM64.dll` when the package carries it, and writes the list with no blank lines or trailing newline |
+| OF111 | retired: an older pack still says the launch options are missing the fix names | earlier builds wrote `WINEDLLOVERRIDES` into Steam's launch options, where `/bin/sh` splits an unescaped semicolon list and a path with spaces was cut short | removes those old names from the game's launch options, drops the stale finding, and leaves the DLL preference to the installed runner, which reads the game folder itself |
 | OF112 | the game stops before its first frame with a missing entry point, Windows refuses to load `steam_api64.dll` or the doorway, or the fix installs but never starts | the fix's DLL has the right name and bitness but does not export a function the game's import table names, or the payload has no `OnlineFix` export for the doorway to call, usually because the package is for another build of the game | does not copy the mismatched DLL, reports the missing names, and asks for the package made for this build |
+| OF113 | the game shows no window or closes while the fix loads, though the payload and the DRM stub are both present | Steam's `StubDRM64.dll` does load under Wine, but Unity's crash reporter starts on the exception the stub causes and ends the game before its window stays open | keeps `StubDRM64.dll` and its `dlllist.txt` line, moves `UnityCrashHandler64.exe` or `UnityCrashHandler.exe` to `.onlinefix-removed`, and puts it back on uninstall |
 | OF004 | joining a server is refused | the game ships Easy Anti-Cheat or BattlEye, which OnlineFix and Wine cannot satisfy | refuses, and says why |
 | OF010 | the game starts offline, or exits at once | the fix's Steam API DLL is not the copy the game loads, or the game has none | puts the fix's DLL where the game loads it and keeps the game's own copy as a backup |
 | OF011 | the game exits at once, or never reaches the menu | the game runs at one bitness and the package only brought the other `steam_api` DLL | refuses, or uses the matching DLL when the package has both |
@@ -71,6 +72,30 @@ EOS auth with no refusal, but copying the Microsoft Store GDK package into it ma
 Photon answer `32755`. That is a store mismatch, not a missing Photon `Custom.dll`:
 the package has no `Custom.dll` and no BepInEx chain, and adding a generic one does not
 change the Steam ticket Photon sees.
+
+## The DRM stub and Unity's crash reporter
+
+`StubDRM64.dll` is Steam's DRM stub. On Windows it is required by some protected
+builds; under Wine it loads and does its work. Removing it makes the game answer with
+`Application load error 3:0000065432` (or `V:0000065432`), so the pack keeps the stub
+and its line in `dlllist.txt`.
+
+A Unity build can still close with no window. The cause is not the stub's `DllMain`:
+it is `UnityCrashHandler64.exe`, which starts when Unity takes the exception the stub
+causes and ends the process. The install moves that crash reporter to
+`UnityCrashHandler64.exe.onlinefix-removed`, records it in `recipe.json`, and uninstall
+restores it. The game, the stub and the rest of the fix are left alone. How to Fish is
+the case that proves this order: with the stub and the reporter removed, the full
+`SteamOverlay64.dll`, `OnlineFix64.dll` and `StubDRM64.dll` list reaches the main menu.
+
+## The launch options
+
+An install no longer writes `WINEDLLOVERRIDES` into Steam's launch options. The
+installed compatibility runner reads the game folder at launch and sets the DLL
+overrides itself, including a game path with spaces. Older packs that wrote the list
+are repaired: the names are removed from `localconfig.vdf`, leaving the player's other
+arguments, and a stale OF111 finding is dropped. This avoids the `/bin/sh` split of an
+unescaped `;` list, which made Steam launch nothing or the wrong command.
 
 ## The launch probe
 

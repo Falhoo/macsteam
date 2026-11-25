@@ -581,10 +581,15 @@ enum FixAudit {
             if exists(launch.appendingPathComponent("Custom.dll")) {
                 wanted.append("Custom.dll")
             }
+            for stub in ["StubDRM64.dll", "StubDRM.dll"]
+            where exists(launch.appendingPathComponent(stub)) {
+                wanted.append(stub)
+            }
             // The plan has not run yet; a name it is about to place is wanted.
             for copy in report.plan.copies {
                 let lower = copy.destination.lastPathComponent.lowercased()
                 if FixPackage.payloadNames.contains(lower) || lower == "steamoverlay64.dll"
+                    || FixApply.isDRMStubName(lower)
                     || (lower == "custom.dll"
                         && copy.destination.deletingLastPathComponent().standardizedFileURL
                             == launch.standardizedFileURL) {
@@ -631,6 +636,31 @@ enum FixAudit {
                         remedy: stale ? "Remove the names whose DLL is not here."
                             : "Add the missing names to dlllist.txt.", names: wanted,
                         allowMissing: !exists(list))
+            }
+
+            // Steam's DRM stub is allowed to load. Unity's crash reporter is
+            // what ends the game under Wine while the stub is working, so it is
+            // moved aside whenever the stub is in the folder and named by the list.
+            let stubPresent = exists(launch.appendingPathComponent("StubDRM64.dll"))
+                || exists(launch.appendingPathComponent("StubDRM.dll"))
+                || report.plan.copies.contains {
+                    FixApply.isDRMStubName($0.destination.lastPathComponent)
+                }
+            let stubNamed = ordered.contains { FixApply.isDRMStubName($0) }
+            if stubPresent || stubNamed {
+                for handler in FixApply.unityCrashHandlers(in: launch)
+                where !report.plan.removals.contains(where: { $0.path.path == handler.path }) {
+                    report.plan.removals.append(FixPlan.Removal(
+                        path: handler,
+                        reason: "Unity's crash reporter stops the game while Steam's DRM stub loads"))
+                    report.findings.append(FixFinding(
+                        code: "OF113", level: .warning,
+                        title: "Unity's crash reporter stops the DRM stub",
+                        detail: handler.lastPathComponent + " starts when Unity takes an "
+                            + "exception. While Steam's DRM stub is loaded under Wine, "
+                            + "that reporter ends the game before its window stays open.",
+                        remedy: "Move the crash reporter aside. Uninstall puts it back."))
+                }
             }
         }
 

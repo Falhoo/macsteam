@@ -46,7 +46,27 @@ struct LaunchOptionsStoreTests {
         let file = root.appendingPathComponent("userdata/123456/config/localconfig.vdf")
         let text = try String(contentsOf: file, encoding: .utf8)
         let options = LaunchOptionsStore.current(appID: 4001890, in: text)
-        #expect(options == "WINEDLLOVERRIDES=winmm=n,b;winhttp=n,b %command% -windowed")
+        #expect(options == "WINEDLLOVERRIDES='winmm=n,b;winhttp=n,b' %command% -windowed")
+        #expect(LaunchOptionsStore.has(appID: 4001890, assignments: ["winmm=n,b"],
+                                      steamRoot: root))
+    }
+
+    @Test
+    func anUnquotedOverrideListIsRewritten() throws {
+        let root = try steamRoot()
+        let file = root.appendingPathComponent("userdata/123456/config/localconfig.vdf")
+        var text = try String(contentsOf: file, encoding: .utf8)
+        text = text.replacingOccurrences(of: "%command% -windowed",
+                                         with: "WINEDLLOVERRIDES=winmm=n,b;winhttp=n,b %command%")
+        try text.write(to: file, atomically: true, encoding: .utf8)
+        let assignments = ["winmm=n,b", "winhttp=n,b"]
+        #expect(!LaunchOptionsStore.has(appID: 4001890, assignments: assignments,
+                                       steamRoot: root))
+        #expect(LaunchOptionsStore.apply(appID: 4001890, assignments: assignments,
+                                         steamRoot: root))
+        let updated = try String(contentsOf: file, encoding: .utf8)
+        #expect(LaunchOptionsStore.current(appID: 4001890, in: updated)
+                == "WINEDLLOVERRIDES='winmm=n,b;winhttp=n,b' %command%")
     }
 
     @Test

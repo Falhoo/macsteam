@@ -29,18 +29,18 @@ enum LaunchOptionsStore {
         return found
     }
 
-    /// Whether every name the fix needs is already in the app's launch options.
+    /// Whether every name the fix needs is already in the app's launch options,
+    /// written in a form the shell Steam starts can parse. A bare semicolon list
+    /// splits the command apart, so the value needs its quotes; comparing the
+    /// canonical form catches an older, unquoted copy too.
     static func has(appID: Int, assignments: [String], steamRoot: URL = Paths.steamSupport) -> Bool {
         guard !assignments.isEmpty else { return true }
         for file in configFiles(in: steamRoot) {
             guard let text = try? String(contentsOf: file, encoding: .utf8),
                   let options = current(appID: appID, in: text) else { continue }
-            let value = tokens(options).first { $0.hasPrefix("WINEDLLOVERRIDES=") }
-            guard let value else { continue }
-            let entries = environmentEntries(String(value.dropFirst("WINEDLLOVERRIDES=".count)))
-            let names = Set(entries.map { $0.0.lowercased() })
-            let wanted = Set(assignments.map { environmentEntry($0).0.lowercased() })
-            if wanted.isSubset(of: names) { return true }
+            let updated = mergingEnvironment("WINEDLLOVERRIDES", entries: assignments,
+                                              into: options)
+            if updated == options { return true }
         }
         return false
     }
@@ -90,7 +90,7 @@ enum LaunchOptionsStore {
                 list.append(pair)
             }
         }
-        let value = list.map { "\($0.0)=\($0.1)" }.joined(separator: ";")
+        let value = shellValue(list.map { "\($0.0)=\($0.1)" }.joined(separator: ";"))
         if !value.isEmpty {
             let command = words.firstIndex(of: "%command%") ?? words.count
             words.insert("\(prefix)\(value)", at: command)
@@ -112,9 +112,24 @@ enum LaunchOptionsStore {
         if list.isEmpty {
             words.remove(at: index)
         } else {
-            words[index] = prefix + list.map { "\($0.0)=\($0.1)" }.joined(separator: ";")
+            words[index] = prefix + shellValue(
+                list.map { "\($0.0)=\($0.1)" }.joined(separator: ";"))
         }
         return words.joined(separator: " ")
+    }
+
+    /// Steam runs launch options through `/bin/sh -c`. A semicolon list has to be
+    /// one shell word or the shell treats every entry after the first as a command.
+    private static func shellValue(_ value: String) -> String {
+        let special = CharacterSet(charactersIn: " \t\n;|&<>()$`\\\"'*?[]{}~#")
+        guard value.rangeOfCharacter(from: special) != nil else { return value }
+        // Single quotes survive Steam's own config writer and need no VDF
+        // escaping. If a name ever contains one, fall back to double quotes.
+        if !value.contains("'") { return "'\(value)'" }
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
     }
 
     private static func environmentEntry(_ text: String) -> (String, String) {
@@ -155,7 +170,7 @@ enum LaunchOptionsStore {
         var result = text
         if let key = body.range(of: "\"LaunchOptions\""),
            let open = body[key.upperBound...].firstIndex(of: "\""),
-           let close = body[body.index(after: open)...].firstIndex(of: "\"") {
+           let close = closingQuote(in: body, from: open) {
             result.replaceSubrange(body.index(after: open)..<close, with: escaped)
             return result
         }
@@ -193,14 +208,44 @@ enum LaunchOptionsStore {
         return result
     }
 
+    /// Finds the quote that ends a VDF string, skipping an escaped quote inside
+    /// the value. Launch options now contain escaped quotes of their own.
+    private static func closingQuote(in text: Substring, from open: String.Index) -> String.Index? {
+        var escaped = false
+        var index = text.index(after: open)
+        while index < text.endIndex {
+            let character = text[index]
+            if escaped {
+                escaped = false
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "\"" {
+                return index
+            }
+            index = text.index(after: index)
+        }
+        return nil
+    }
+
     private static func quotedValue(_ key: String, in block: String) -> String? {
         guard let range = block.range(of: "\"\(key)\"") else { return nil }
         let rest = block[range.upperBound...]
-        guard let open = rest.firstIndex(of: "\""),
-              let close = rest[rest.index(after: open)...].firstIndex(of: "\"") else {
-            return nil
+        guard let open = rest.firstIndex(of: "\"") else { return nil }
+        var value = ""
+        var escaped = false
+        for character in rest[rest.index(after: open)...] {
+            if escaped {
+                value.append(character)
+                escaped = false
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "\"" {
+                return value
+            } else {
+                value.append(character)
+            }
         }
-        return String(rest[rest.index(after: open)..<close])
+        return nil
     }
 
     private static func appBlock(in text: String, appID: Int) -> String? {

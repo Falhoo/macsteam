@@ -188,7 +188,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleLocalizations</key>
     <array><string>en</string><string>de</string><string>fr</string><string>it</string><string>zh-Hans</string></array>
     <key>CFBundleShortVersionString</key> <string>$MS_VERSION</string>
-    <key>CFBundleVersion</key>            <string>14</string>
+    <key>CFBundleVersion</key>            <string>16</string>
     <key>NotProtonVersion</key>           <string>$NP_APP_VERSION</string>
     <key>LSMinimumSystemVersion</key>     <string>26.0</string>
     <key>LSApplicationCategoryType</key>  <string>public.app-category.utilities</string>

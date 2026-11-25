@@ -272,6 +272,7 @@ struct FixDiagnosis: Sendable {
                 if missingPayload { problems.append("it does not name \(payload)") }
                 if customNet { problems.append("it names Custom.net, which is managed and "
                     + "cannot be loaded as a native DLL") }
+
                 if blank { problems.append("it has a blank line, which OnlineFix64 reads as "
                     + "an empty DLL name") }
                 if overlayLater { problems.append("it puts SteamOverlay64.dll after the "
@@ -474,12 +475,30 @@ struct FixDiagnosis: Sendable {
         if package.hasOverlay || !scan.overlayDLLs.isEmpty {
             diagnosis.add(FixFinding(
                 code: "OF015", level: .notice,
-                title: "The overlay would stop the game with error 126",
+                title: "The overlay needs its DllMain neutralized",
                 detail: "SteamOverlay64.dll loads Valve's renderer, and the compatibility layer "
-                    + "prunes that copy on every launch. The dialog it puts up runs before the "
-                    + "game reaches main().",
-                remedy: "Make its DllMain return TRUE and drop its line from dlllist.txt. The "
+                    + "prunes that copy on every launch. An original overlay opens an error 126 "
+                    + "dialog before the game reaches main().",
+                remedy: "The install makes its DllMain return TRUE and keeps the line. The "
                     + "overlay is cosmetic; the rest of the fix matters."))
+        }
+
+        // OF113: Steam's DRM stub needs Unity's crash reporter out of the way.
+        // The stub itself loads under Wine; the reporter is what ends the game
+        // once Unity takes an exception. Moving the reporter aside is reversible
+        // and does not change the game or the fix.
+        let drmStub = package.items.contains { FixApply.isDRMStubName($0.name) }
+        let handlers = FixApply.unityCrashHandlers(in: scan.launchFolder)
+        if drmStub, !handlers.isEmpty {
+            diagnosis.add(FixFinding(
+                code: "OF113", level: .warning,
+                title: "Unity's crash reporter stops the DRM stub",
+                detail: handlers.map(\.lastPathComponent).joined(separator: ", ")
+                    + " starts when Unity takes an exception. While Steam's DRM stub "
+                    + "is loaded under Wine, that reporter ends the game before its "
+                    + "window stays open.",
+                remedy: "Move the crash reporter aside. The install does this, and "
+                    + "uninstall puts it back."))
         }
 
         // OF016: the Wine prefix's DLL override.

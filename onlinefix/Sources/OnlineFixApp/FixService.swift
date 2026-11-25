@@ -225,7 +225,7 @@ enum FixService {
             FixPack.syncPhotonTargets(in: folder, targets: outcome.photonTargets)
         }
         prepareLaunchOverrides(recipe: recipe, folder: folder)
-        reportLaunchOptions(recipe: &recipe, folder: folder, outcome: &outcome)
+        clearLaunchWarning(recipe: &recipe, outcome: &outcome, folder: folder)
         progress("Packed the fix: \(recipe.entries.count) file(s) recorded in "
             + ".macsteam-onlinefix, so a repair needs no download.")
 
@@ -282,6 +282,12 @@ enum FixService {
                                                       sha256: hash, created: wrote.created))
             }
         }
+        // A repair can discover a file to move aside that the first install did
+        // not know about, such as Steam restoring Unity's crash reporter. Record
+        // it here or uninstall would leave it renamed.
+        for removed in applied.removed where !recipe.removed.contains(removed) {
+            recipe.removed.append(removed)
+        }
         try? FixPack.write(recipe, in: folder)
     }
 
@@ -319,7 +325,7 @@ enum FixService {
             // so it is checked and re-applied here; both calls are idempotent.
             ensureWine(recipe, appID: appID)
             prepareLaunchOverrides(recipe: recipe, folder: folder)
-            reportLaunchOptions(recipe: &recipe, folder: folder, outcome: &outcome)
+            clearLaunchWarning(recipe: &recipe, outcome: &outcome, folder: folder)
             auditRepair(&recipe, folder: folder, appID: appID, name: name, outcome: &outcome)
             recordPhotonPatch(&recipe, folder: folder)
             if recipe.picoPark2, let bundle = FixInstaller.nativeMacBundle(in: folder) {
@@ -330,6 +336,11 @@ enum FixService {
         }
 
         outcome.repaired = FixPack.restore(changed, in: folder)
+        // A restored file is byte-for-byte the pack's copy. The recipe was written
+        // against the game's old file, so update those records before verify runs
+        // again, or the same files look changed forever.
+        refreshEntries(outcome.repaired, recipe: &recipe, folder: folder)
+        try? FixPack.write(recipe, in: folder)
         auditRepair(&recipe, folder: folder, appID: appID, name: name, outcome: &outcome)
         recordPhotonPatch(&recipe, folder: folder)
         if recipe.picoPark2, let bundle = FixInstaller.nativeMacBundle(in: folder) {
@@ -337,7 +348,7 @@ enum FixService {
         }
         ensureWine(recipe, appID: appID)
         prepareLaunchOverrides(recipe: recipe, folder: folder)
-        reportLaunchOptions(recipe: &recipe, folder: folder, outcome: &outcome)
+        clearLaunchWarning(recipe: &recipe, outcome: &outcome, folder: folder)
 
         let remaining = FixPack.verify(in: folder)
         if !remaining.isEmpty {
@@ -424,7 +435,15 @@ enum FixService {
         guard let folder = Store.gameFolder(for: appID, name: name) else {
             return (nil, FixDiagnosis())
         }
-        let package = packageRoot.map { FixPackage.read(root: $0) }
+        // A read-only diagnosis after install has no archive open. The pack kept
+        // beside the game is the same package, so use its payload rather than
+        // reporting a package-less game.
+        let recipe = FixPack.read(in: folder)
+        let root = packageRoot ?? FixPack.folder(in: folder)
+            .appendingPathComponent(FixPack.payloadName, isDirectory: true)
+        let package = Paths.fm.fileExists(atPath: root.path)
+            ? FixPackage.read(root: root, archiveName: recipe?.packageName ?? "")
+            : nil
         let scan = GameScan.read(folder: folder, appID: appID, name: name)
         let candidates = PhotonPatch.scan(in: folder)
         return (scan, FixDiagnosis.run(scan: scan, package: package, candidates: candidates))
@@ -463,6 +482,22 @@ enum FixService {
         recipe.photonIDs = report.targets
         recipe.photonFileIDs = fileIDs
         try? FixPack.write(recipe, in: folder)
+    }
+
+    /// Re-reads the pack's entries after a restore. Only the paths that were
+    /// actually written are touched, so a file the pack could not restore still
+    /// shows up in the verify pass.
+    private static func refreshEntries(_ paths: [String], recipe: inout FixRecipe,
+                                       folder: URL) {
+        for relative in paths {
+            guard let file = FixPack.file(relative, in: folder),
+                  let values = try? file.resourceValues(forKeys: [.fileSizeKey]),
+                  let size = values.fileSize, let hash = Hash.sha256(file),
+                  let index = recipe.entries.firstIndex(where: { $0.path == relative })
+            else { continue }
+            recipe.entries[index].size = Int64(size)
+            recipe.entries[index].sha256 = hash
+        }
     }
 
     /// A path as the player sees it: from the game folder, or the last two parts.
@@ -522,54 +557,26 @@ enum FixService {
             .map(WineOverride.environment)
     }
 
-    /// Writes the same preference into the app's launch options. Doing it in the
-    /// background keeps install and repair synchronous, and the writer checks the
-    /// current value first, so this is a no-op once it is in place.
+    /// The runner detects OnlineFix beside the executable and sets Wine's DLL
+    /// overrides itself. Older packs also put the same list on Steam's launch
+    /// options, where a semicolon list is split by /bin/sh unless every semicolon
+    /// is escaped. Take that old copy out and let the runner own the environment.
     private static func prepareLaunchOverrides(recipe: FixRecipe, folder: URL) {
         let assignments = launchAssignments(recipe: recipe, folder: folder)
-        NSLog("OnlineFixLaunch pack app=%d dlls=%@ writer=%d", recipe.appID,
-              assignments.joined(separator: ","), OnlineFixLaunchBridge.writer == nil ? 0 : 1)
         guard !assignments.isEmpty else { return }
-        // Write the file first: the command line has no Steam UI, and a running
-        // client may be between writes. The bridge below asks the live UI as well,
-        // so a game launched without restarting Steam sees the same list.
-        _ = LaunchOptionsStore.apply(appID: recipe.appID, assignments: assignments)
-        guard let writer = OnlineFixLaunchBridge.writer else { return }
-        Task.detached(priority: .utility) {
-            let applied = await writer(recipe.appID, assignments)
-            NSLog("OnlineFixLaunch bridge app=%d ok=%d", recipe.appID, applied ? 1 : 0)
-        }
+        NSLog("OnlineFixLaunch clear app=%d dlls=%@", recipe.appID,
+              assignments.joined(separator: ","))
+        clearLaunchOverrides(appID: recipe.appID, assignments: assignments)
     }
 
-    /// The file copy is written before the bridge, so this normally stays quiet.
-    /// When no Steam account config could be written, say so instead of leaving a
-    /// fix whose proxies Wine will never prefer.
-    private static func reportLaunchOptions(recipe: inout FixRecipe, folder: URL,
-                                            outcome: inout Outcome) {
-        let assignments = launchAssignments(recipe: recipe, folder: folder)
-        guard !assignments.isEmpty else { return }
-        if LaunchOptionsStore.has(appID: recipe.appID, assignments: assignments) {
-            // A later repair may have written the options. Drop a warning from an
-            // earlier attempt so it does not outlive the problem it described.
-            if recipe.findings.contains(where: { $0.code == "OF111" }) {
-                recipe.findings.removeAll { $0.code == "OF111" }
-                outcome.findings.removeAll { $0.code == "OF111" }
-                recipe.notes.removeAll { $0.hasPrefix("OF111:") }
-                try? FixPack.write(recipe, in: folder)
-            }
-            return
-        }
-        let finding = FixFinding(
-            code: "OF111", level: .warning,
-            title: "Wine's launch options do not carry the fix's DLLs",
-            detail: "The name list in the prefix registry is ignored when NotProton exports "
-                + "its own WINEDLLOVERRIDES, so the launch options need the same names.",
-            remedy: "Start Steam once, then repair the fix. macSteam writes the list to "
-                + "the game's launch options.")
-        guard !recipe.findings.contains(where: { $0.code == finding.code }) else { return }
-        recipe.findings.append(finding)
-        recipe.notes.append(finding.line + ".")
-        outcome.findings.append(finding)
+    /// Old packs could leave OF111 behind when Steam's config was unreadable. The
+    /// warning no longer applies because the launch options are not the mechanism.
+    private static func clearLaunchWarning(recipe: inout FixRecipe, outcome: inout Outcome,
+                                           folder: URL) {
+        guard recipe.findings.contains(where: { $0.code == "OF111" }) else { return }
+        recipe.findings.removeAll { $0.code == "OF111" }
+        outcome.findings.removeAll { $0.code == "OF111" }
+        recipe.notes.removeAll { $0.hasPrefix("OF111:") }
         try? FixPack.write(recipe, in: folder)
     }
 

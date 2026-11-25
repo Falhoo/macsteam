@@ -117,6 +117,25 @@ enum FixApply {
         result.wrote.append(Wrote(relative: relative, created: created))
     }
 
+    /// Steam's DRM stub is a native loader for Windows only, but Wine can run it.
+    /// A Unity crash handler beside the game is what turns its exception into a
+    /// dead process, so the handler is moved aside rather than the stub dropped.
+    static func isDRMStubName(_ name: String) -> Bool {
+        ["stubdrm64.dll", "stubdrm.dll"].contains(name.lowercased())
+    }
+
+    /// Unity starts this helper when the game takes an exception. Under Wine the
+    /// helper can end the game while Steam's DRM stub is doing its work, so the
+    /// fix moves it aside. It is only a crash reporter; gameplay does not need it.
+    static func unityCrashHandlers(in folder: URL) -> [URL] {
+        let names: Set<String> = ["unitycrashhandler64.exe", "unitycrashhandler.exe"]
+        guard let contents = try? Paths.fm.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else { return [] }
+        return contents.filter { names.contains($0.lastPathComponent.lowercased()) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
     /// The native files dlllist.txt has to carry. Custom.net is deliberately not
     /// here: it is the managed companion Custom.dll loads itself, not a library for
     /// OnlineFix64 to load. Naming it makes OnlineFix64 stop with error 126.
@@ -125,7 +144,8 @@ enum FixApply {
         for copy in plan.copies {
             let name = copy.destination.lastPathComponent
             let lower = name.lowercased()
-            if FixPackage.payloadNames.contains(lower) || lower == "steamoverlay64.dll" {
+            if FixPackage.payloadNames.contains(lower) || lower == "steamoverlay64.dll"
+                || isDRMStubName(lower) {
                 names.append(name)
             }
             // A root Custom.dll is loaded through dlllist.txt. A plugin under
@@ -316,14 +336,15 @@ enum FixApply {
         let rawLines = dllListLines(original)
         var kept = rawLines.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        let removedCustomNet = kept.contains { $0.lowercased() == "custom.net" }
+        let wantedNames = names
+        let removedUnsafe = kept.contains { $0.lowercased() == "custom.net" }
         kept.removeAll { $0.lowercased() == "custom.net" }
         var seen = Set<String>()
         let deduped = kept.filter { seen.insert($0.lowercased()).inserted }
         let hadDuplicate = deduped.count != kept.count
         kept = deduped
         let present = Set(kept.map { $0.lowercased() })
-        let missing = names.filter { !present.contains($0.lowercased()) }
+        let missing = wantedNames.filter { !present.contains($0.lowercased()) }
         // A blank line at the end is not harmless: OnlineFix64 reads it as an empty
         // DLL name and stops with "Failed to load  from the list. Error code: 126".
         // So the list is rewritten without a trailing newline.
@@ -334,7 +355,7 @@ enum FixApply {
         let hadBlankLine = rawLines.contains {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
-        guard removedCustomNet || !missing.isEmpty || needsReorder || hadBlankLine
+        guard removedUnsafe || !missing.isEmpty || needsReorder || hadBlankLine
             || hadDuplicate else {
             return false
         }
