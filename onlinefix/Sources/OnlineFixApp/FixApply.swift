@@ -57,7 +57,8 @@ enum FixApply {
             case .dllListEntries:
                 let names = edit.names.isEmpty ? dllListNames(for: plan) : edit.names
                 let ensured = ensureDLLListEntries(names, at: edit.path)
-                let pruned = pruneDLLList(at: edit.path, folder: folder)
+                let keep = Set(names.map { $0.lowercased() })
+                let pruned = pruneDLLList(at: edit.path, folder: folder, keep: keep)
                 changed = ensured || pruned
             case .dllListDropOverlay:
                 changed = dropDLLListLine("steamoverlay64.dll", at: edit.path)
@@ -247,6 +248,7 @@ enum FixApply {
     static func enablePhotonIntegration(at url: URL) -> Bool {
         guard var text = read(url) else { return false }
         let wanted = ["true", "yes", "1"]
+        let lineEnding = text.contains("\r\n") ? "\r" : ""
         var lines = text.components(separatedBy: "\n")
         // A value that is already on is left alone. A value that is off is
         // replaced in place: adding a second key above it leaves whichever one
@@ -268,11 +270,11 @@ enum FixApply {
         } else if let index = lines.firstIndex(where: {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "[misc]"
         }) {
-            lines.insert("PhotonIntegration=true", at: index + 1)
+            lines.insert("PhotonIntegration=true\(lineEnding)", at: index + 1)
         } else {
             if lines.last?.isEmpty == false { lines.append("") }
-            lines.append("[Misc]")
-            lines.append("PhotonIntegration=true")
+            lines.append("[Misc]\(lineEnding)")
+            lines.append("PhotonIntegration=true\(lineEnding)")
         }
         text = lines.joined(separator: "\n")
         return write(text, to: url)
@@ -316,6 +318,10 @@ enum FixApply {
             .filter { !$0.isEmpty }
         let removedCustomNet = kept.contains { $0.lowercased() == "custom.net" }
         kept.removeAll { $0.lowercased() == "custom.net" }
+        var seen = Set<String>()
+        let deduped = kept.filter { seen.insert($0.lowercased()).inserted }
+        let hadDuplicate = deduped.count != kept.count
+        kept = deduped
         let present = Set(kept.map { $0.lowercased() })
         let missing = names.filter { !present.contains($0.lowercased()) }
         // A blank line at the end is not harmless: OnlineFix64 reads it as an empty
@@ -328,7 +334,8 @@ enum FixApply {
         let hadBlankLine = rawLines.contains {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
-        guard removedCustomNet || !missing.isEmpty || needsReorder || hadBlankLine else {
+        guard removedCustomNet || !missing.isEmpty || needsReorder || hadBlankLine
+            || hadDuplicate else {
             return false
         }
         kept.append(contentsOf: missing)
@@ -355,26 +362,25 @@ enum FixApply {
     /// over from another game names libraries that are not here, and OnlineFix64
     /// stops on the first one it cannot load with error 126.
     @discardableResult
-    static func pruneDLLList(at url: URL, folder: URL) -> Bool {
+    static func pruneDLLList(at url: URL, folder: URL, keep: Set<String>) -> Bool {
         guard let text = read(url) else { return false }
         let lines = dllListLines(text)
         let listFolder = url.deletingLastPathComponent()
+        let wanted = Set(keep.map { $0.lowercased() })
         let kept = lines.filter { line in
             let name = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { return false }
             let lower = name.lowercased()
-            // The overlay and payload are written by the fix itself; keep them even
-            // when a copy is still in progress.
-            if FixPackage.payloadNames.contains(lower) || lower == "steamoverlay64.dll" {
-                return true
-            }
+            // A name the plan is about to place is kept even before the copy.
+            if wanted.contains(lower) { return true }
             // A path is relative to the game or the list, not a bare file name.
             let relative = name.replacingOccurrences(of: "\\", with: "/")
             let candidates = [listFolder, folder].map { $0.appendingPathComponent(relative) }
             return candidates.contains { Paths.fm.fileExists(atPath: $0.path) }
         }
         guard kept.count != lines.count else { return false }
-        return write(kept.joined(separator: "\n"), to: url)
+        let newline = text.contains("\r\n") ? "\r\n" : "\n"
+        return write(kept.joined(separator: newline), to: url)
     }
 
     /// Drops a line, such as the overlay loader that stops on error 126.

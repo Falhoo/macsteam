@@ -66,6 +66,50 @@ struct FixDiagnosisTests {
         try data.write(to: url)
     }
 
+    /// A real enough PE for the bitness reader, with no exports. The payload
+    /// check needs a native DLL that is not a valid OnlineFix payload.
+    private func peHeader(machine: UInt16) -> Data {
+        var bytes = [UInt8](repeating: 0, count: 0x200)
+        bytes[0] = 0x4D; bytes[1] = 0x5A
+        func u16(_ value: UInt16, _ offset: Int) {
+            bytes[offset] = UInt8(value & 0xFF)
+            bytes[offset + 1] = UInt8((value >> 8) & 0xFF)
+        }
+        func u32(_ value: UInt32, _ offset: Int) {
+            bytes[offset] = UInt8(value & 0xFF)
+            bytes[offset + 1] = UInt8((value >> 8) & 0xFF)
+            bytes[offset + 2] = UInt8((value >> 16) & 0xFF)
+            bytes[offset + 3] = UInt8((value >> 24) & 0xFF)
+        }
+        u32(0x40, 0x3C)
+        bytes[0x40] = 0x50; bytes[0x41] = 0x45
+        u16(machine, 0x44)
+        u16(0, 0x46)
+        u16(0xE0, 0x54)
+        u16(0x2002, 0x56)
+        u16(0x020B, 0x58)
+        u32(0, 0x58 + 108)
+        return Data(bytes)
+    }
+
+
+    /// A payload of the right bitness that does not export OnlineFix is copied
+    /// and never started. It has to stop the install, not look installed.
+    @Test
+    func aPayloadWithoutTheOnlineFixExportIsRefused() throws {
+        let gameFolder = try game()
+        let packageRoot = try package()
+        defer {
+            try? FileManager.default.removeItem(at: gameFolder)
+            try? FileManager.default.removeItem(at: packageRoot)
+        }
+        try writeBinary(peHeader(machine: 0x8664),
+                        to: packageRoot.appendingPathComponent("OnlineFix64.dll"))
+        let scan = GameScan.read(folder: gameFolder, appID: 1, name: "Game")
+        let diagnosis = FixDiagnosis.run(scan: scan, package: FixPackage.read(root: packageRoot))
+        #expect(diagnosis.isBlocked)
+        #expect(codes(diagnosis).contains("OF112"))
+    }
     @Test
     func aPlainSteamworksGameHasNothingBlocking() throws {
         let gameFolder = try game()

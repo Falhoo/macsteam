@@ -207,6 +207,27 @@ enum FixAudit {
             }
         }
 
+        // The dynamic path when the API is already installed and no package
+        // source is available to inspect.
+        if let pe = PortableExecutable.read(apiToCheck), !pe.isManaged,
+           package?.isGDK != true {
+            let required = ["SteamAPI_GetHSteamPipe", "SteamAPI_GetHSteamUser",
+                            "SteamAPI_Shutdown"]
+            var missing = required.filter { !pe.covers($0) }
+            if !pe.covers("SteamAPI_Init") && !pe.covers("SteamInternal_SteamAPI_Init") {
+                missing.append("SteamAPI_Init")
+            }
+            if !missing.isEmpty {
+                report.findings.append(FixFinding(
+                    code: "OF112", level: .blocking,
+                    title: "The fix's Steam API is missing a core function",
+                    detail: "\(expectedName) does not export "
+                        + missing.joined(separator: ", ")
+                        + ", which the game uses to start and stop Steam.",
+                    remedy: "Use the package made for this build of the game."))
+            }
+        }
+
         let apis = Dictionary(grouping: scan.apiDLLs) { $0.lastPathComponent.lowercased() }
         for (name, copies) in apis where copies.count > 1 {
             let paths = copies.map { FixPlan.relative($0, in: folder) }.sorted()
@@ -254,6 +275,21 @@ enum FixAudit {
             }
             if let pe = PortableExecutable.read(target), !pe.isManaged {
                 let wrong = scan.is64Bit ? !pe.is64BitNative : !pe.is32BitNative
+                if !wrong, !pe.exportsOnlineFix {
+                    if PortableExecutable.read(payload.url)?.exportsOnlineFix == true {
+                        addCopy(payload.url, to: target, code: "OF100",
+                                title: "The OnlineFix payload cannot be started",
+                                detail: "\(target.lastPathComponent) has no OnlineFix export.",
+                                remedy: "Put the package's payload back.")
+                    } else {
+                        report.findings.append(FixFinding(
+                            code: "OF112", level: .blocking,
+                            title: "The fix payload does not export OnlineFix",
+                            detail: "\(target.lastPathComponent) has no OnlineFix export, "
+                                + "so the doorway cannot start it.",
+                            remedy: "Use the package's real OnlineFix payload."))
+                    }
+                }
                 if wrong {
                     if !wrongBitness(payload.url, needs64: scan.is64Bit) {
                         addCopy(payload.url, to: target, code: "OF101",
@@ -545,6 +581,16 @@ enum FixAudit {
             if exists(launch.appendingPathComponent("Custom.dll")) {
                 wanted.append("Custom.dll")
             }
+            // The plan has not run yet; a name it is about to place is wanted.
+            for copy in report.plan.copies {
+                let lower = copy.destination.lastPathComponent.lowercased()
+                if FixPackage.payloadNames.contains(lower) || lower == "steamoverlay64.dll"
+                    || (lower == "custom.dll"
+                        && copy.destination.deletingLastPathComponent().standardizedFileURL
+                            == launch.standardizedFileURL) {
+                    wanted.append(copy.destination.lastPathComponent)
+                }
+            }
             let hasCustomNet = lines.contains("custom.net")
             let rawLines = FixApply.dllListLines(text)
             let ordered = rawLines
@@ -556,15 +602,14 @@ enum FixAudit {
             let hasBlankLine = rawLines.contains {
                 $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
+            let hasDuplicate = ordered.count != Set(ordered.map { $0.lowercased() }).count
             // A name left by another game is not harmless: OnlineFix64 stops on
             // the first DLL in the list it cannot load, with error 126.
             let listFolder = list.deletingLastPathComponent()
             let wantedLower = Set(wanted.map { $0.lowercased() })
             let stale = ordered.contains { line in
                 let lower = line.lowercased()
-                if wantedLower.contains(lower) || FixPackage.payloadNames.contains(lower) {
-                    return false
-                }
+                if wantedLower.contains(lower) { return false }
                 let relative = line.replacingOccurrences(of: "\\", with: "/")
                 let candidates = [listFolder, launch, folder].map {
                     $0.appendingPathComponent(relative)
@@ -572,7 +617,8 @@ enum FixAudit {
                 return !candidates.contains { exists($0) }
             }
             if !wanted.isEmpty,
-               !exists(list) || hasCustomNet || overlayOutOfPlace || hasBlankLine || stale
+               !exists(list) || hasCustomNet || overlayOutOfPlace || hasBlankLine
+                || hasDuplicate || stale
                 || wanted.contains(where: { !lines.contains($0.lowercased()) }) {
                 let title = stale ? "The loader's list names a file that is not here"
                     : "The loader's list is incomplete"
@@ -595,6 +641,35 @@ enum FixAudit {
                 ? $0.destination : nil
         } ?? [])
         for overlay in overlays where exists(overlay) {
+            // A 32-bit overlay in a 64-bit game (or the reverse) can never be
+            // loaded. Remove it and its list line instead of stubbing a file the
+            // loader will still reject.
+            if let pe = PortableExecutable.read(overlay), !pe.isManaged {
+                let wrong = scan.is64Bit ? !pe.is64BitNative : !pe.is32BitNative
+                if wrong {
+                    report.plan.removals.append(FixPlan.Removal(
+                        path: overlay,
+                        reason: "it is \(pe.architecture.rawValue) in a "
+                            + "\(scan.is64Bit ? "64" : "32")-bit game"))
+                    let launchList = launch.appendingPathComponent("dlllist.txt")
+                    let list = report.plan.edits.first {
+                        $0.kind == .dllListEntries
+                    }?.path ?? (exists(launchList) ? launchList : nil)
+                    if let list, !report.plan.edits.contains(where: {
+                        $0.kind == .dllListDropOverlay && $0.path.path == list.path
+                    }) {
+                        report.plan.edits.append(FixPlan.Edit(kind: .dllListDropOverlay, path: list))
+                    }
+                    report.findings.append(FixFinding(
+                        code: "OF110", level: .warning,
+                        title: "The overlay is the wrong bitness",
+                        detail: "\(overlay.lastPathComponent) is \(pe.architecture.rawValue) "
+                            + "in a \(scan.is64Bit ? "64" : "32")-bit game, so the loader "
+                            + "stops with error 126.",
+                        remedy: "The repair removes the overlay and its loader line."))
+                    continue
+                }
+            }
             if !OverlayStub.isDisabled(at: overlay) {
                 if !report.plan.stubOverlay.contains(where: { $0.path == overlay.path }) {
                     report.plan.stubOverlay.append(overlay)

@@ -450,12 +450,17 @@ struct FixBuildTests {
         defer { try? FileManager.default.removeItem(at: game) }
         let list = game.appendingPathComponent("dlllist.txt")
         try write("OnlineFix64.dll\r\nSteamOverlay64.dll\r\nOtherGame.dll", to: list)
-        #expect(FixApply.pruneDLLList(at: list, folder: game))
+        #expect(FixApply.pruneDLLList(at: list, folder: game,
+                                    keep: ["OnlineFix64.dll", "SteamOverlay64.dll"]))
         let text = contents(list)
         #expect(text.contains("OnlineFix64.dll"))
         #expect(text.contains("SteamOverlay64.dll"))
         #expect(!text.contains("OtherGame.dll"))
-        #expect(!FixApply.pruneDLLList(at: list, folder: game))
+        // The list was CRLF; the repair keeps it that way.
+        #expect(text.contains("\r\n"))
+        #expect(!text.replacingOccurrences(of: "\r\n", with: "").contains("\n"))
+        #expect(!FixApply.pruneDLLList(at: list, folder: game,
+                                      keep: ["OnlineFix64.dll", "SteamOverlay64.dll"]))
     }
 
     /// A DLL that is in the game folder is kept, even when it is not one of the
@@ -467,8 +472,10 @@ struct FixBuildTests {
         try write("plugin", to: game.appendingPathComponent("GamePlugin.dll"))
         let list = game.appendingPathComponent("dlllist.txt")
         try write("OnlineFix64.dll\nGamePlugin.dll", to: list)
-        #expect(!FixApply.pruneDLLList(at: list, folder: game))
+        // The missing OnlineFix line is dropped; the DLL that is here stays.
+        #expect(FixApply.pruneDLLList(at: list, folder: game, keep: []))
         #expect(contents(list).contains("GamePlugin.dll"))
+        #expect(!contents(list).contains("OnlineFix64.dll"))
     }
     /// Steam reads steam_appid.txt before the AppID it started the game with.
     /// A file left by another game makes the fix and the game answer as different

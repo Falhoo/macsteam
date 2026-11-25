@@ -306,9 +306,10 @@ struct FixPlan: Sendable {
     /// A wrong build is refused here so the install does not write a DLL the game
     /// can never load and then only report it afterward.
     private static func fits(_ item: FixPackage.Item, scan: GameScan) -> Bool {
-        let isRole = FixPackage.payloadNames.contains(item.name)
-            || PortableExecutable.read(item.url)?.exportsOnlineFix == true
-        guard isRole, let pe = PortableExecutable.read(item.url), !pe.isManaged else {
+        // Any native DLL in the package is loaded into the game process, so it
+        // has to match the game's build. A wrong-bitness doorway or BepInEx
+        // preloader is the same load failure as a wrong-bitness payload.
+        guard let pe = PortableExecutable.read(item.url), !pe.isManaged else {
             return true
         }
         return scan.is64Bit ? pe.is64BitNative : pe.is32BitNative

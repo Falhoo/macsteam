@@ -341,6 +341,28 @@ struct FixDiagnosis: Sendable {
                         + "would stop with a missing entry point."))
             }
         }
+
+        // The dynamic path: Unity Mono and Unreal resolve SteamAPI_* at run time,
+        // so a static import scan can miss a replacement that lacks the core
+        // entry points. These are present in every real Steam API build.
+        if let api = package.apiItem(needs64: scan.is64Bit), !package.isGDK,
+           let pe = PortableExecutable.read(api.url), !pe.isManaged {
+            let required = ["SteamAPI_GetHSteamPipe", "SteamAPI_GetHSteamUser",
+                            "SteamAPI_Shutdown"]
+            var missing = required.filter { !pe.covers($0) }
+            if !pe.covers("SteamAPI_Init") && !pe.covers("SteamInternal_SteamAPI_Init") {
+                missing.append("SteamAPI_Init")
+            }
+            if !missing.isEmpty {
+                diagnosis.add(FixFinding(
+                    code: "OF112", level: .blocking,
+                    title: "The fix's Steam API is missing a core function",
+                    detail: "The package's \(wanted) does not export "
+                        + missing.joined(separator: ", ")
+                        + ", which the game uses to start and stop Steam.",
+                    remedy: "Use the package made for this build of the game."))
+            }
+        }
         // The same check for the doorway. A proxy commonly forwards the whole
         // system DLL, but a package built for a newer Windows can be missing the
         // one function this game calls.
@@ -358,6 +380,25 @@ struct FixDiagnosis: Sendable {
                     + (missing.count == 1 ? "it" : "them") + ".",
                 remedy: "Use a package whose \(name) covers this game, or one whose "
                     + "Steam API replacement works without that doorway."))
+        }
+
+        // The doorway reaches the payload through its OnlineFix export. A
+        // payload of the right bitness that does not export it is copied and
+        // then never starts, which looks like a fix that installs and does
+        // nothing.
+        if !package.isGDK {
+            for payload in package.payloadItems {
+                guard let pe = PortableExecutable.read(payload.url), !pe.isManaged,
+                      scan.is64Bit ? pe.is64BitNative : pe.is32BitNative else { continue }
+                guard !pe.exportsOnlineFix else { continue }
+                diagnosis.add(FixFinding(
+                    code: "OF112", level: .blocking,
+                    title: "The fix payload does not export OnlineFix",
+                    detail: "\(payload.name) is a native DLL but has no OnlineFix export, "
+                        + "so the doorway cannot start it.",
+                    remedy: "Use the package's real OnlineFix payload; this file is "
+                        + "not one."))
+            }
         }
 
         // OF017: Valve's renderer beside the game.
