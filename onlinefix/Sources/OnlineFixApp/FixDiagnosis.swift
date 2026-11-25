@@ -476,10 +476,17 @@ struct FixDiagnosis: Sendable {
         // nothing. PEAK's package ships winmm.dll, while UnityPlayer imports WINHTTP.
         let shippedDoorways = ["winmm.dll", "winhttp.dll", "version.dll"]
             .filter { package.item(named: $0) != nil }
+        // A package can ship more than one doorway, and a Unity game's engine DLL can
+        // import more than one of them. How to Fish imports both WINHTTP and WINMM
+        // while its package ships winmm, so checking only the first import named a
+        // doorway the package did not have and warned about a fix that works.
+        let importedShippedDoorways = shippedDoorways.filter {
+            scan.importedDLLs.contains($0)
+        }
         let gameDoorway = PhotonChain.doorway(in: scan.folder, exe: scan.exe)
         let canAddDoorway = scan.isPhoton && (gameDoorway.map { bundleHas($0) } ?? false)
         if let gameDoorway, !shippedDoorways.isEmpty,
-           !shippedDoorways.contains(gameDoorway) {
+           importedShippedDoorways.isEmpty {
             if canAddDoorway {
                 diagnosis.add(FixFinding(
                     code: "OF035", level: .notice,

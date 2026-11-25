@@ -92,11 +92,28 @@ else
     SRC_PAYLOAD="$NP_SOURCE_APP/Contents/Resources/NotProtonApp_NotProtonApp.bundle/Contents/Resources/payload"
     [ -d "$SRC_PAYLOAD" ] || die "That NotProton app doesn't contain the expected components folder."
     mkdir -p "$PAYLOAD_DEST"
+    # The prebuilt NotProton runner joins its arguments with "$*", which splits a
+    # game path that contains spaces and hides OnlineFix from the loader scan. Keep
+    # the runner from this source tree, which captures the executable argument whole.
+    KEEP_RUNNER="$TMP/run.macsteam"
+    cp "$PAYLOAD_DEST/run" "$KEEP_RUNNER" 2>/dev/null || true
     rsync -a --delete "$SRC_PAYLOAD/" "$PAYLOAD_DEST/"
+    if [ -f "$KEEP_RUNNER" ]; then
+        cp "$KEEP_RUNNER" "$PAYLOAD_DEST/run"
+        chmod +x "$PAYLOAD_DEST/run"
+    fi
     echo "Copied components from: $NP_SOURCE_APP"
     fi
 fi
 [ -f "$PAYLOAD_DEST/notproton.dylib" ] || die "NotProton's components are incomplete (notproton.dylib missing)."
+# The payload folder is ignored in this repository, so the patch is what a fresh
+# checkout has. Applying it to an already-fixed runner is a no-op.
+RUNNER_PATCH="$ROOT/patches/notproton-run-whole-path.patch"
+if [ -f "$RUNNER_PATCH" ]; then
+    ( cd "$PAYLOAD_DEST" && patch -p1 -N -f < "$RUNNER_PATCH" >/dev/null 2>&1 ) || true
+    rm -f "$PAYLOAD_DEST/run.rej" "$PAYLOAD_DEST/run.orig"
+fi
+grep -q 'np_launch_exe=' "$PAYLOAD_DEST/run"     || die "The NotProton runner is missing the whole-path launch fix."
 
 # ---------------------------------------------------------------- 4. macSteam dylib
 say "Building macSteam's dylib (this downloads and compiles Dobby, a few minutes the first time)"

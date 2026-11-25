@@ -124,18 +124,41 @@ enum FixService {
         let expectedAPI = plan.copies.first {
             FixPackage.apiNames.contains($0.destination.lastPathComponent.lowercased())
         }?.destination
-        let audit = FixAudit.run(appID: appID, name: name, scan: GameScan.read(
-            folder: folder, appID: appID, name: name), package: package,
-            installed: plan, expectedAPI: expectedAPI)
-        outcome.findings.append(contentsOf: audit.findings)
-        if audit.changed {
-            progress("Checking the installed fix against the game: "
+        // A fix is not a single copy step: placing the loader can change what the
+        // game imports, a proxy can reveal a second Steam API folder, and a Photon
+        // chain can appear only after the loader is beside it. Read the folder again
+        // after every repair, up to four rounds, instead of trusting the first read.
+        var latestScan = scan
+        var reported = Set<String>()
+        for round in 1...4 {
+            let audit = FixAudit.run(appID: appID, name: name, scan: latestScan,
+                                     package: package, installed: plan,
+                                     expectedAPI: expectedAPI)
+            for finding in audit.findings {
+                let key = finding.code + "|" + finding.title + "|" + finding.detail
+                guard !reported.contains(key) else { continue }
+                reported.insert(key)
+                outcome.findings.append(finding)
+            }
+            guard audit.changed else { break }
+            progress("Checking the installed fix against the game"
+                + (round > 1 ? " (round \(round))" : "") + ": "
                 + "\(audit.repairs.count) file(s) to put right.")
             let repaired = try FixApply.apply(audit.plan, appID: appID, folder: folder,
                                               progress: progress)
             applied = merge(applied, repaired)
             plan.notes.append(contentsOf: audit.notes)
             plan.wineDLLs = Array(Set(plan.wineDLLs + audit.plan.wineDLLs)).sorted()
+            // Keep the audit's copies in the next round's installed view, or a
+            // repair that fixed a file would look missing on the next read.
+            for copy in audit.plan.copies where
+                !plan.copies.contains(where: { $0.relative == copy.relative }) {
+                plan.copies.append(copy)
+            }
+            for removal in audit.plan.removals where
+                !plan.removals.contains(where: { $0.path == removal.path }) {
+                plan.removals.append(removal)
+            }
             // A Photon game whose chain only the consistency pass completed still
             // needs its app id patched, or the new plugin connects with the game's id.
             let chainNames: Set<String> = ["custom.dll", "bepinex.preloader.dll"]
@@ -144,9 +167,11 @@ enum FixService {
             }) {
                 plan.photonSwap = true
             }
+            latestScan = GameScan.read(folder: folder, appID: appID, name: name)
         }
 
-        if plan.picoPark2, let bundle = scan.macBundle {
+        if plan.picoPark2, let bundle = latestScan.macBundle {
+
             _ = try PicoPark2Patch.setEnabled(true, app: bundle)
         }
         var photonWritten: [String] = []
@@ -197,6 +222,7 @@ enum FixService {
             FixPack.syncPhotonTargets(in: folder, targets: outcome.photonTargets)
         }
         prepareLaunchOverrides(recipe: recipe, folder: folder)
+        reportLaunchOptions(recipe: &recipe, folder: folder, outcome: &outcome)
         progress("Packed the fix: \(recipe.entries.count) file(s) recorded in "
             + ".macsteam-onlinefix, so a repair needs no download.")
 
@@ -268,6 +294,20 @@ enum FixService {
             return outcome
         }
         outcome.findings = recipe.findings
+        // A pack made by an older scanner can carry a warning the game no longer
+        // justifies, such as OF035 when the game imports a doorway the package
+        // actually ships. Re-read the game and drop that stale warning.
+        let current = GameScan.read(folder: folder, appID: appID, name: name)
+        let doorwayNames = Set(WineOverride.proxies)
+        let carriedDoorways = Set(recipe.entries.map {
+            ($0.path as NSString).lastPathComponent.lowercased()
+        }).intersection(doorwayNames)
+        if !carriedDoorways.isDisjoint(with: current.importedDLLs) {
+            recipe.findings.removeAll { $0.code == "OF035" }
+            outcome.findings.removeAll { $0.code == "OF035" }
+            recipe.notes.removeAll { $0.hasPrefix("OF035:") }
+            try? FixPack.write(recipe, in: folder)
+        }
 
         let changed = FixPack.verify(in: folder)
         guard !changed.isEmpty else {
@@ -275,6 +315,7 @@ enum FixService {
             // so it is checked and re-applied here; both calls are idempotent.
             ensureWine(recipe, appID: appID)
             prepareLaunchOverrides(recipe: recipe, folder: folder)
+            reportLaunchOptions(recipe: &recipe, folder: folder, outcome: &outcome)
             auditRepair(&recipe, folder: folder, appID: appID, name: name, outcome: &outcome)
             recordPhotonPatch(&recipe, folder: folder)
             if recipe.picoPark2, let bundle = FixInstaller.nativeMacBundle(in: folder) {
@@ -292,6 +333,7 @@ enum FixService {
         }
         ensureWine(recipe, appID: appID)
         prepareLaunchOverrides(recipe: recipe, folder: folder)
+        reportLaunchOptions(recipe: &recipe, folder: folder, outcome: &outcome)
 
         let remaining = FixPack.verify(in: folder)
         if !remaining.isEmpty {
@@ -455,14 +497,23 @@ enum FixService {
     /// files actually present are named: a native preference for a missing name
     /// would stop Wine falling back to its own copy.
     private static func launchAssignments(recipe: FixRecipe, folder: URL) -> [String] {
+        // A game can keep its executable in a subfolder ("How to Fish/How to Fish.exe").
+        // The DLLs are beside that executable, not at the Steam install root, so a
+        // root-only existence check silently produced no launch options at all.
+        let carried = Set(recipe.entries.map {
+            ($0.path as NSString).lastPathComponent.lowercased()
+        })
+        func present(_ name: String) -> Bool {
+            carried.contains(name)
+                || Paths.fm.fileExists(atPath: folder.appendingPathComponent(name).path)
+        }
         var names = Set(recipe.wineDLLs.map { $0.lowercased() })
         names.formUnion(WineOverride.emulators)
-        for proxy in WineOverride.proxies
-        where Paths.fm.fileExists(atPath: folder.appendingPathComponent(proxy).path) {
+        for proxy in WineOverride.proxies where present(proxy) {
             names.insert(proxy)
         }
         return names
-            .filter { Paths.fm.fileExists(atPath: folder.appendingPathComponent($0).path) }
+            .filter(present)
             .sorted()
             .map(WineOverride.environment)
     }
@@ -474,14 +525,61 @@ enum FixService {
         let assignments = launchAssignments(recipe: recipe, folder: folder)
         NSLog("OnlineFixLaunch pack app=%d dlls=%@ writer=%d", recipe.appID,
               assignments.joined(separator: ","), OnlineFixLaunchBridge.writer == nil ? 0 : 1)
-        guard !assignments.isEmpty,
-              let writer = OnlineFixLaunchBridge.writer else { return }
-        Task.detached(priority: .utility) { _ = await writer(recipe.appID, assignments) }
+        guard !assignments.isEmpty else { return }
+        // Write the file first: the command line has no Steam UI, and a running
+        // client may be between writes. The bridge below asks the live UI as well,
+        // so a game launched without restarting Steam sees the same list.
+        _ = LaunchOptionsStore.apply(appID: recipe.appID, assignments: assignments)
+        guard let writer = OnlineFixLaunchBridge.writer else { return }
+        Task.detached(priority: .utility) {
+            let applied = await writer(recipe.appID, assignments)
+            NSLog("OnlineFixLaunch bridge app=%d ok=%d", recipe.appID, applied ? 1 : 0)
+        }
+    }
+
+    /// The file copy is written before the bridge, so this normally stays quiet.
+    /// When no Steam account config could be written, say so instead of leaving a
+    /// fix whose proxies Wine will never prefer.
+    private static func reportLaunchOptions(recipe: inout FixRecipe, folder: URL,
+                                            outcome: inout Outcome) {
+        let assignments = launchAssignments(recipe: recipe, folder: folder)
+        guard !assignments.isEmpty else { return }
+        if LaunchOptionsStore.has(appID: recipe.appID, assignments: assignments) {
+            // A later repair may have written the options. Drop a warning from an
+            // earlier attempt so it does not outlive the problem it described.
+            if recipe.findings.contains(where: { $0.code == "OF111" }) {
+                recipe.findings.removeAll { $0.code == "OF111" }
+                outcome.findings.removeAll { $0.code == "OF111" }
+                recipe.notes.removeAll { $0.hasPrefix("OF111:") }
+                try? FixPack.write(recipe, in: folder)
+            }
+            return
+        }
+        let finding = FixFinding(
+            code: "OF111", level: .warning,
+            title: "Wine's launch options do not carry the fix's DLLs",
+            detail: "The name list in the prefix registry is ignored when NotProton exports "
+                + "its own WINEDLLOVERRIDES, so the launch options need the same names.",
+            remedy: "Start Steam once, then repair the fix. macSteam writes the list to "
+                + "the game's launch options.")
+        guard !recipe.findings.contains(where: { $0.code == finding.code }) else { return }
+        recipe.findings.append(finding)
+        recipe.notes.append(finding.line + ".")
+        outcome.findings.append(finding)
+        try? FixPack.write(recipe, in: folder)
     }
 
     private static func clearLaunchOverrides(appID: Int, assignments: [String]) {
-        guard !assignments.isEmpty,
-              let clearer = OnlineFixLaunchBridge.clearer else { return }
-        Task.detached(priority: .utility) { _ = await clearer(appID, assignments) }
+        guard !assignments.isEmpty else { return }
+        guard let clearer = OnlineFixLaunchBridge.clearer else {
+            _ = LaunchOptionsStore.clear(appID: appID, assignments: assignments)
+            return
+        }
+        Task.detached(priority: .utility) {
+            let cleared = await clearer(appID, assignments)
+            if !cleared {
+                _ = LaunchOptionsStore.clear(appID: appID, assignments: assignments)
+            }
+        }
     }
 }

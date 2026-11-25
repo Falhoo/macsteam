@@ -301,6 +301,27 @@ struct FixDiagnosisTests {
         #expect(!codes(diagnosis).contains("OF012"))
     }
 
+    /// How to Fish imports both WINHTTP and WINMM from UnityPlayer, while its
+    /// package ships winmm. The first imported doorway is not the one the package
+    /// has, but a later one is, so Wine loads the fix.
+    @Test
+    func aShippedDoorwayTheGameImportsIsNotAWarning() throws {
+        let gameFolder = try game("two-doorways")
+        let packageRoot = try package("two-doorways")
+        defer {
+            try? FileManager.default.removeItem(at: gameFolder)
+            try? FileManager.default.removeItem(at: packageRoot)
+        }
+        try write("\u{0}WINHTTP.dll\u{0}WINMM.dll\u{0}",
+                  to: gameFolder.appendingPathComponent("Game.exe"))
+
+        let scan = GameScan.read(folder: gameFolder, appID: 100, name: "Game")
+        #expect(scan.importedDLLs.contains("winmm.dll"))
+        #expect(scan.importedDLLs.contains("winhttp.dll"))
+        let diagnosis = FixDiagnosis.run(scan: scan, package: FixPackage.read(root: packageRoot))
+        #expect(!codes(diagnosis).contains("OF035"))
+    }
+
     /// PEAK's package starts through winmm.dll, but its UnityPlayer imports WINHTTP.
     /// The fix installs, the doorway never loads, and nothing it carries runs.
     @Test

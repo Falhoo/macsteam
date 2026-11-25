@@ -1,0 +1,32 @@
+--- a/run
++++ b/run
+@@ -8,6 +8,18 @@
+ # hook_launch.c passes the launch options through a shell before this script runs, matching
+ # Linux Steam. A NAME=value option placed ahead of %command% is an environment variable,
+ # and anything after %command% is a launch argument passed to the game.
++# The first argument is the game executable. Keep it whole: joining the arguments
++# with "$*" loses where a path with spaces ends, and the OnlineFix scan below then
++# reads only "How to Fish" from "/…/How to Fish/How to Fish.exe" and finds no
++# loader beside it.
++np_launch_exe=""
++for np_arg in "$@"; do
++  case "$np_arg" in
++    *=*) continue ;;
++    *.[eE][xX][eE]) np_launch_exe="$np_arg"; break ;;
++  esac
++done
++[ -n "$np_launch_exe" ] || np_launch_exe="${1:-}"
+ launch_args="$*"
+ 
+ case "$verb" in
+@@ -2766,8 +2778,8 @@
+   # built-in copies unless asked for the native ones, and this environment value
+   # is what it reads at launch, so the prefix registry alone is not enough.
+   np_onlinefix_dir=""
+-  if [ -n "$launch_args" ]; then
+-    np_game_exe=$(printf '%s' "$launch_args" | tr -d '"')
++  if [ -n "$np_launch_exe" ]; then
++    np_game_exe=$(printf '%s' "$np_launch_exe" | tr -d '"')
+     np_game_dir=$(dirname "$np_game_exe" 2>/dev/null || printf '.')
+     for np_try in "$np_game_dir" "$np_game_dir/.." "$np_game_dir/../.."; do
+       if [ -f "$np_try/OnlineFix64.dll" ] || [ -f "$np_try/OnlineFix.dll" ]; then

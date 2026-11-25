@@ -18,19 +18,24 @@ enum OnlineFixLaunchOptions {
         let current = LaunchOptions.current(appID: appID) ?? "%command%"
         let updated = LaunchOptions.mergingEnvironment(
             "WINEDLLOVERRIDES", entries: assignments, into: current)
-        guard updated != current else { return true }
         // Steam closed is the easy case: its own file is the right copy, and it
-        // reads that file when it next starts. Do this before asking its UI.
+        // reads that file when it next starts.
         if !steamIsRunning {
             let ok = LaunchOptions.set(updated, appID: appID)
             NSLog("OnlineFixLaunch apply app=%d via file ok=%d current=%@ updated=%@",
                   appID, ok ? 1 : 0, current, updated)
             return ok
         }
+        // Ask the live UI even when the file already matches. Steam keeps its own
+        // copy in memory and writes it back on quit, so a file-only change would
+        // otherwise wait for a restart before the next launch saw it.
         let ok = await SteamUICompat.setLaunchOptions(appID: appID, options: updated)
+        if !ok {
+            _ = LaunchOptions.set(updated, appID: appID)
+        }
         NSLog("OnlineFixLaunch apply app=%d via Steam ok=%d current=%@ updated=%@",
               appID, ok ? 1 : 0, current, updated)
-        return ok
+        return ok || (LaunchOptions.current(appID: appID) == updated)
     }
 
     /// Takes these names back out when the fix is removed, leaving any other
@@ -40,9 +45,10 @@ enum OnlineFixLaunchOptions {
         let current = LaunchOptions.current(appID: appID) ?? "%command%"
         let updated = LaunchOptions.clearingEnvironment(
             "WINEDLLOVERRIDES", entries: assignments, from: current)
-        guard updated != current else { return true }
         if !steamIsRunning { return LaunchOptions.set(updated, appID: appID) }
-        return await SteamUICompat.setLaunchOptions(appID: appID, options: updated)
+        let ok = await SteamUICompat.setLaunchOptions(appID: appID, options: updated)
+        if !ok { _ = LaunchOptions.set(updated, appID: appID) }
+        return ok
     }
 
     private static var steamIsRunning: Bool {
