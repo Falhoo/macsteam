@@ -477,7 +477,7 @@ private final class HubcapStorePage {
                 try? FileManager.default.removeItem(
                     at: Paths.configDir.appendingPathComponent("hubcap-lua")
                         .appendingPathComponent("\(request.appID).lua"))
-                response = installer.status(appID: request.appID)
+                response = installer.status(appID: request.appID, name: request.name ?? "")
             case "restart":
                 // Steam is about to go away and take this page with it, so the
                 // reply has to leave first; the restart itself runs afterwards.
@@ -490,14 +490,14 @@ private final class HubcapStorePage {
                 restartMode = "plain"
             default:
                 if request.action == "add" {
-                    try await installer.install(appID: request.appID)
+                    try await installer.install(appID: request.appID, name: request.name ?? "")
                     // Steam fetches a store game's achievements as its page is
                     // shown, so the schema is usually there already: write the
                     // library cache entry now, and the restart that follows shows
                     // the achievements on its first start instead of its second.
                     AchievCache.syncNow(appID: request.appID)
                 }
-                response = installer.status(appID: request.appID)
+                response = installer.status(appID: request.appID, name: request.name ?? "")
             }
         } catch { response = ["error": error.localizedDescription] }
         guard let data = try? JSONSerialization.data(withJSONObject: [request.id, response]) else { return }

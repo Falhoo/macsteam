@@ -114,6 +114,75 @@ final class HubcapStoreTests: XCTestCase {
         XCTAssertEqual(installer.status(appID: 621, steamRoot: root)["installed"] as? Bool, false)
     }
 
+    /// Steam can mark a game "Update Required" while its files are still on
+    /// disk. The store card must reuse that install, not open steam://install
+    /// and download it again over itself.
+    func testUpdateRequiredGameWithFilesIsNotReinstalled() throws {
+        let root = try scratch()
+        let steam = root.appendingPathComponent("Steam")
+        let game = steam.appendingPathComponent("steamapps/common/EscapeTheBackrooms")
+        try FileManager.default.createDirectory(at: game, withIntermediateDirectories: true)
+        try Data("MZ".utf8).write(to: game.appendingPathComponent("Backrooms.exe"))
+        let manifest = steam.appendingPathComponent("steamapps/appmanifest_1943950.acf")
+        try """
+        "AppState"
+        {
+            "appid" "1943950"
+            "StateFlags" "2"
+            "installdir" "EscapeTheBackrooms"
+        }
+        """.write(to: manifest, atomically: true, encoding: .utf8)
+
+        XCTAssertTrue(SteamInstallState.isInstalled(
+            appID: 1943950, name: "Escape the Backrooms", steamRoot: steam))
+        let installer = HubcapStoreInstaller(client: client { _ in (200, Data()) })
+        let status = installer.status(
+            appID: 1943950, name: "Escape the Backrooms", steamRoot: steam)
+        XCTAssertEqual(status["installed"] as? Bool, true)
+    }
+
+    /// A family-shared game can be in common/ without an appmanifest in this
+    /// account's steamapps. The store page passes the title, so the folder can
+    /// still be found instead of starting a second copy.
+    func testFamilyCopyWithoutManifestIsFoundByName() throws {
+        let root = try scratch()
+        let steam = root.appendingPathComponent("Steam")
+        let game = steam.appendingPathComponent("steamapps/common/EscapeTheBackrooms")
+        try FileManager.default.createDirectory(at: game, withIntermediateDirectories: true)
+        try Data("MZ".utf8).write(to: game.appendingPathComponent("Backrooms.exe"))
+
+        XCTAssertTrue(SteamInstallState.isInstalled(
+            appID: 1943950, name: "Escape the Backrooms", steamRoot: steam))
+        XCTAssertFalse(SteamInstallState.isInstalled(
+            appID: 1943950, name: "", steamRoot: steam))
+    }
+
+    /// A manifest that says Uninstalled, or is actively updating, must not make
+    /// an old folder look usable.
+    func testUninstalledOrActivelyUpdatingGameIsNotReused() throws {
+        let root = try scratch()
+        let steam = root.appendingPathComponent("Steam")
+        let game = steam.appendingPathComponent("steamapps/common/EscapeTheBackrooms")
+        try FileManager.default.createDirectory(at: game, withIntermediateDirectories: true)
+        try Data("MZ".utf8).write(to: game.appendingPathComponent("Backrooms.exe"))
+        let manifest = steam.appendingPathComponent("steamapps/appmanifest_1943950.acf")
+        func write(flags: Int) throws {
+            try """
+            "AppState"
+            {
+                "appid" "1943950"
+                "StateFlags" "\(flags)"
+                "installdir" "EscapeTheBackrooms"
+            }
+            """.write(to: manifest, atomically: true, encoding: .utf8)
+        }
+        try write(flags: 1)
+        XCTAssertFalse(SteamInstallState.isInstalled(
+            appID: 1943950, name: "Escape the Backrooms", steamRoot: steam))
+        try write(flags: 26) // update required + queued + running
+        XCTAssertFalse(SteamInstallState.isInstalled(
+            appID: 1943950, name: "Escape the Backrooms", steamRoot: steam))
+    }
     func testStoreURLsAreScopedToSteamAppPages() {
         XCTAssertEqual(HubcapStoreBridge.storeAppID("https://store.steampowered.com/app/620/Portal_2/"), 620)
         for value in ["http://store.steampowered.com/app/620/", "https://store.steampowered.com.evil/app/620/",

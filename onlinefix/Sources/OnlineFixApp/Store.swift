@@ -65,8 +65,13 @@ enum Store {
     static func isInstalled(appID: Int, folder: URL?, manifest: URL? = nil) -> Bool {
         guard let folder else { return false }
         let file = manifest ?? appManifest(for: appID)
-        if let flags = stateFlags(manifest: file), flags != 0, flags & fullyInstalled == 0 {
-            return false
+        if let flags = stateFlags(manifest: file), flags != 0 {
+            if flags & uninstalled != 0 { return false }
+            // Steam writes "Update Required" while the game is still on disk.
+            // Rejecting that sent players to a fresh download of a game they
+            // already had (common with a family-shared copy). Only an active
+            // update / download / validation is not usable.
+            if flags & fullyInstalled == 0, flags & busyStates != 0 { return false }
         }
         return hasGameFiles(in: folder)
     }
@@ -81,6 +86,11 @@ enum Store {
 
     /// Steam's flag for an app whose files are all on disk.
     static let fullyInstalled = 4
+    private static let uninstalled = 1
+    /// Update running, validating, downloading, staging, committing and the like.
+    /// "Update Required" and "Update Queued" are not here: those still have the
+    /// game's files on disk.
+    private static let busyStates = 16 | 128 | 256 | 512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768 | 65536
 
     static func appManifest(for appID: Int) -> URL {
         Paths.steamApps.appendingPathComponent("appmanifest_\(appID).acf")

@@ -91,7 +91,10 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
     await adding;
     assert.equal(button.querySelector('span').textContent, 'Install');
     assert.equal(p.location.href, 'https://store.steampowered.com/app/620/Portal_2/', 'adding must keep the current Store document');
-    await button.listeners.click({ preventDefault() {}, stopImmediatePropagation() {} });
+    const installing = button.listeners.click({ preventDefault() {}, stopImmediatePropagation() {} });
+    assert.equal(p.requests[0].action, 'status', 'Install checks the folder before Steam downloads it again');
+    p.reply({ ready: true, installed: false });
+    await installing;
     assert.equal(p.location.href, 'steam://install/620');
 
     // An added game also offers the restart that loads its achievements, next to
@@ -115,6 +118,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
     assert.ok(remove, 'the card offers “Remove from Steam”');
     assert.notEqual(remove.style.display, 'none', 'the remove button is shown for a game macSteam added');
     const removing = remove.listeners.click({ preventDefault() {}, stopImmediatePropagation() {} });
+    await flush();
     assert.equal(p.requests.at(-1).action, 'remove', 'the button asks macSteam to remove the game');
     p.reply({ configured: false, ready: false }); await removing; await flush();
     assert.equal(remove.style.display, 'none', 'the remove button goes away once the game is out');

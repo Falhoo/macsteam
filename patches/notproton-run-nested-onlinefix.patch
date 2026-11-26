@@ -1,0 +1,11 @@
+--- a/run
++++ b/run
+@@ -2781,7 +2781,7 @@
+   if [ -n "$np_launch_exe" ]; then
+     np_game_exe=$(printf '%s' "$np_launch_exe" | tr -d '"')
+     np_game_dir=$(dirname "$np_game_exe" 2>/dev/null || printf '.')
+-    for np_try in "$np_game_dir" "$np_game_dir/.." "$np_game_dir/../.."; do
++    for np_try in "$np_game_dir" "$np_game_dir/.." "$np_game_dir/../.." "$np_game_dir"/*/Binaries/Win64 "$np_game_dir"/*/*/Binaries/Win64; do # np_nested_onlinefix
+       if [ -f "$np_try/OnlineFix64.dll" ] || [ -f "$np_try/OnlineFix.dll" ]; then
+         np_onlinefix_dir=$(cd "$np_try" 2>/dev/null && pwd)
+         break

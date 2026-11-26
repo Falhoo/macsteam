@@ -192,7 +192,7 @@ final class LuaToolsStoreModel: ObservableObject {
     private func addViaHubcap(_ game: LuaToolsSteamGame) async {
         do {
             setStatus("Downloading Lua + manifests for \(game.name) from Hubcap…", tone: .neutral)
-            try await hubcapInstaller.install(appID: game.id)
+            try await hubcapInstaller.install(appID: game.id, name: game.name)
             onConfigChanged()
             let title = game.name
             setStatus("Added \(title)", tone: .ok)

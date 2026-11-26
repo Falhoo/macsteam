@@ -372,7 +372,7 @@ final class HubcapStoreModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.storeInstaller.install(appID: appID)
+                try await self.storeInstaller.install(appID: appID, name: game.name)
                 self.refreshInstalledState()
                 self.onConfigChanged()
                 self.setBusy(false)

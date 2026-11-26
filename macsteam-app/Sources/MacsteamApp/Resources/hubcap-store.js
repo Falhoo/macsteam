@@ -18,6 +18,8 @@
     // Whether macSteam has this app in its config, which is what the Remove button acts on.
     let configured = false;
     let onlineRoot, onlineButton, onlineTestButton, onlineStatus, onlineDesc, onlineNote, onlineChoices, onlineConfirmRow;
+    // Shown for the whole install: the download and unpack are tied to this page.
+    let onlineInstallGuard = null;
     // Tick "Show me anyway": the install runs only when it is on.
     let onlineConfirmed = false;
     let onlineGdk = false;
@@ -65,6 +67,8 @@
     // whether it is set to start as itself instead of Spacewar.
     let onlineUsesSDR = false;
     let onlineKeepID = false;
+    // The last launch test's own verdict, kept on the card after the install message.
+    let onlineLastCheck = '';
     const bridge = window.macsteamHubcap;
     if (typeof bridge !== 'function') return;
     window.__macsteamHubcap = {
@@ -80,6 +84,7 @@
     // instead of one sentence that never changes.
     function onlineFixStep(text) {
         if (!onlineStatus) return;
+        if (onlineNote) onlineNote.hidden = true;
         onlineStatus.hidden = false;
         onlineStatus.style.color = '#acb2b8';
         let list = onlineStatus.querySelector('.of-steps');
@@ -94,6 +99,24 @@
         line.style.cssText = 'font-size:12px;line-height:1.5;opacity:.85';
         list.appendChild(line);
         while (list.children.length > 10) list.removeChild(list.firstChild);
+    }
+    function showOnlineInstallGuard() {
+        if (!onlineRoot) return;
+        if (!onlineInstallGuard || !onlineInstallGuard.isConnected) {
+            onlineInstallGuard = document.createElement('div');
+            onlineInstallGuard.className = 'macsteam-onlinefix-install-guard';
+            onlineInstallGuard.setAttribute('role', 'status');
+            onlineInstallGuard.style.cssText = 'font-size:12px;color:#e8a54b;margin-top:8px;'
+                + 'max-width:560px;line-height:1.45;font-weight:600';
+            onlineRoot.appendChild(onlineInstallGuard);
+        }
+        onlineInstallGuard.hidden = false;
+        onlineInstallGuard.textContent = 'Do not leave this page or open another game while the fix installs. '
+            + 'The download and file copy are tied to this page; leaving can leave the install half-finished.';
+    }
+    function clearOnlineInstallGuard() {
+        onlineInstallGuard?.remove();
+        onlineInstallGuard = null;
     }
     window.__macsteamOnlineFix = {
         progress(text) { onlineFixStep(text); },
@@ -187,7 +210,7 @@
         const node = document.querySelector('.apphub_AppName, #appHubAppName');
         const text = (node?.textContent || '').trim();
         if (text) return text;
-        return document.title.replace(/\s+on\s+Steam\s*$/i, '').trim();
+        return (document.title || '').replace(/\s+on\s+Steam\s*$/i, '').trim();
     }
     function render() {
         if (!button) return;
@@ -217,7 +240,10 @@
         root.style.display = '';
         if (buttonHost) buttonHost.style.display = state === 'installed' ? 'none' : '';
         if (state === 'installed') {
-            titlePrefix.textContent = 'In your library, added with ';
+            titlePrefix.textContent = configured
+                ? 'In your library, added with '
+                : 'Already installed in your library';
+            if (brandSpan) brandSpan.style.display = configured ? '' : 'none';
             message.hidden = true;
             if (removeButton) removeButton.style.display = configured ? '' : 'none';
             if (restartButton) restartButton.style.display = removedNow ? '' : 'none';
@@ -240,7 +266,7 @@
     }
     async function refresh() {
         const requestedApp = appID;
-        const result = await request('status');
+        const result = await request('status', null, gameName());
         if (requestedApp !== appID) return;
         // Keep the "restart Steam" prompt up: a plain status refresh must not wipe it.
         const keepPrompt = (message.textContent || '').startsWith('Added to your library');
@@ -248,7 +274,7 @@
             state = 'add';
             message.textContent = result.error;
         } else {
-            configured = !!(result.configured || result.ready || result.installed);
+            configured = !!(result.configured || result.ready);
             state = result.installed ? 'installed' : result.ready ? 'ready' : 'add';
             if (!keepPrompt) message.textContent = '';
         }
@@ -407,6 +433,12 @@
                 desc.style.cssText = 'color:#acb2b8;font-size:12px;margin-top:2px';
                 info.appendChild(desc);
             }
+            if (fix.onlineFix) {
+                const tag = document.createElement('div');
+                tag.textContent = 'Includes the OnlineFix';
+                tag.style.cssText = 'color:#a4d007;font-size:11px;margin-top:2px';
+                info.appendChild(tag);
+            }
             const actions = document.createElement('div');
             actions.style.cssText = 'white-space:nowrap';
             const run = async (action, button) => {
@@ -526,6 +558,8 @@
         onlineDesc = null;
         onlineNote = null;
         onlineChoices = null;
+        onlineLastCheck = '';
+        onlineInstallGuard = null;
         onlineConfirmRow?.remove();
         onlineConfirmRow = null;
         onlineNativeWarning = null;
@@ -707,7 +741,10 @@
                     ? (onlineKeepID
                         ? 'Installed. Launch the game from Steam, it runs as its own AppID.'
                         : 'Installed. Launch the game from Steam, it runs as AppID 480.')
-                    : (onlineKeepID
+                    : (fix
+                        ? 'LuaTools has an Online Fix for this game; we recommend using that '
+                          + 'one instead. This card can still install its own copy.'
+                        : onlineKeepID
                         ? 'Installs the game\'s fix and keeps its own Steam AppID, so Steam can '
                           + 'grant its relay network.'
                         : 'Installs the game\'s fix and runs its Steam session as AppID 480 '
@@ -715,10 +752,13 @@
         }
         if (onlineNote) {
             const muted = onlineGdk && !onlineConfirmed;
-            onlineNote.hidden = true;
-            if (muted) onlineNote.textContent = '';
-            else
-            onlineNote.textContent = '';
+            // The install/test prose already carries the same verdict; keep this
+            // line for the quiet card you see when you come back later.
+            const statusText = (onlineStatus?.textContent || '').trim();
+            onlineNote.hidden = muted || !onlineLastCheck || !!statusText;
+            onlineNote.textContent = muted ? '' : onlineLastCheck;
+            onlineNote.style.color = onlineLastCheck.startsWith('Spacewar (480) confirmed')
+                ? '#a4d007' : '#e8a54b';
         }
         if (onlineButton) {
             const label = onlineFixInstalled ? 'Reinstall'
@@ -729,6 +769,7 @@
     }
     function renderOnlineFix(result) {
         if (!root?.isConnected) return;
+        onlineLastCheck = String(result.lastOnlineCheck || '');
         // Same numbers as the card already shows: keep the button the user is
         // pointing at instead of replacing it.
         const signature = JSON.stringify({
@@ -807,9 +848,10 @@
             // A test starts the game and checks the installed fix. A Mac build that is
             // only routed has no fix files to test, so it gets no Test button.
             if (result.fixInstalled && !onlineNative) {
-                onlineTestButton = actionButton('Test', () => { void testOnlineFix(); });
+                onlineTestButton = actionButton('Test online', () => { void testOnlineFix(); });
                 onlineTestButton.disabled = !result.gameInstalled;
-                onlineTestButton.title = 'Start the game once and check the fix without reinstalling it.';
+                onlineTestButton.title = 'Start the game once and check Spacewar/OnlineFix networking. '
+                    + 'Joining a live lobby is still up to you.';
                 actions.appendChild(onlineTestButton);
             }
             const remove = actionButton('Uninstall', () => uninstallOnlineFix());
@@ -1047,6 +1089,7 @@
         }
         onlineStatus.style.color = '#acb2b8';
         onlineStatus.textContent = reply.message || 'The test finished.';
+        if (onlineNote) onlineNote.hidden = true;
     }
     async function cancelOnlineTest() {
         if (!onlineTesting) return;
@@ -1202,6 +1245,7 @@
         onlineStatus.hidden = false;
         onlineStatus.style.color = '#acb2b8';
         window.__macsteamOnlineFix?.reset();
+        showOnlineInstallGuard();
         onlineFixStep(confirmed
             ? (folderName
                 ? `Downloading and installing “${folderName}”… this can take a minute.`
@@ -1212,6 +1256,7 @@
         if (requestedApp !== appID || !onlineRoot) return;
         // The fix may not work: say why, and install only if the player still wants it.
         if (reply.confirmation) {
+            clearOnlineInstallGuard();
             onlineButton.disabled = wasDisabled;
             onlineStatus.style.color = '#e8a54b';
             onlineStatus.textContent = reply.confirmation;
@@ -1219,6 +1264,7 @@
             return;
         }
         if (reply.error) {
+            clearOnlineInstallGuard();
             onlineButton.disabled = wasDisabled;
             onlineStatus.style.color = '#e8a54b';
             onlineStatus.textContent = 'OnlineFix failed — ' + reply.error;
@@ -1226,6 +1272,7 @@
         }
         // Several uploads folders look like this game: ask here, not in the app.
         if (Array.isArray(reply.choices) && reply.choices.length) {
+            clearOnlineInstallGuard();
             onlineButton.disabled = wasDisabled;
             onlineStatus.style.color = '#acb2b8';
             onlineStatus.textContent = reply.message || 'Pick the right match.';
@@ -1235,15 +1282,18 @@
         // A native build: the page switches Steam to NotProton and starts the Windows
         // download, so the fix has a folder it can work in.
         if (reply.windowsBuild) {
+            clearOnlineInstallGuard();
             void switchToWindowsBuild();
             return;
         }
+        clearOnlineInstallGuard();
         // The fix is in place now: ask for the fresh status rather than re-rendering
         // the flags from before the install.
         await loadOnlineFix();
         onlineStatus.style.color = '#a4d007';
         onlineStatus.hidden = false;
         onlineStatus.textContent = reply.message || 'OnlineFix installed.';
+        if (onlineNote) onlineNote.hidden = true;
     }
     // A game added while Steam runs only gets its achievement list the next time
     // the client starts, so the card offers to do that here and open the game's
@@ -1305,6 +1355,27 @@
         event.stopImmediatePropagation();
         if (busy) return;
         if (state === 'ready') {
+            // The card may have been built while Steam was still finishing an
+            // install. Check again before handing over to steam://install: for a
+            // game that is already on disk (including a family-shared copy with
+            // an update required) that URL starts a fresh download.
+            busy = true;
+            render();
+            const latest = await request('status', null, gameName());
+            busy = false;
+            if (latest && latest.installed) {
+                configured = !!(latest.configured || latest.ready);
+                state = 'installed';
+                render();
+                return;
+            }
+            if (latest && latest.error) {
+                message.hidden = false;
+                message.style.color = '#e8a54b';
+                message.textContent = latest.error;
+                render();
+                return;
+            }
             // Steam handles its own installation dialog and library location selection.
             location.href = `steam://install/${appID}`;
             return;
@@ -1316,7 +1387,15 @@
         const result = await request('add');
         if (requestedApp !== appID) return;
         busy = false;
-        if (result.ready) {
+        if (result.installed) {
+            // The click may have been the first status check that knew the
+            // title. The game was already on disk, so install() returned
+            // without a download; show that instead of asking to try again.
+            state = 'installed';
+            configured = !!(result.configured || result.ready);
+            addedNow = false;
+            message.textContent = '';
+        } else if (result.ready) {
             state = 'ready';
             addedNow = true;
             configured = !!(result.configured || result.ready);

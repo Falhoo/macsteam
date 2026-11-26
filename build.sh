@@ -113,7 +113,13 @@ if [ -f "$RUNNER_PATCH" ]; then
     ( cd "$PAYLOAD_DEST" && patch -p1 -N -f < "$RUNNER_PATCH" >/dev/null 2>&1 ) || true
     rm -f "$PAYLOAD_DEST/run.rej" "$PAYLOAD_DEST/run.orig"
 fi
+RUNNER_NESTED_PATCH="$ROOT/patches/notproton-run-nested-onlinefix.patch"
+if [ -f "$RUNNER_NESTED_PATCH" ]; then
+    ( cd "$PAYLOAD_DEST" && patch -p1 -N -f < "$RUNNER_NESTED_PATCH" >/dev/null 2>&1 ) || true
+    rm -f "$PAYLOAD_DEST/run.rej" "$PAYLOAD_DEST/run.orig"
+fi
 grep -q 'np_launch_exe=' "$PAYLOAD_DEST/run"     || die "The NotProton runner is missing the whole-path launch fix."
+grep -q 'np_nested_onlinefix' "$PAYLOAD_DEST/run" || die "The NotProton runner is missing the nested OnlineFix scan."
 
 # ---------------------------------------------------------------- 4. macSteam dylib
 say "Building macSteam's dylib (this downloads and compiles Dobby, a few minutes the first time)"
@@ -188,7 +194,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleLocalizations</key>
     <array><string>en</string><string>de</string><string>fr</string><string>it</string><string>zh-Hans</string></array>
     <key>CFBundleShortVersionString</key> <string>$MS_VERSION</string>
-    <key>CFBundleVersion</key>            <string>18</string>
+    <key>CFBundleVersion</key>            <string>19</string>
     <key>NotProtonVersion</key>           <string>$NP_APP_VERSION</string>
     <key>LSMinimumSystemVersion</key>     <string>26.0</string>
     <key>LSApplicationCategoryType</key>  <string>public.app-category.utilities</string>

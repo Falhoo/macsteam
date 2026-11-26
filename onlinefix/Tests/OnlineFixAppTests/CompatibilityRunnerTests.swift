@@ -21,6 +21,33 @@ struct CompatibilityRunnerTests {
     fi
     """#
 
+
+    private let parentRunner = #"""
+    #!/bin/sh
+    np_launch_exe="$1"
+    np_game_dir=$(dirname "$np_launch_exe")
+    np_onlinefix_dir=""
+    for np_try in "$np_game_dir" "$np_game_dir/.." "$np_game_dir/../.."; do
+      if [ -f "$np_try/OnlineFix64.dll" ]; then
+        np_onlinefix_dir="$np_try"
+        break
+      fi
+    done
+    """#
+
+    private let besideRunner = #"""
+    #!/bin/sh
+    np_launch_exe="$1"
+    np_game_dir=$(dirname "$np_launch_exe")
+    np_onlinefix_dir=""
+    if [ -f "$np_game_dir/OnlineFix64.dll" ]; then
+      np_onlinefix_dir="$np_game_dir"
+    fi
+    if [ -f "$np_game_dir/.macsteam-winelog" ]; then
+      export WINEDEBUG="${WINEDEBUG:-err+all,fixme-all}"
+    fi
+    """#
+
     @Test
     func theInstalledToolKeepsAWholePathWithSpaces() {
         let patched = CompatibilityRunner.patched(oldRunner)
@@ -54,4 +81,30 @@ struct CompatibilityRunnerTests {
         #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o755)
         #expect(CompatibilityRunner.ensure(steamRoot: root) == false)
     }
+
+    @Test
+    func runnerFindsOnlineFixBelowTheLauncher() {
+        let patched = CompatibilityRunner.patched(parentRunner)
+        #expect(patched?.contains("\"$np_game_dir\"/*/Binaries/Win64") == true)
+        #expect(patched?.contains("\"$np_game_dir\"/*/*/Binaries/Win64") == true)
+        #expect(patched?.contains("# np_nested_onlinefix") == true)
+    }
+
+    @Test
+    func olderSingleCheckGetsTheNestedScan() {
+        let patched = CompatibilityRunner.patched(besideRunner)
+        #expect(patched?.contains("\"$np_game_dir\"/*/Binaries/Win64") == true)
+        #expect(patched?.contains("# np_nested_onlinefix") == true)
+        #expect(patched?.contains("if [ -n \"$np_onlinefix_dir\" ] && [ -f \"$np_onlinefix_dir/.macsteam-winelog\" ]") == true)
+        #expect(patched?.contains("if [ -f \"$np_game_dir/OnlineFix64.dll\" ]; then") == false)
+    }
+
+    @Test
+    func patchingTheNestedScanTwiceChangesNothing() {
+        let once = CompatibilityRunner.patched(parentRunner)
+        let twice = CompatibilityRunner.patched(once ?? "")
+        #expect(twice == once)
+    }
+
+
 }

@@ -34,7 +34,7 @@ public enum CompatibilityRunner {
     /// The old runner took the first word of the joined arguments. Keep the
     /// executable whole and use it wherever the OnlineFix scan asks for the game.
     static func patched(_ text: String) -> String? {
-        if text.contains("np_launch_exe=") { return text }
+        if text.contains("np_launch_exe=") { return nestedOnlineFix(text) }
         let add = """
 
         np_launch_exe=""
@@ -62,6 +62,42 @@ public enum CompatibilityRunner {
         if let range = result.range(of: oldPlain) {
             result.replaceSubrange(range, with: "np_game_exe=$(printf '%s' \"$np_launch_exe\" | tr -d '\"')")
         }
+        return nestedOnlineFix(result)
+    }
+
+    /// Adds the Unreal `Binaries/Win64` search to a runner that already has the
+    /// whole-path fix. Older runners get the same scan in place of their single
+    /// "beside the launcher" check.
+    static func nestedOnlineFix(_ text: String) -> String {
+        if text.contains("# np_nested_onlinefix") { return text }
+        var result = text
+        let parentScan = "for np_try in \"$np_game_dir\" \"$np_game_dir/..\" \"$np_game_dir/../..\"; do"
+        if let range = result.range(of: parentScan) {
+            result.replaceSubrange(range, with: "for np_try in \"$np_game_dir\" \"$np_game_dir/..\" \"$np_game_dir/../..\" \"$np_game_dir\"/*/Binaries/Win64 \"$np_game_dir\"/*/*/Binaries/Win64; do # np_nested_onlinefix")
+            return result
+        }
+        for oldSingle in [
+            "if [ -f \"$np_game_dir/OnlineFix64.dll\" ]; then",
+            "if [ -f \"$np_game_dir/OnlineFix.dll\" ]; then",
+        ] {
+            guard let range = result.range(of: oldSingle) else { continue }
+            let scan = """
+                np_onlinefix_dir=""
+                for np_try in "$np_game_dir" "$np_game_dir"/*/Binaries/Win64 "$np_game_dir"/*/*/Binaries/Win64; do # np_nested_onlinefix
+                  if [ -f "$np_try/OnlineFix64.dll" ] || [ -f "$np_try/OnlineFix.dll" ]; then
+                    np_onlinefix_dir=$(cd "$np_try" 2>/dev/null && pwd)
+                    break
+                  fi
+                done
+                if [ -n "$np_onlinefix_dir" ]; then
+            """
+            result.replaceSubrange(range, with: scan)
+            result = result.replacingOccurrences(
+                of: "if [ -f \"$np_game_dir/.macsteam-winelog\" ]; then",
+                with: "if [ -n \"$np_onlinefix_dir\" ] && [ -f \"$np_onlinefix_dir/.macsteam-winelog\" ]; then")
+            return result
+        }
         return result
     }
+
 }

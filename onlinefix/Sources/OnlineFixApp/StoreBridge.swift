@@ -32,6 +32,9 @@ public struct OnlineFixStoreStatus: Codable, Sendable {
     /// path at startup. The OnlineFix card's copy disables it; a LuaTools copy does
     /// not, which is what crashes some games (Buckshot Roulette).
     public let overlayStub: Bool
+    /// What the last launch test proved, if one has run. The card shows this next
+    /// to the install button, so it does not disappear with the install message.
+    public var lastOnlineCheck: String? = nil
 
 }
 

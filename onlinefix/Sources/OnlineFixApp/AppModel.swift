@@ -892,9 +892,10 @@ final class AppModel: ObservableObject {
         let name = games.first { $0.id == appID }?.name ?? ""
         let folder = Store.gameFolder(for: appID, name: name)
         let nativeMac = folder.map { FixInstaller.nativeMacBundle(in: $0) != nil } ?? false
+        let installed = fixIsInstalled(appID)
         return OnlineFixStoreStatus(
             inList: alreadyAdded(appID),
-            fixInstalled: fixIsInstalled(appID),
+            fixInstalled: installed,
             gameInstalled: Store.isInstalled(appID: appID, folder: folder),
             usesSteamNetworking: SteamNetworking.uses(appID: appID, gameFolder: folder),
             keepRealAppID: games.first { $0.id == appID }?.keepRealAppID ?? false,
@@ -905,7 +906,8 @@ final class AppModel: ObservableObject {
             windowsBuildInstalled: folder.map { FixInstaller.hasWindowsBuild(in: $0) } ?? false,
             overlayStub: fixes.first { $0.id == appID }?.files.contains {
                 ($0 as NSString).lastPathComponent == "SteamOverlay64.dll"
-            } ?? false)
+            } ?? false,
+            lastOnlineCheck: installed ? LaunchTest.savedResult(appID: appID)?.online.note : nil)
     }
 
     /// "still route my game through spacewar", from the store page: puts the game in
@@ -1321,7 +1323,16 @@ final class AppModel: ObservableObject {
             let identity = outcome.keepRealAppID
                 ? "its own AppID, which Steam's relay needs"
                 : "AppID 480"
+            // A store install normally launches the game once and records what it saw.
+            // When that did not happen, do not let the card imply the connection was
+            // checked: say it was not, and point at the Test button.
+            let untested = !outcome.keepRealAppID
+                && (!test || outcome.launchTest?.outcome != .launched)
             let message = outcome.message
+                + (untested
+                    ? " Spacewar (480) routing is set, but this install did not confirm the "
+                      + "online connection. Press Test to launch it once and check."
+                    : "")
                 + " Launch \(display) from Steam. It runs as \(identity)."
             return OnlineFixStoreOutcome(message: message, error: nil,
                                          needsGame: false, installed: true)

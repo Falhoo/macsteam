@@ -68,13 +68,37 @@ struct StoreTests {
         #expect(!Store.isInstalled(appID: 1, folder: game))
     }
 
-    /// A download in progress is not an install, whatever is already on disk.
+    /// An active update/download is not an install, whatever is already on disk.
     @Test
     func aManifestThatIsStillDownloadingIsNotInstalled() throws {
         let game = try folder("downloading")
         defer { try? FileManager.default.removeItem(at: game) }
         try write("MZ", to: game.appendingPathComponent("Game.exe"))
+        let acf = try manifest(26, in: game) // update required + queued + running
+
+        #expect(!Store.isInstalled(appID: 1, folder: game, manifest: acf))
+    }
+
+    /// Steam writes "Update Required" while the game is still fully on disk.
+    /// Treating that as missing sent players to a fresh download of a game they
+    /// already had (common with a family-shared copy).
+    @Test
+    func anUpdateRequiredManifestStillUsesTheInstalledFiles() throws {
+        let game = try folder("update-required")
+        defer { try? FileManager.default.removeItem(at: game) }
+        try write("MZ", to: game.appendingPathComponent("Game.exe"))
         let acf = try manifest(2, in: game)
+
+        #expect(Store.isInstalled(appID: 1, folder: game, manifest: acf))
+    }
+
+    /// Uninstalled wins even if an old folder was left behind.
+    @Test
+    func anUninstalledManifestIsNotInstalledEvenWithFiles() throws {
+        let game = try folder("uninstalled")
+        defer { try? FileManager.default.removeItem(at: game) }
+        try write("MZ", to: game.appendingPathComponent("Game.exe"))
+        let acf = try manifest(1, in: game)
 
         #expect(!Store.isInstalled(appID: 1, folder: game, manifest: acf))
     }

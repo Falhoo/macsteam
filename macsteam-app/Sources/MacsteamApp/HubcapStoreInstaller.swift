@@ -31,23 +31,30 @@ final class HubcapStoreInstaller {
         self.activate = activate
     }
 
-    func status(appID: Int, steamRoot: URL = Paths.steamRoot) -> [String: Any] {
+    func status(appID: Int, name: String = "",
+                steamRoot: URL = Paths.steamRoot) -> [String: Any] {
         store.load()
         let configured = store.config.apps.contains(appID)
         return [
             "configured": configured,
             "ready": configured && SteamLibraryActivation.isActive(appID),
             // An installed game must never be offered "Add to library" or "Install".
-            "installed": SteamInstallState.isFullyInstalled(appID: appID, steamRoot: steamRoot),
+            // This also catches a family copy in common/ with an update required.
+            "installed": SteamInstallState.isInstalled(
+                appID: appID, name: name, steamRoot: steamRoot),
         ]
     }
 
-    func install(appID: Int) async throws {
+    func install(appID: Int, name: String = "") async throws {
         guard !installing else {
             throw HubcapStoreError(message: "Another game is being added. Please try again when it finishes.")
         }
         installing = true
         defer { installing = false }
+        // The card can be a moment stale while Steam finishes an install. Never
+        // replace a game that is already on disk (family-shared, update required,
+        // or a fresh install without a manifest yet) with a fresh download.
+        guard !SteamInstallState.isInstalled(appID: appID, name: name) else { return }
         store.load()
         // A refresh retry never consumes another Hubcap download.
         let receipt = luaDirectory.appendingPathComponent("\(appID).lua")
@@ -209,24 +216,116 @@ enum SteamLibraryActivation {
     }
 }
 
-/// Whether Steam has the game fully installed, read from its appmanifest files.
+/// Whether Steam has the game usable on disk. An install is not only a manifest
+/// with StateFlags 4: Steam writes "Update Required" while the files are still
+/// there, and a family-shared copy can be in common/ without a manifest of its
+/// own. Both must count, or the store card offers Install and Steam downloads the
+/// whole game again over the copy the player already has.
 enum SteamInstallState {
     private static let pathRe = try! NSRegularExpression(pattern: #""path"\s+"([^"]+)""#)
     private static let flagsRe = try! NSRegularExpression(pattern: #""StateFlags"\s+"(\d+)""#)
+    private static let installDirRe = try! NSRegularExpression(pattern: #""installdir"\s+"([^"]+)""#)
     private static let fullyInstalled = 4   // EAppState.FullyInstalled
+    private static let uninstalled = 1
+    /// Update running, uninstalling, reconfiguring, validating, preallocating,
+    /// staging, committing and the like. "Update Required" (2) and "Update
+    /// Queued" (8) are deliberately not here: those still have the game on disk.
+    private static let busy = 16 | 128 | 256 | 512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768 | 65536
+
+    static func isInstalled(appID: Int, name: String = "",
+                            steamRoot: URL = Paths.steamRoot,
+                            fm: FileManager = .default) -> Bool {
+        guard appID > 0 else { return false }
+        let roots = libraryRoots(steamRoot: steamRoot)
+        // A manifest is authoritative for its own library: Uninstalled or a busy
+        // update must not fall through to a same-named folder beside it. A
+        // family copy can still be in a different library with no manifest.
+        var nameRoots: [URL] = []
+        for root in roots {
+            let steamapps = root.appendingPathComponent("steamapps", isDirectory: true)
+            let manifest = steamapps.appendingPathComponent("appmanifest_\(appID).acf")
+            guard let text = try? String(contentsOf: manifest, encoding: .utf8) else {
+                nameRoots.append(root)
+                continue
+            }
+            let ns = text as NSString
+            let flags = flagsRe.firstMatch(in: text, range: NSRange(location: 0, length: ns.length))
+                .flatMap { Int(ns.substring(with: $0.range(at: 1))) }
+            if let flags, flags & fullyInstalled != 0 { return true }
+            if let flags, flags & uninstalled != 0 { continue }
+            if let flags, flags & busy != 0 { continue }
+            if let dir = installDir(in: text), !dir.isEmpty {
+                let folder = steamapps.appendingPathComponent("common", isDirectory: true)
+                    .appendingPathComponent(dir, isDirectory: true)
+                if hasLaunchable(in: folder, fm: fm) { return true }
+            }
+            nameRoots.append(root)
+        }
+        // A family-shared game can arrive in common/ without an appmanifest in
+        // this account's steamapps. The store page knows its name; matching the
+        // folder there is enough to keep using the files already on disk.
+        let wanted = normalized(name)
+        if !wanted.isEmpty {
+            for root in nameRoots {
+                let common = root.appendingPathComponent("steamapps/common", isDirectory: true)
+                guard let entries = try? fm.contentsOfDirectory(
+                    at: common, includingPropertiesForKeys: nil) else { continue }
+                for entry in entries where normalized(entry.lastPathComponent) == wanted {
+                    if hasLaunchable(in: entry, fm: fm) { return true }
+                }
+            }
+        }
+        return false
+    }
 
     static func isFullyInstalled(appID: Int, steamRoot: URL = Paths.steamRoot,
                                  fm: FileManager = .default) -> Bool {
-        guard appID > 0 else { return false }
-        for root in libraryRoots(steamRoot: steamRoot) {
-            let manifest = root.appendingPathComponent("steamapps/appmanifest_\(appID).acf")
-            guard let text = try? String(contentsOf: manifest, encoding: .utf8) else { continue }
-            let ns = text as NSString
-            guard let match = flagsRe.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
-                  let flags = Int(ns.substring(with: match.range(at: 1))) else { continue }
-            if flags & fullyInstalled != 0 { return true }
+        isInstalled(appID: appID, steamRoot: steamRoot, fm: fm)
+    }
+
+    private static func installDir(in text: String) -> String? {
+        let ns = text as NSString
+        guard let match = installDirRe.firstMatch(
+            in: text, range: NSRange(location: 0, length: ns.length)) else { return nil }
+        return ns.substring(with: match.range(at: 1))
+            .replacingOccurrences(of: "\\\\", with: "/")
+    }
+
+    /// A folder is usable when it has a launchable at its root, or the usual
+    /// Unreal-shaped Game/Binaries/Win64/*.exe one level down. Do not walk
+    /// Content/Engine: a 28 GB game should not be scanned to answer this.
+    private static func hasLaunchable(in folder: URL, fm: FileManager) -> Bool {
+        guard let entries = try? fm.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+            return false
+        }
+        func launchable(_ url: URL) -> Bool {
+            switch url.pathExtension.lowercased() {
+            case "exe":
+                return true
+            case "app":
+                var isDir: ObjCBool = false
+                return fm.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+            default:
+                return false
+            }
+        }
+        if entries.contains(where: launchable) { return true }
+        for entry in entries {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: entry.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            let binaries = entry.appendingPathComponent("Binaries/Win64", isDirectory: true)
+            if let nested = try? fm.contentsOfDirectory(
+                at: binaries, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]),
+               nested.contains(where: launchable) {
+                return true
+            }
         }
         return false
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text.lowercased().filter { $0.isLetter || $0.isNumber }
     }
 
     static func libraryRoots(steamRoot: URL) -> [URL] {

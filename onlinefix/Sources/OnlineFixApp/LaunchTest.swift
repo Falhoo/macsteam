@@ -65,13 +65,32 @@ enum LaunchTest {
         var photonFailure: String?
         var line: String?
 
+        /// The launch line carries keep-id=1 when the game intentionally starts as
+        /// itself (for Steam's relay), so "OnlineFix launched" is not the same as
+        /// "Spacewar confirmed".
+        var startsAsSpacewar: Bool {
+            guard hookActive else { return false }
+            if let line, line.contains("keep-id=1") { return false }
+            return true
+        }
+
         var note: String {
-            if hookActive && matchmaking {
-                return "OnlineFix is active and matchmaking is on 480. Enter an online lobby to confirm another player can join."
+            if startsAsSpacewar && matchmaking {
+                return "Spacewar (480) confirmed: Steam started the game as AppID 480 and "
+                    + "OnlineFix's networking loaded. Live online play is not confirmed by "
+                    + "this test — enter an online lobby to check another player can join."
             }
             if let photonFailure { return "Photon reported: \(photonFailure)." }
-            if hookActive { return "OnlineFix loaded, but its matchmaking line was not seen." }
-            return "No OnlineFix networking evidence was written during the test."
+            if matchmaking {
+                return "OnlineFix's networking loaded, but this game keeps its own AppID, "
+                    + "not Spacewar (480). Online play is not confirmed."
+            }
+            if startsAsSpacewar {
+                return "Spacewar (480) confirmed: Steam started the game as AppID 480, but "
+                    + "OnlineFix's matchmaking line was not seen. Online play is not confirmed."
+            }
+            return "Spacewar (480) could not be confirmed: no OnlineFix networking evidence "
+                + "was written during the test."
         }
     }
 

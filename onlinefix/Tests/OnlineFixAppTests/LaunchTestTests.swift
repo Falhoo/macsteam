@@ -43,7 +43,21 @@ struct LaunchTestTests {
                                               photonFailure: nil, line: "launch"))
         #expect(result.opened)
         #expect(result.message.contains("18 seconds"))
-        #expect(result.message.contains("matchmaking is on 480"))
+        #expect(result.message.contains("Spacewar (480) confirmed"))
+        #expect(result.message.contains("Live online play is not confirmed"))
+    }
+
+    @Test
+    func keepRealAppIDIsNotReportedAsSpacewar() {
+        let result = LaunchTest.Result(
+            appID: 1, name: "Game", at: Date(), outcome: .launched,
+            windowSeconds: 18, runtimeSeconds: 38, exitStatus: nil, issue: .none,
+            issueDetail: "", evidence: [], logPaths: [], repairs: [],
+            online: LaunchTest.OnlineEvidence(hookActive: true, matchmaking: true,
+                                              photonFailure: nil,
+                                              line: "launch game=1 session=480 keep-id=1"))
+        #expect(!result.message.contains("Spacewar (480) confirmed"))
+        #expect(result.message.contains("keeps its own AppID"))
     }
 
     @Test
