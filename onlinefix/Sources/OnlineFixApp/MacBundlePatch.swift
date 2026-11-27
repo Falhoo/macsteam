@@ -172,9 +172,10 @@ enum MacBundlePatch {
         }
 
         if !state.canPatch {
-            state.message = "This Mac build carries no Photon app id, so there is nothing for "
-                + "OnlineFix to point at its shared Photon app. It starts as itself and uses "
-                + "Steam's own identity."
+            state.message = "This Mac build carries no Photon app id, so its online play does "
+                + "not go through Photon and there is no id for the fix to point at its shared "
+                + "app. It starts as itself and takes Steam's identity from macSteam, so the "
+                + "bundle needs no change."
         }
         return state
     }

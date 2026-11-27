@@ -16,6 +16,12 @@ enum SteamUICompat {
         return await evaluate(expression)
     }
 
+    /// Takes a forced compatibility tool off a game, so Steam starts its native
+    /// build again. Steam's own Compatibility setting does this with an empty tool.
+    static func clearCompatTool(appID: Int) async -> Bool {
+        await specifyCompatTool(appID: appID, tool: "")
+    }
+
     /// Replaces a game's launch options. Steam on macOS has no shell, so the
     /// `NAME=value` prefixes NotProton writes cannot run once a game is launched
     /// natively; this clears them through Steam itself, so the change survives.

@@ -41,7 +41,28 @@ enum FixAudit {
         var report = Report()
         // A Mac build loads none of these files. The plan leaves it alone, and the
         // audit must too, or installing a Windows fix would scatter DLLs in the app.
-        guard scan.macBundle == nil else { return report }
+        // What the build does take is the patch in its own files, and a Steam update or
+        // verify puts those back, so that is what is checked here. The repair is not a
+        // copy: `FixService` applies it again once this pass has run.
+        if let bundle = scan.macBundle {
+            let state = MacBundlePatch.state(of: bundle)
+            // Only a build the fix was already put into can have lost the patch; on a
+            // first install the bundle is expected to be stock.
+            let wasPatched = FixPack.read(in: scan.folder)?.picoPark2 == true
+            if state.canPatch, !state.isPatched, wasPatched {
+                report.findings.append(FixFinding(
+                    code: "OF032", level: .warning,
+                    title: "The Mac build's patch is gone",
+                    detail: "Steam put \(bundle.lastPathComponent)'s own files back, so the "
+                        + "Photon app id it needs is no longer in the bundle.",
+                    remedy: "Writes the patch into the bundle again and signs it"))
+                report.notes.append("\(name)'s Mac build takes its patch again: Steam put "
+                    + "the game's own files back.")
+            } else if state.canPatch {
+                report.notes.append("\(name)'s Mac build takes its patch in its own files.")
+            }
+            return report
+        }
         let launch = scan.launchFolder
         let folder = scan.folder
         // A routing fix deliberately leaves the loader out and keeps the game's own

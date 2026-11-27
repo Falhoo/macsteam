@@ -1056,6 +1056,12 @@ final class AppModel: ObservableObject {
         if let bundle = FixInstaller.nativeMacBundle(in: folder),
            MacBundlePatch.canPatch(bundle) {
             _ = try? MacBundlePatch.setEnabled(true, app: bundle)
+            // The switch reads this flag, so the record has to agree with the bundle.
+            if let index = games.firstIndex(where: { $0.id == appID }),
+               !games[index].picoPark2Photon {
+                games[index].picoPark2Photon = true
+                persist()
+            }
             return nil
         }
         // The candidates are proof enough that this is a Photon game. Asking the

@@ -5,6 +5,50 @@ import Testing
 @Suite("FixAuditTests")
 struct FixAuditTests {
 
+    /// A Mac build takes the patch in its own files, and a Steam update puts those
+    /// files back. The audit has to notice, and must not also try to copy DLLs in.
+    @Test
+    func aMacBuildLosingItsPatchIsReported() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fixaudit-mac-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let game = root.appendingPathComponent("game", isDirectory: true)
+        let meta = game.appendingPathComponent(
+            "Game.app/Contents/Resources/Data/il2cpp_data/Metadata", isDirectory: true)
+        try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: game.appendingPathComponent(
+            "Game.app/Contents/MacOS", isDirectory: true), withIntermediateDirectories: true)
+        try Data("binary".utf8).write(to: game.appendingPathComponent(
+            "Game.app/Contents/MacOS/Game"))
+        let file = meta.appendingPathComponent("global-metadata.dat")
+        let stock = try #require(PhotonPatch.knownStockIDs.first)
+        try Data(stock.utf8).write(to: file)
+
+        func read() -> FixAudit.Report {
+            let scan = GameScan.read(folder: game, appID: 100, name: "Game")
+            return FixAudit.run(appID: 100, name: "Game", scan: scan, package: nil)
+        }
+        // Nothing installed yet: no pack, so no finding, only the note.
+        #expect(read().findings.isEmpty)
+        #expect(!read().plan.copies.contains { $0.relative.contains(".app/") })
+
+        // Put the stock id back the way an update does, with a pack claiming the patch.
+        try Data("stock".utf8).write(to: file)
+        _ = try MacBundlePatch.setEnabled(true, app: game.appendingPathComponent("Game.app"),
+                                          sign: { _ in })
+        let recipe = FixRecipe(appID: 100, name: "Game", installedAt: Date(),
+                               packageName: "", findings: [], entries: [], removed: [],
+                               keepRealAppID: true, photonSwap: false, picoPark2: true,
+                               wineDLLs: [], notes: [])
+        try FixPack.write(recipe, in: game)
+        // The game's own metadata comes back, as an update leaves it.
+        try Data(stock.utf8).write(to: file)
+
+        let report = read()
+        #expect(report.findings.contains { $0.code == "OF032" })
+        #expect(report.plan.copies.isEmpty)
+    }
+
     /// The package is installed, then one file from each part of the fix is taken
     /// away and the two text files are put back to a state an older fix would leave.
     /// The audit has to read the result, not the package, and plan every repair.

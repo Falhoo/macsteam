@@ -98,6 +98,14 @@ public enum OnlineFixEmbed {
                                      progress: progress)
     }
 
+    /// True when the game's folder holds a Mac build the fix can patch. Steam has to
+    /// start such a game natively, not through NotProton, for the patch to be what runs.
+    public static func hasPatchableMacBuild(appID: Int) -> Bool {
+        guard let folder = Store.gameFolder(for: appID),
+              let bundle = FixInstaller.nativeMacBundle(in: folder) else { return false }
+        return MacBundlePatch.canPatch(bundle)
+    }
+
     /// Runs the install test for a fix that is already on disk. Returns the message
     /// the store page or Properties window shows.
     @MainActor

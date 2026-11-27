@@ -43,7 +43,9 @@ enum FixService {
             } else if let testNote {
                 parts.append(testNote)
             }
-            if parts.isEmpty {
+            // A Mac build's patch is not one of the pack's files, so a repair that only
+            // had to write it back still has notes and no "nothing changed" sentence.
+            if parts.isEmpty, notes.isEmpty {
                 parts.append("The fix is in place; nothing needed changing.")
             }
             let worth = findings.filter { $0.level != .notice }
@@ -347,6 +349,21 @@ enum FixService {
         return outcome
     }
 
+    /// Puts the Mac build's patch back when a verify or an update took it. The files
+    /// are not in the pack, so `FixPack.verify` cannot see them; this is where that
+    /// half is restored, and it says so when it had work to do.
+    private static func repatchMacBuild(_ recipe: FixRecipe, folder: URL,
+                                        outcome: inout Outcome) {
+        guard recipe.picoPark2,
+              let bundle = FixInstaller.nativeMacBundle(in: folder) else { return }
+        guard let written = try? MacBundlePatch.setEnabled(true, app: bundle),
+              !written.isEmpty else { return }
+        let names = written.map { URL(fileURLWithPath: $0).lastPathComponent }
+        outcome.findings.removeAll { $0.code == "OF032" }
+        outcome.notes.append("Put the Mac build's patch back in "
+            + names.joined(separator: ", ") + " and signed it again.")
+    }
+
     // MARK: - Repair
 
     /// Puts back anything the pack says has changed since it was written.
@@ -441,9 +458,7 @@ enum FixService {
             clearLaunchWarning(recipe: &recipe, outcome: &outcome, folder: folder)
             auditRepair(&recipe, folder: folder, appID: appID, name: name, outcome: &outcome)
             recordPhotonPatch(&recipe, folder: folder)
-            if recipe.picoPark2, let bundle = FixInstaller.nativeMacBundle(in: folder) {
-                _ = try? MacBundlePatch.setEnabled(true, app: bundle)
-            }
+            repatchMacBuild(recipe, folder: folder, outcome: &outcome)
             outcome.notes.append("Every file the fix put in place is still there.")
             return outcome
         }
@@ -456,9 +471,7 @@ enum FixService {
         try? FixPack.write(recipe, in: folder)
         auditRepair(&recipe, folder: folder, appID: appID, name: name, outcome: &outcome)
         recordPhotonPatch(&recipe, folder: folder)
-        if recipe.picoPark2, let bundle = FixInstaller.nativeMacBundle(in: folder) {
-            _ = try? MacBundlePatch.setEnabled(true, app: bundle)
-        }
+        repatchMacBuild(recipe, folder: folder, outcome: &outcome)
         ensureWine(recipe, appID: appID)
         prepareLaunchOverrides(recipe: recipe, folder: folder)
         clearLaunchWarning(recipe: &recipe, outcome: &outcome, folder: folder)

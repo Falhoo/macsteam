@@ -464,7 +464,18 @@ private final class HubcapStorePage {
                         Task { await self.pushOnlineFixProgress(text, context: context) }
                     })
                 syncOnlineFixRouting()
-                response = try Self.encode(outcome)
+                // A Mac build's fix lives in the bundle, but Steam still starts the
+                // Windows build while the game is forced to NotProton, so the patch
+                // would never be what runs. Take the force off once it is installed.
+                var reply = try Self.encode(outcome)
+                if outcome.installed,
+                   OnlineFixEmbed.hasPatchableMacBuild(appID: request.appID),
+                   LaunchOptions.isMappedToCompatTool(appID: request.appID) {
+                    if await SteamUICompat.clearCompatTool(appID: request.appID) {
+                        reply["macLaunch"] = true
+                    }
+                }
+                response = reply
             case "remove":
                 // Take the game out of macSteam's config, with its DLC, depot keys
                 // and name, exactly as the macSteam app's Remove does. Steam drops
