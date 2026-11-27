@@ -24,6 +24,9 @@ enum PhotonLog {
         var failure: Failure
         /// The lines worth showing, in the order the game wrote them.
         var lines: [String]
+        /// False when the game's own log says Steam reported no licence for it
+        /// (`CheckAppOwnership: SPOOFING appid N (orig=0)`), nil when it says nothing.
+        var ownsApp: Bool?
 
         enum Failure: String, Sendable {
             /// Nothing in the log says Photon refused.
@@ -162,6 +165,45 @@ enum PhotonLog {
         return parse(text, source: url)
     }
 
+    /// True when this account holds no licence for the game, from what the game and
+    /// the client's own log said the last time it ran. Nil when neither says.
+    ///
+    /// The client's log is the reliable one: its licence hook prints
+    /// `CheckAppOwnership: SPOOFING appid N (orig=0)` only when Steam itself had no
+    /// licence, which is exactly the case that makes a Photon ticket worthless.
+    static func ownsApp(appID: Int, folder: URL, prefix: URL? = nil) -> Bool? {
+        if let evidence = read(gameFolder: folder, prefix: prefix), let owns = evidence.ownsApp {
+            return owns
+        }
+        return clientOwnership(appID: appID)
+    }
+
+    /// The last thing the client logged about owning this AppID.
+    static func clientOwnership(appID: Int) -> Bool? {
+        let file = Paths.home
+            .appendingPathComponent("Library/Application Support/macsteam/macsteam.log")
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let window: UInt64 = 2 * 1024 * 1024
+        try? handle.seek(toOffset: size > window ? size - window : 0)
+        guard let data = try? handle.readToEnd() else { return nil }
+        return ownership(inClientLog: String(decoding: data, as: UTF8.self), appID: appID)
+    }
+
+    /// The last verdict the client logged about owning `appID`, from a log's text.
+    /// Nil when the client never mentioned it.
+    static func ownership(inClientLog text: String, appID: Int) -> Bool? {
+        let marker = "CheckAppOwnership: SPOOFING appid \(appID) (orig="
+        var answer: Bool?
+        for line in text.components(separatedBy: .newlines) {
+            guard let range = line.range(of: marker) else { continue }
+            let digits = line[range.upperBound...].prefix { $0.isNumber }
+            if let orig = Int(digits) { answer = orig != 0 }
+        }
+        return answer
+    }
+
     private static func text(at url: URL) -> String? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         // UTF-8 first; the replacement decoder never fails, so one bad byte in a
@@ -174,12 +216,21 @@ enum PhotonLog {
         var ranAs: Int?
         var returnCode: Int?
         var message: String?
+        var ownsApp: Bool?
         var kept: [String] = []
 
         for raw in text.components(separatedBy: .newlines) {
             let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !line.isEmpty else { continue }
 
+            // "CheckAppOwnership: SPOOFING appid 3241660 (orig=0)": Steam said the
+            // account holds no licence for the game.
+            if line.contains("CheckAppOwnership") {
+                if let range = line.range(of: "orig=") {
+                    let digits = line[range.upperBound...].prefix { $0.isNumber }
+                    if let own = Int(digits) { ownsApp = own != 0 }
+                }
+            }
             if let range = line.range(of: "AppID = ") {
                 let digits = line[range.upperBound...].prefix { $0.isNumber }
                 if let id = Int(digits) { ranAs = id }
@@ -205,7 +256,7 @@ enum PhotonLog {
                         message: message, failure: classify(message: message,
                                                             returnCode: returnCode,
                                                             text: text),
-                        lines: Array(kept.suffix(12)))
+                        lines: Array(kept.suffix(12)), ownsApp: ownsApp)
     }
 
     /// Which side refused. Photon names it in the message: a ticket it passed to

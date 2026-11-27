@@ -304,7 +304,7 @@ from the dylib, so rebuilding the dylib is not enough for a runner change to tak
 `CrossOverInstaller.swift` and `Resources/crossover-install.sh` are the merged 0.8.5 work,
 with the script's licence patch tail deliberately removed.
 
-Tests: `swift test` in `onlinefix/`, 254 Swift Testing tests in 31 suites, all passing;
+Tests: `swift test` in `onlinefix/`, 266 Swift Testing tests in 33 suites, all passing;
 `macsteam-app` has 46 XCTest cases. Use
 `--disable-sandbox` (or `/tmp/swiftshim/swift`) if the macro plugin fails under the
 sandbox, and delete `.build/.lock` after a killed run. `git checkout` in `macsteam-repo`
@@ -327,6 +327,20 @@ fails with an index lock permission error; use `git_restore` instead.
   game can use Steam's relay for voice or achievements. A Steam-auth game that is not
   R.E.P.O. and has no log yet can still look like custom auth until its first run writes
   a Player.log. A positive canary on an owned game is the check.
+- Photon games nobody owns cannot use a ticket, so they are routed onto OnlineFix's
+  shared app with Custom auth (`.customUnlicensed`). The wire part is proven on R.E.P.O.:
+  the log shows `Photon - AppId (Realtime): 80449c66…` and Photon's own
+  `Authentication type 'Custom' not supported`, so the patched `get_AuthType` is what
+  the client sends. What is *not* proven is an accepted connection: all three shared
+  apps answer 32755 (`Authentication type not supported`), as does the stock app. The
+  next lever is `Custom.dll`'s `AuthParameters`/`UserId` payload — the file is
+  VMProtect-packed and has to be decompiled, and its only plaintext GUID
+  `9551E103-6003-43B6-9415-D4FF80EEFAEA` is not an app that accepts Custom either.
+- A file fixed only by a patch (Photon id or auth) is not an OnlineFix file: it must be
+  restored from its backup, not deleted, when the fix comes off. `FixInstaller.uninstall`
+  and `FixPack.undo` both check `.onlinefix-photonauth-backup` and
+  `.onlinefix-photon-backup` before removing anything, and `FixPack.verify` leaves a
+  file the auth patch owns to that patch.
 - The SwiftPM release executable needs `@executable_path/../Frameworks` added with
   `install_name_tool` before it is put in the app bundle; otherwise Sparkle fails to
   load at launch. The installed 0.8.10 has that rpath.

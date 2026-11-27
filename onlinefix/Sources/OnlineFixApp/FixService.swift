@@ -283,14 +283,28 @@ enum FixService {
             vendorLoader: PhotonChain.hasVendorLoader(in: folder, exe: latestScan.exe),
             candidates: candidates,
             usesSteamNetworking: latestScan.usesSteamNetworking,
+            ownsApp: log?.ownsApp ?? PhotonLog.ownsApp(appID: appID, folder: folder,
+                                                       prefix: scan.prefix),
             log: log)
-        if plan.photonSwap, finalRoute.installsOnlineFix {
-            let report = PhotonPatch.autoPatch(in: folder, realtime: photonRealtime,
-                                               voice: photonVoice)
+        // An unowned game plays on OnlineFix's shared app, so its ids are the ones
+        // written; there is no ticket of its own to keep.
+        var authWritten: [String] = []
+        if plan.photonSwap, finalRoute.installsOnlineFix || finalRoute.kind == .customUnlicensed {
+            let shared = PhotonIDs.shared
+            let wanted = finalRoute.kind == .customUnlicensed && !shared.isEmpty
+                ? shared : [photonRealtime, photonVoice]
+            let report = PhotonPatch.autoPatch(in: folder, realtime: wanted[0],
+                                               voice: wanted.count > 1 ? wanted[1] : "")
             photonWritten = report.written
             outcome.photonTargets = report.targets
         } else if plan.photonSwap {
             plan.photonSwap = false
+        }
+        // The auth type is the other half: without it Photon still asks Steam to
+        // vouch for a game this account does not hold.
+        if let mode = plan.photonAuth {
+            authWritten = try PhotonAuth.setEnabled(true, in: folder, mode: mode)
+            photonWritten += authWritten
         }
 
         var recipe = FixRecipe(
@@ -299,6 +313,7 @@ enum FixService {
             entries: [], removed: applied.removed,
             keepRealAppID: plan.keepRealAppID, photonSwap: plan.photonSwap,
             photonRoute: finalRoute.kind.rawValue,
+            photonAuth: plan.photonAuth?.rawValue,
             picoPark2: plan.picoPark2, wineDLLs: plan.wineDLLs,
             notes: applied.notes + plan.notes)
         recipe.photonPatched = photonWritten.map {
@@ -352,6 +367,19 @@ enum FixService {
     /// Puts the Mac build's patch back when a verify or an update took it. The files
     /// are not in the pack, so `FixPack.verify` cannot see them; this is where that
     /// half is restored, and it says so when it had work to do.
+    /// Puts the Photon auth patch back if a Steam verify replaced the assembly.
+    private static func repatchPhotonAuth(_ recipe: FixRecipe, folder: URL,
+                                          outcome: inout Outcome) {
+        guard let raw = recipe.photonAuth, let mode = PhotonAuth.Mode(rawValue: raw) else {
+            return
+        }
+        guard let written = try? PhotonAuth.setEnabled(true, in: folder, mode: mode),
+              !written.isEmpty else { return }
+        outcome.notes.append("Put the Photon auth patch back in "
+            + written.map { URL(fileURLWithPath: $0).lastPathComponent }
+                .joined(separator: ", ") + ".")
+    }
+
     private static func repatchMacBuild(_ recipe: FixRecipe, folder: URL,
                                         outcome: inout Outcome) {
         guard recipe.picoPark2,
@@ -459,6 +487,7 @@ enum FixService {
             auditRepair(&recipe, folder: folder, appID: appID, name: name, outcome: &outcome)
             recordPhotonPatch(&recipe, folder: folder)
             repatchMacBuild(recipe, folder: folder, outcome: &outcome)
+            repatchPhotonAuth(recipe, folder: folder, outcome: &outcome)
             outcome.notes.append("Every file the fix put in place is still there.")
             return outcome
         }
@@ -472,6 +501,7 @@ enum FixService {
         auditRepair(&recipe, folder: folder, appID: appID, name: name, outcome: &outcome)
         recordPhotonPatch(&recipe, folder: folder)
         repatchMacBuild(recipe, folder: folder, outcome: &outcome)
+        repatchPhotonAuth(recipe, folder: folder, outcome: &outcome)
         ensureWine(recipe, appID: appID)
         prepareLaunchOverrides(recipe: recipe, folder: folder)
         clearLaunchWarning(recipe: &recipe, outcome: &outcome, folder: folder)
@@ -593,7 +623,8 @@ enum FixService {
                 installedChain: PhotonFix.status(gameFolder: folder,
                                                  fixInstalled: true).isPhoton,
                 vendorLoader: PhotonChain.hasVendorLoader(in: folder, exe: scan.exe),
-                usesSteamNetworking: scan.usesSteamNetworking, log: log)
+                usesSteamNetworking: scan.usesSteamNetworking,
+                ownsApp: log?.ownsApp, log: log)
             guard route.installsOnlineFix else { return }
         }
         let targets = recipe.photonIDs ?? []

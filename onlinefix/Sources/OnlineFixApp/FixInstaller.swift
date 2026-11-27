@@ -301,18 +301,23 @@ enum FixInstaller {
         var changed = 0
         for path in fix.files {
             let file = URL(fileURLWithPath: path)
-            // A Photon patch keeps the untouched asset under its own suffix; putting
-            // it back is not the same file as OnlineFix's copied-DLL backup.
-            let photon = file.appendingPathExtension("onlinefix-photon-backup")
-            if fm.fileExists(atPath: photon.path) {
+            // A patch keeps the untouched file under its own suffix. Putting one back
+            // is not the same as removing OnlineFix's copy: the game needs the file.
+            // The auth patch has its own suffix, and a file it edits is also one the
+            // id patch edits, so both are checked before the copied-DLL backup.
+            for suffix in [PhotonAuth.backupSuffix, ".onlinefix-photon-backup"] {
+                let kept = URL(fileURLWithPath: file.path + suffix)
+                guard fm.fileExists(atPath: kept.path) else { continue }
                 if fm.fileExists(atPath: file.path) { try fm.removeItem(at: file) }
-                try fm.moveItem(at: photon, to: file)
+                try fm.moveItem(at: kept, to: file)
                 changed += 1
-                continue
+                break
             }
+            if fm.fileExists(atPath: file.path) { continue }
+            // OnlineFix replaced this file, so its untouched copy goes back; with no
+            // copy it was OnlineFix's own file and is removed.
             let backup = file.appendingPathExtension("onlinefix-backup")
             if fm.fileExists(atPath: backup.path) {
-                if fm.fileExists(atPath: file.path) { try fm.removeItem(at: file) }
                 try fm.moveItem(at: backup, to: file)
                 changed += 1
             } else if fm.fileExists(atPath: file.path) {

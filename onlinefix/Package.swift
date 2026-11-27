@@ -24,6 +24,9 @@ let package = Package(
             name: "OnlineFixAppTests",
             dependencies: ["OnlineFixApp"],
             path: "Tests/OnlineFixAppTests",
+            // A stock Photon client assembly: the auth patch reads real IL, and a
+            // hand-built assembly would only prove the reader agrees with itself.
+            resources: [.copy("Fixtures")],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]

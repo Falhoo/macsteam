@@ -59,6 +59,9 @@ struct FixPlan: Sendable {
     var keepRealAppID = false
     var picoPark2 = false
     var photonSwap = false
+    /// The auth type to write into the game's Photon assembly, when the game's own
+    /// Steam ticket cannot be accepted (an account that does not own the game).
+    var photonAuth: PhotonAuth.Mode?
     var notes: [String] = []
 
     var isEmpty: Bool {
@@ -173,6 +176,8 @@ struct FixPlan: Sendable {
             vendorLoader: PhotonChain.hasVendorLoader(in: scan.folder, exe: scan.exe),
             candidates: candidates,
             usesSteamNetworking: scan.usesSteamNetworking,
+            ownsApp: log?.ownsApp ?? PhotonLog.ownsApp(appID: appID, folder: scan.folder,
+                                                       prefix: scan.prefix),
             log: log ?? PhotonLog.read(gameFolder: scan.folder, prefix: scan.prefix))
         let steamAuthPhoton = route.isSteamAuth
 
@@ -186,6 +191,7 @@ struct FixPlan: Sendable {
         // Everything the loader needs, and nothing of Steam's own DLL again. A tree
         // such as `BepInEx/core` keeps its shape: the preloader is only found there.
         let keepsOwnPhoton = steamAuthPhoton || route.kind == .nativeCustom
+            || route.kind == .customUnlicensed
         for item in package.items where !FixPackage.apiNames.contains(item.name)
             && fits(item, scan: scan) {
             if keepsOwnPhoton, isPhotonChainItem(item, package: package) { continue }
@@ -293,6 +299,18 @@ struct FixPlan: Sendable {
 
         plan.keepRealAppID = scan.usesSteamNetworking || route.isSteamAuth
         plan.photonSwap = photonWanted && !plan.isEmpty
+
+        // An unowned game is played on OnlineFix's shared Photon app with custom auth,
+        // so the game's own ids have to go: a ticket for its own app cannot be
+        // validated, which is the whole reason for the route.
+        if route.kind == .customUnlicensed, !PhotonIDs.shared.isEmpty {
+            plan.photonSwap = true
+            plan.photonAuth = .custom
+            plan.notes.append("Steam has no licence for this game, so its own Photon app "
+                + "cannot check the ticket. It runs on OnlineFix's shared app with custom "
+                + "auth instead: the app id is replaced and the auth type its Photon "
+                + "assembly sends is changed. Both are backed up and put back on removal.")
+        }
         if steamAuthPhoton {
             plan.notes.append("This Photon app takes Steam's auth ticket, so the game runs as "
                 + "its real AppID and the OnlineFix chain is left out. Its BepInEx preloader "

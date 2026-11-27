@@ -32,6 +32,9 @@ struct FixRecipe: Codable, Sendable, Equatable {
     /// The route the install used, so a repair does not re-apply a Photon swap to a
     /// Steam-auth game. Optional so packs written by older builds still decode.
     var photonRoute: String? = nil
+    /// The auth type the install wrote into the game's Photon assembly (custom or
+    /// none), so a repair re-applies it and an undo restores the assembly.
+    var photonAuth: String? = nil
     var picoPark2: Bool
     /// Files the Photon swap changed in place, as paths from the game folder. Their
     /// untouched copies are beside them with `.onlinefix-photon-backup`.
@@ -258,6 +261,11 @@ enum FixPack {
         if let ids = recipe.photonIDs, !ids.isEmpty {
             for relative in recipe.photonPatched ?? [] {
                 guard let file = file(relative, in: gameFolder) else { continue }
+                // A file the auth patch also edits keeps its own untouched copy, and
+                // that copy is what says whether it is intact.
+                if Paths.fm.fileExists(atPath: file.path + PhotonAuth.backupSuffix) {
+                    continue
+                }
                 let backup = file.appendingPathExtension("onlinefix-photon-backup")
                 // A game can keep its ids in more than one file (settings in
                 // resources.assets, a copy in an assembly), and each file carries
@@ -338,6 +346,10 @@ enum FixPack {
                 failed.append(relative)
                 continue
             }
+            // Restored by the auth patch below, from its own copy.
+            if Paths.fm.fileExists(atPath: file.path + PhotonAuth.backupSuffix) {
+                continue
+            }
             let backup = file.appendingPathExtension("onlinefix-photon-backup")
             guard Paths.fm.fileExists(atPath: backup.path) else {
                 if Paths.fm.fileExists(atPath: file.path) { failed.append(relative) }
@@ -363,6 +375,15 @@ enum FixPack {
                 continue
             }
             if putBack(back, at: file) { changed += 1 } else { failed.append(relative) }
+        }
+
+        if recipe.photonAuth != nil {
+            do {
+                try PhotonAuth.setEnabled(false, in: gameFolder)
+                changed += 1
+            } catch {
+                failed.append("the Photon auth patch")
+            }
         }
 
         if recipe.picoPark2,

@@ -60,6 +60,44 @@ public enum OnlineFixCommand {
         return outcome.installed ? 0 : 1
     }
 
+    /// Reads the auth type a game's Photon assembly sends, and what the patch would
+    /// make it: --onlinefix-photon-auth <appid> [--name <name>] [--apply] [--off].
+    ///
+    /// The getter and setter of `AuthenticationValues.AuthType` are the levers: an
+    /// unowned game can only connect to an app registered for custom auth, so the
+    /// patch rewrites the getter to return that value.
+    public static func photonAuth(appID: Int, name: String = "", folder override: URL? = nil,
+                                  apply: Bool = false, off: Bool = false,
+                                  strip: Bool = false) -> Int32 {
+        let stored = Store.load().games.first { $0.id == appID }?.name ?? ""
+        let typed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let display = typed.isEmpty ? (stored.isEmpty ? "App \(appID)" : stored) : typed
+        guard let folder = override ?? Store.gameFolder(for: appID, name: display) else {
+            FileHandle.standardError.write(Data(
+                "No game folder for \(display). Install it in Steam first.\n".utf8))
+            return 1
+        }
+        print("\(display): \(folder.path)")
+        let infos = PhotonAuth.inspect(gameFolder: folder)
+        guard !infos.isEmpty else {
+            print("No Photon client assembly here, so there is no auth type to change.")
+            return 0
+        }
+        for info in infos { print("  " + info.summary) }
+        print(strip ? "mode: send no auth at all" : "mode: send custom auth")
+        guard apply else { return 0 }
+        do {
+            let written = try PhotonAuth.setEnabled(!off, in: folder,
+                                                    mode: strip ? .none : .custom)
+            print(written.isEmpty ? "nothing to change" : "wrote:")
+            for path in written { print("  \(path)") }
+            return 0
+        } catch {
+            FileHandle.standardError.write(Data((error.localizedDescription + "\n").utf8))
+            return 1
+        }
+    }
+
     /// Reads the Photon app ids a game's files carry and says what the automatic patch
     /// would do with them, writing nothing. This is the read-only half of the lab: a
     /// wrong guess shows up here, before any file is changed.
@@ -191,6 +229,8 @@ public enum OnlineFixCommand {
             print("install: OnlineFix's chain and shared Photon app")
         case .nativeCustom:
             print("install: keep the game's own ids, no chain")
+        case .customUnlicensed:
+            print("install: OnlineFix's shared Photon app and custom auth (no licence)")
         case .ambiguous:
             print("install: nothing until the conflicting evidence is resolved")
         case .notPhoton:

@@ -23,6 +23,10 @@ enum PhotonRoute {
         case nativeCustom
         /// Photon is present but the evidence does not say which side checks it.
         case ambiguous
+        /// The account does not own the game, so no Steam ticket can be valid for
+        /// the game's own Photon app. OnlineFix's shared app is used instead, with
+        /// the auth type the fix writes: custom auth, which asks Steam nothing.
+        case customUnlicensed
     }
 
     struct Decision: Sendable, Equatable {
@@ -37,7 +41,9 @@ enum PhotonRoute {
 
         var isSteamAuth: Bool { kind == .steamAuth }
         var installsOnlineFix: Bool { kind == .onlineFix }
-        var swapsIDs: Bool { kind == .onlineFix }
+        /// True when the game's own app ids have to be replaced: OnlineFix's app is
+        /// used for both the shared route and the unlicensed one.
+        var swapsIDs: Bool { kind == .onlineFix || kind == .customUnlicensed }
 
         var title: String {
             switch kind {
@@ -46,6 +52,7 @@ enum PhotonRoute {
             case .onlineFix: return "OnlineFix shared Photon route"
             case .nativeCustom: return "The game's own Photon app"
             case .ambiguous: return "Photon route not determined"
+            case .customUnlicensed: return "OnlineFix's app, no licence"
             }
         }
     }
@@ -65,6 +72,7 @@ enum PhotonRoute {
                        vendorLoader: Bool = false,
                        candidates: [PhotonPatch.Candidate] = [],
                        usesSteamNetworking: Bool = false,
+                       ownsApp: Bool? = nil,
                        log: PhotonLog.Evidence? = nil) -> Decision {
         let shared = candidates.filter(\.isOnlineFixShared)
         let own = candidates.filter { !$0.isOnlineFixShared }
@@ -72,6 +80,10 @@ enum PhotonRoute {
             || installedChain
         let photon = isPhoton || hasPatch || !shared.isEmpty
         let ticket = log?.requestsSteamTicket == true
+        // A game this account does not own cannot pass Photon's Steam-ticket check:
+        // the ticket Steam signs is not for an app the account holds. Custom auth on
+        // OnlineFix's app is the way round it, so ownership outranks the ticket.
+        let unlicensed = ownsApp == false
         // R.E.P.O.'s own realtime/voice pair is Steam-auth even before its first log
         // exists. Without this, a fresh install with a generic Custom.dll package
         // looks like custom auth and gets the BepInEx chain that Unity 6 hangs on.
@@ -82,6 +94,7 @@ enum PhotonRoute {
 
         var reasons: [String] = []
         if vendorLoader { reasons.append("OnlineFix's own loader is in the game folder") }
+        if unlicensed { reasons.append("the account does not own the game, so no ticket can be valid") }
         if ticket { reasons.append("the game's log asks Steam for an auth ticket") }
         if steamAuthPair { reasons.append("the game's files carry its own Steam-auth Photon pair") }
         if hasPatch { reasons.append("the package carries OnlineFix's Photon patch") }
@@ -98,6 +111,11 @@ enum PhotonRoute {
         let kind: Kind
         if !photon {
             kind = .notPhoton
+        } else if unlicensed {
+            // Before the vendor loader: the payload copies itself in during the
+            // install, so the loader is there either way, and it must not drag a
+            // ticket-based game back onto the ticket.
+            kind = .customUnlicensed
         } else if vendorLoader {
             // OnlineFix's own loader is the chain that replaces Photon's Steam
             // ticket with its custom auth: the launch log shows WINMM.dll,

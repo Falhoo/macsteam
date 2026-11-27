@@ -1,5 +1,8 @@
 // The route matrix: which evidence wins, and what must not be inferred from
 // Steam networking alone.
+// An account that does not own a game cannot pass Photon's Steam-ticket check, so the
+// route has to change from the ticket to OnlineFix's app and custom auth. These pin
+// that, and that an owned game keeps the old, preferred route.
 import Foundation
 import Testing
 @testable import OnlineFixApp
@@ -142,4 +145,50 @@ struct PhotonRouteTests {
         #expect(route.kind == .onlineFix)
         #expect(route.installsOnlineFix)
     }
+}
+
+    /// Not owned: the game's own app cannot validate a ticket, so its ids go and
+    /// custom auth is written, whatever the ticket line says.
+    @Test
+    func anUnownedGameUsesTheSharedAppAndCustomAuth() {
+        let decision = PhotonRoute.decide(
+            isPhoton: true, packagePresent: true,
+            packageHasCustom: true, packageHasChain: true,
+            candidates: [
+                PhotonPatch.Candidate(file: URL(fileURLWithPath: "/g/x.dll"),
+                                      id: "99515094-45b7-4c98-ab70-a448c548c83d",
+                                      kind: .guid, offset: 0, settings: true),
+            ],
+            ownsApp: false)
+        #expect(decision.kind == .customUnlicensed)
+        #expect(decision.swapsIDs)
+        #expect(decision.reasons.contains { $0.contains("does not own") })
+    }
+
+    /// Owned: the ticket is good, so nothing moves the game off its own app.
+    @Test
+    func anOwnedGameKeepsTheSteamRoute() {
+        let decision = PhotonRoute.decide(
+            isPhoton: true, packagePresent: true, packageHasCustom: true,
+            candidates: [
+                PhotonPatch.Candidate(file: URL(fileURLWithPath: "/g/x.dll"),
+                                      id: "99515094-45b7-4c98-ab70-a448c548c83d",
+                                      kind: .guid, offset: 0, settings: true),
+            ],
+            ownsApp: true)
+        #expect(decision.kind == .steamAuth)
+    }
+
+    /// Ownership is unknown on a first run: nothing is decided by a guess, so the
+    /// ticket evidence still rules.
+    @Test
+    func withoutOwnershipEvidenceTheTicketDecides() {
+        let decision = PhotonRoute.decide(
+            isPhoton: true, packagePresent: true, packageHasCustom: true,
+            candidates: [
+                PhotonPatch.Candidate(file: URL(fileURLWithPath: "/g/x.dll"),
+                                      id: "99515094-45b7-4c98-ab70-a448c548c83d",
+                                      kind: .guid, offset: 0, settings: true),
+            ])
+        #expect(decision.kind == .steamAuth)
 }

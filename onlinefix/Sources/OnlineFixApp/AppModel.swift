@@ -1048,6 +1048,8 @@ final class AppModel: ObservableObject {
             vendorLoader: PhotonChain.hasVendorLoader(in: folder, exe: nil),
             candidates: found,
             usesSteamNetworking: SteamNetworking.uses(appID: appID, gameFolder: folder),
+            ownsApp: log?.ownsApp ?? PhotonLog.ownsApp(appID: appID, folder: folder,
+                                                       prefix: WineOverride.prefix(appID: appID)),
             log: log)
         guard route.installsOnlineFix else { return nil }
         // A Mac build takes the patch in its own files: the Photon app id, and any code
@@ -1100,6 +1102,8 @@ final class AppModel: ObservableObject {
             vendorLoader: PhotonChain.hasVendorLoader(in: folder, exe: nil),
             candidates: found,
             usesSteamNetworking: SteamNetworking.uses(appID: appID, gameFolder: folder),
+            ownsApp: log?.ownsApp ?? PhotonLog.ownsApp(appID: appID, folder: folder,
+                                                       prefix: WineOverride.prefix(appID: appID)),
             log: log)
         guard route.installsOnlineFix else { return }
 

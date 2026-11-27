@@ -41,6 +41,10 @@ struct FixDiagnosis: Sendable {
 
     mutating func add(_ finding: FixFinding) { findings.append(finding) }
 
+    /// Drops a finding another one supersedes, so the player is told the one thing
+    /// that is true for this account.
+    mutating func forget(_ code: String) { findings.removeAll { $0.code == code } }
+
     /// The rules, in the order the work happens.
     static func run(scan: GameScan, package: FixPackage?,
                     candidates: [PhotonPatch.Candidate] = [],
@@ -201,12 +205,37 @@ struct FixDiagnosis: Sendable {
         // OF070: what Photon said the last time the game tried to connect. The
         // game's own log is the only thing that knows, and the line the player sees
         // ("Failed to connect to Photon Network") does not say which side refused.
+        let unlicensed = PhotonLog.ownsApp(appID: scan.appID, folder: scan.folder,
+                                           prefix: scan.prefix) == false
         if scan.isPhoton,
-           let evidence = PhotonLog.read(gameFolder: scan.folder, prefix: scan.prefix),
-           evidence.isFailure {
-            diagnosis.add(FixFinding(code: "OF070", level: .warning,
-                                     title: evidence.title, detail: evidence.detail,
-                                     remedy: evidence.remedy))
+           let evidence = PhotonLog.read(gameFolder: scan.folder, prefix: scan.prefix) {
+            if evidence.isFailure {
+                diagnosis.add(FixFinding(code: "OF070", level: .warning,
+                                         title: evidence.title, detail: evidence.detail,
+                                         remedy: evidence.remedy))
+                // The ticket the log says Steam refused is the one this account
+                // cannot have, so the fix that matters is the one below it, not the
+                // "own the game" advice.
+                if unlicensed { diagnosis.forget("OF070") }
+            }
+            // OF071: the account holds no licence, so no ticket Steam signs can be
+            // valid for the game's own Photon app. What is left is OnlineFix's shared
+            // app and the auth type its Photon assembly sends, both of which the
+            // install writes.
+            if unlicensed,
+               let auth = PhotonAuth.inspect(gameFolder: scan.folder).first,
+               auth.canPatch {
+                diagnosis.add(FixFinding(
+                    code: "OF071", level: .notice,
+                    title: "Steam has no licence for this game",
+                    detail: "Its own log says Steam reported no licence "
+                        + "(`CheckAppOwnership: SPOOFING appid … (orig=0)`), so Photon cannot "
+                        + "check a ticket for the game's own app. Photon is asked anyway, and "
+                        + "refuses with an error from Steam.",
+                    remedy: "Point the game at OnlineFix's shared app and make its Photon "
+                        + "assembly send custom auth instead of a ticket; both are written by "
+                        + "the install and backed up"))
+            }
         }
 
         // OF040: the Visual C++ runtime the fix and the game both need.

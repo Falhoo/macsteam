@@ -30,6 +30,9 @@ enum PhotonProfile {
         case nativeCustom
         /// Photon is there, but no app id was readable.
         case unknown
+        /// The account does not own the game, so it plays on OnlineFix's app with
+        /// the custom auth the fix writes.
+        case customUnlicensed
     }
 
     struct Profile: Sendable, Equatable {
@@ -51,6 +54,7 @@ enum PhotonProfile {
             case .onlineFix: return "OnlineFix's shared Photon app"
             case .nativeCustom: return "The game's own Photon app"
             case .unknown: return "Photon app not found"
+            case .customUnlicensed: return "OnlineFix's app (no licence)"
             }
         }
 
@@ -77,6 +81,11 @@ enum PhotonProfile {
             case .unknown:
                 return "Photon is present, but no app id could be read from the game's files, so "
                     + "there is no target to check or patch."
+            case .customUnlicensed:
+                return "Steam has no licence for this game, so the ticket it signs is not for an "
+                    + "app the game's own Photon application accepts. The fix points the game at "
+                    + "OnlineFix's shared app and changes the auth type its Photon assembly sends "
+                    + "to custom auth, which asks Steam nothing."
             }
         }
 
@@ -100,6 +109,9 @@ enum PhotonProfile {
             case .unknown:
                 return "Find the Photon app id in the patch sheet, or install the fix that carries "
                     + "the game's ids."
+            case .customUnlicensed:
+                return "Nothing to undo: install the fix and launch the game. If Photon still "
+                    + "refuses, the shared app is the part to change, not your account."
             }
         }
 
@@ -133,7 +145,9 @@ enum PhotonProfile {
             id.caseInsensitiveCompare(PhotonIDs.realtime) == .orderedSame
                 || id.caseInsensitiveCompare(PhotonIDs.voice) == .orderedSame
         }
-        if profile.requestsSteamTicket || steamAuthPair {
+        if log?.ownsApp == false {
+            profile.route = .customUnlicensed
+        } else if profile.requestsSteamTicket || steamAuthPair {
             profile.route = profile.usesSharedApp ? .steamAuthWithSharedApp : .steamAuth
         } else if profile.usesSharedApp {
             profile.route = .onlineFix

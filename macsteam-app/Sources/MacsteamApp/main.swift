@@ -166,6 +166,28 @@ if let index = CommandLine.arguments.firstIndex(of: "--onlinefix-mac-patch"),
         off: CommandLine.arguments.contains("--off")))
 }
 
+// Reads the auth type a game's Photon assembly sends, and what the patch would make
+// it: --onlinefix-photon-auth <appid> [--name <name>] [--folder <path>] [--apply|--off].
+if let index = CommandLine.arguments.firstIndex(of: "--onlinefix-photon-auth"),
+   CommandLine.arguments.count > index + 1,
+   let appID = Int(CommandLine.arguments[index + 1]) {
+    var name = ""
+    if let nameIndex = CommandLine.arguments.firstIndex(of: "--name"),
+       CommandLine.arguments.count > nameIndex + 1 {
+        name = CommandLine.arguments[nameIndex + 1]
+    }
+    var folder: URL?
+    if let folderIndex = CommandLine.arguments.firstIndex(of: "--folder"),
+       CommandLine.arguments.count > folderIndex + 1 {
+        folder = URL(fileURLWithPath: CommandLine.arguments[folderIndex + 1])
+    }
+    exit(OnlineFixCommand.photonAuth(
+        appID: appID, name: name, folder: folder,
+        apply: CommandLine.arguments.contains("--apply"),
+        off: CommandLine.arguments.contains("--off"),
+        strip: CommandLine.arguments.contains("--strip")))
+}
+
 // Reads every piece of Photon evidence and says which route it selects, writing
 // nothing: --onlinefix-photon-audit <appid> [--name <name>].
 if let index = CommandLine.arguments.firstIndex(of: "--onlinefix-photon-audit"),
