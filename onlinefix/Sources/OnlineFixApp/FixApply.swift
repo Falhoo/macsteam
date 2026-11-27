@@ -54,6 +54,8 @@ enum FixApply {
                 changed = setAppIDs(at: edit.path, appID: appID)
             case .iniPhotonIntegration:
                 changed = enablePhotonIntegration(at: edit.path)
+            case .iniPhotonIntegrationOff:
+                changed = disablePhotonIntegration(at: edit.path)
             case .dllListEntries:
                 let names = edit.names.isEmpty ? dllListNames(for: plan) : edit.names
                 let ensured = ensureDLLListEntries(names, at: edit.path)
@@ -266,11 +268,21 @@ enum FixApply {
     /// missing and grow a second section on every pass.
     @discardableResult
     static func enablePhotonIntegration(at url: URL) -> Bool {
+        setPhotonIntegration(at: url, enabled: true)
+    }
+
+    /// A Steam-auth game keeps its own Photon app and does not load OnlineFix's
+    /// chain. Leaving the key on makes the loader look for a plugin that is gone.
+    static func disablePhotonIntegration(at url: URL) -> Bool {
+        setPhotonIntegration(at: url, enabled: false)
+    }
+
+    private static func setPhotonIntegration(at url: URL, enabled: Bool) -> Bool {
         guard var text = read(url) else { return false }
-        let wanted = ["true", "yes", "1"]
+        let on = ["true", "yes", "1"]
         let lineEnding = text.contains("\r\n") ? "\r" : ""
         var lines = text.components(separatedBy: "\n")
-        // A value that is already on is left alone. A value that is off is
+        // A value that already says what we want is left alone. Otherwise it is
         // replaced in place: adding a second key above it leaves whichever one
         // the payload reads last deciding the answer.
         if let index = lines.firstIndex(where: {
@@ -283,18 +295,23 @@ enum FixApply {
             let parts = raw.split(separator: "=", maxSplits: 1).map(String.init)
             let value = parts.count == 2
                 ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() : ""
-            if wanted.contains(value) { return false }
+            if on.contains(value) == enabled { return false }
             let indent = raw.prefix { $0 == " " || $0 == "\t" }
             let carriageReturn = raw.hasSuffix("\r") ? "\r" : ""
-            lines[index] = "\(indent)PhotonIntegration=true\(carriageReturn)"
-        } else if let index = lines.firstIndex(where: {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "[misc]"
-        }) {
-            lines.insert("PhotonIntegration=true\(lineEnding)", at: index + 1)
+            lines[index] = "\(indent)PhotonIntegration=\(enabled ? "true" : "false")\(carriageReturn)"
+        } else if enabled {
+            if let index = lines.firstIndex(where: {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "[misc]"
+            }) {
+                lines.insert("PhotonIntegration=true\(lineEnding)", at: index + 1)
+            } else {
+                if lines.last?.isEmpty == false { lines.append("") }
+                lines.append("[Misc]\(lineEnding)")
+                lines.append("PhotonIntegration=true\(lineEnding)")
+            }
         } else {
-            if lines.last?.isEmpty == false { lines.append("") }
-            lines.append("[Misc]\(lineEnding)")
-            lines.append("PhotonIntegration=true\(lineEnding)")
+            // Absent already means off.
+            return false
         }
         text = lines.joined(separator: "\n")
         return write(text, to: url)

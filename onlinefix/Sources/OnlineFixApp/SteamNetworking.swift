@@ -44,7 +44,7 @@ enum SteamNetworking {
 
     /// Part of the cache key. A change to what the scan looks at must not keep
     /// answering from what an older build worked out.
-    private static let cacheVersion = "3"
+    private static let cacheVersion = "4"
 
     private static var cacheFile: URL {
         Paths.appSupport.appendingPathComponent("steam-networking.json")
@@ -82,7 +82,10 @@ enum SteamNetworking {
     /// The remembered answer for this game folder, scanning it the first time.
     static func uses(appID: Int, gameFolder: URL?) -> Bool {
         guard let folder = gameFolder else { return false }
-        let key = "\(cacheVersion):\(appID):\(folder.path)"
+        // A Steam update replaces the executable without moving the folder, so the
+        // path alone would keep answering from the old build. The stamp is the
+        // size and modification time of the game's own binaries, not the fix's.
+        let key = "\(cacheVersion):\(appID):\(folder.path):\(stamp(folder: folder))"
         var cache = loadCache()
         if let known = cache[key] { return known }
         let answer = scan(folder: folder)
@@ -117,6 +120,35 @@ enum SteamNetworking {
             if wanted.contains(where: { data.range(of: $0) != nil }) { return true }
         }
         return false
+    }
+
+    /// The game's own binaries, named by relative path, size and modification
+    /// time. A fix's files are left out: they change when the fix is installed, and
+    /// they are not evidence about the game.
+    private static func stamp(folder: URL) -> String {
+        guard let enumerator = FileManager.default.enumerator(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey,
+                                         .contentModificationDateKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return "none" }
+        var parts: [String] = []
+        for case let url as URL in enumerator {
+            if enumerator.level > maxDepth {
+                enumerator.skipDescendants()
+                continue
+            }
+            let name = url.lastPathComponent.lowercased()
+            guard !fixFiles.contains(name), !name.hasSuffix(".onlinefix-backup"),
+                  extensions.contains(url.pathExtension.lowercased()),
+                  let values = try? url.resourceValues(forKeys: [.isRegularFileKey,
+                                                                .fileSizeKey,
+                                                                .contentModificationDateKey]),
+                  values.isRegularFile == true,
+                  let size = values.fileSize else { continue }
+            let date = values.contentModificationDate?.timeIntervalSince1970 ?? 0
+            parts.append("\(name):\(size):\(Int(date))")
+        }
+        return parts.sorted().joined(separator: ",")
     }
 
     private static func loadCache() -> [String: Bool] {

@@ -93,4 +93,33 @@ struct PhotonChainTests {
         #expect(!FileManager.default.fileExists(
             atPath: game.appendingPathComponent("winmm.dll").path))
     }
+
+    /// R.E.P.O. and PICO PARK 2 both ship OnlineFix's own loader beside the game,
+    /// which the runner's log shows loading into the game's Mono. Its presence is
+    /// what makes the vendor route available, with no BepInEx chain on disk.
+    @Test
+    func theVendorLoaderIsFoundBesideTheGame() throws {
+        let game = try folder("vendor")
+        defer { try? FileManager.default.removeItem(at: game) }
+        let exe = game.appendingPathComponent("REPO.exe")
+        try write("MZ", to: exe)
+
+        #expect(!PhotonChain.hasVendorLoader(in: game, exe: exe))
+
+        try write("MZ", to: game.appendingPathComponent("OnlineFix64.dll"))
+        #expect(PhotonChain.hasVendorLoader(in: game, exe: exe))
+    }
+
+    /// A game that runs one folder down finds the loader where Steam starts it.
+    @Test
+    func theVendorLoaderIsFoundInTheLaunchFolder() throws {
+        let game = try folder("nested")
+        defer { try? FileManager.default.removeItem(at: game) }
+        let launch = game.appendingPathComponent("Binaries/Win64", isDirectory: true)
+        let exe = launch.appendingPathComponent("Game-Win64-Shipping.exe")
+        try write("MZ", to: exe)
+        try write("MZ", to: launch.appendingPathComponent("OnlineFix64.dll"))
+
+        #expect(PhotonChain.hasVendorLoader(in: game, exe: exe))
+    }
 }

@@ -72,6 +72,23 @@ struct FixCompatibilityTests {
         #expect(check.needsConfirmation)
     }
 
+    /// A Mac build whose own data carries its Photon app id can take the fix, so the
+    /// player is told the fix goes into the bundle instead of being turned away.
+    @Test
+    func aPatchableMacBuildIsOffered() throws {
+        let root = try folder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write("binary", to: root.appendingPathComponent(
+            "Game.app/Contents/MacOS/Game"))
+        try write(PhotonIDs.realtime, to: root.appendingPathComponent(
+            "Game.app/Contents/Resources/Data/resources.assets"))
+
+        let check = FixCompatibility.check(appID: 1, name: "Game", folder: root)
+        #expect(check.verdict == FixCompatibilityVerdict.works.rawValue)
+        #expect(check.title == "The fix goes into the Mac build's own files")
+        #expect(check.reason.contains("Game.app"))
+    }
+
     /// A GDK game is called out with that sentence and still offered: the tick in
     /// the store card is the player's choice to download it anyway.
     @Test

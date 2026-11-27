@@ -26,7 +26,10 @@ final class OnlineFixRoutingFileTests: XCTestCase {
         XCTAssertEqual(routed.compactMap { $0["id"] as? Int }, [3949040, 4000])
     }
 
-    func testKeepingRealAppIDLeavesTheGameUnrouted() throws {
+    /// "Keep real AppID" is a decision the dylib has to be told about. Leaving the
+    /// game out of this file is not "keep the real AppID" to the dylib: absent means
+    /// route as Spacewar (480), which is the opposite. The flag travels with the entry.
+    func testKeepingRealAppIDStaysInTheRoutingWithItsFlag() throws {
         let file = try gamesFile("""
         {"games": [
           {"id": 3949040, "name": "RV There Yet?", "keepRealAppID": true},
@@ -36,7 +39,8 @@ final class OnlineFixRoutingFileTests: XCTestCase {
 
         let routed = OnlineFixRoutingFile.routedGames(from: file)
 
-        XCTAssertEqual(routed.compactMap { $0["id"] as? Int }, [4000])
+        XCTAssertEqual(routed.compactMap { $0["id"] as? Int }, [3949040, 4000])
+        XCTAssertEqual(routed.first?["keepRealAppID"] as? Bool, true)
     }
 
     func testEntriesKeepTheirPatchFlags() throws {

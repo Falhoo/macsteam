@@ -50,13 +50,23 @@ struct FixDiagnosis: Sendable {
         // Nothing else matters for these three: no Windows file can be copied, or
         // the game cannot work with the fix at all.
         if let bundle = scan.macBundle {
+            let patch = MacBundlePatch.state(of: bundle)
+            var remedy = "Copy nothing. Start the game as itself"
+            if patch.canPatch {
+                remedy += ", and write the Photon app id into its own files"
+                if let profile = MacBundlePatch.profile(for: bundle), !profile.codePatches.isEmpty {
+                    remedy += " with " + profile.codePatches.map(\.name).joined(separator: ", ")
+                }
+            }
             diagnosis.add(FixFinding(
-                code: "OF002", level: .warning,
+                code: "OF002", level: patch.canPatch ? .notice : .warning,
                 title: "This is the Mac build",
                 detail: "Steam installed \(bundle.lastPathComponent), a Mach-O app, and OnlineFix's "
-                    + "Windows files cannot load into it.",
-                remedy: "Copy nothing. Start the game as itself, and use the file patch where one "
-                    + "exists (PICO PARK 2) or the routing that works for a Mac build."))
+                    + "Windows files cannot load into it."
+                    + (patch.canPatch
+                        ? " The fix it needs is in its own data: the Photon app id it connects to."
+                        : ""),
+                remedy: remedy + "."))
             return diagnosis
         }
         // OF003: a Microsoft Store (GDK) build needs the Xbox GDK runtime, which only
@@ -542,11 +552,34 @@ struct FixDiagnosis: Sendable {
                 remedy: "Write it on the next repair, once the prefix exists."))
         }
 
-        // OF020, OF021: Photon.
+        // OF020, OF021: Photon. The log's ticket line is the strongest evidence;
+        // Steam networking alone is not, because a custom-auth game can use Steam's
+        // relay for voice or achievements and still need the chain.
         if scan.isPhoton {
+            let log = PhotonLog.read(gameFolder: scan.folder, prefix: scan.prefix)
+            let route = PhotonRoute.decide(
+                isPhoton: scan.isPhoton,
+                packagePresent: true,
+                packageSaysPhoton: package.iniValues["photonintegration"]?.lowercased() == "true"
+                    || package.items.contains { $0.name == "custom.dll" },
+                packageHasCustom: package.items.contains { $0.name == "custom.dll" },
+                packageHasChain: package.hasPhotonChain,
+                vendorLoader: PhotonChain.hasVendorLoader(in: scan.folder, exe: scan.exe),
+                candidates: candidates,
+                usesSteamNetworking: scan.usesSteamNetworking,
+                log: log)
             let gameDoorway = PhotonChain.doorway(in: scan.folder, exe: scan.exe)
             let bundled = gameDoorway.map { bundleHas($0) } ?? false
-            if package.hasPhotonChain {
+            if route.isSteamAuth {
+                diagnosis.add(FixFinding(
+                    code: "OF021", level: .notice,
+                    title: "Steam-auth Photon game",
+                    detail: "This game asks Steam for an auth ticket and runs as its own AppID. "
+                        + "OnlineFix's BepInEx chain is for custom auth; Unity 6 stops before "
+                        + "its first frame when that preloader is loaded.",
+                    remedy: "Keep the real AppID on and leave the OnlineFix chain out. The "
+                        + "game's own Photon app checks the ticket."))
+            } else if package.hasPhotonChain {
                 diagnosis.add(FixFinding(
                     code: "OF021", level: .notice,
                     title: "Photon game with OnlineFix's Photon patch",
@@ -568,6 +601,42 @@ struct FixDiagnosis: Sendable {
                     remedy: "Install the chain from another Photon game's package if there is one, "
                         + "and say what is missing otherwise."))
             }
+            // A Steam-auth Photon game is the opposite case from the one the rest of
+            // this block assumes. Its own app id is the one Photon checks the ticket
+            // against; OnlineFix's app is registered for custom auth and answers 32755.
+            // It has to be answered before the pair rule, because R.E.P.O. has a pair.
+            if route.isSteamAuth {
+                let own = candidates.first { !$0.isOnlineFixShared }?.id
+                if let own {
+                    diagnosis.add(FixFinding(
+                        code: "OF020", level: .notice,
+                        title: "This Photon app expects Steam auth",
+                        detail: "The game asks Steam for an auth ticket and carries its own Photon "
+                            + "app (\(own.prefix(12))…). Photon checks that ticket against the app's "
+                            + "registered Steam AppID. OnlineFix's shared app is registered for "
+                            + "custom auth, so swapping this id in makes Photon answer 32755.",
+                        remedy: "Keep this id and Keep real AppID on. Steam must be able to issue "
+                            + "this game's licence to the signed-in account; no file patch replaces it."))
+                } else {
+                    diagnosis.add(FixFinding(
+                        code: "OF020", level: .warning,
+                        title: "Steam-auth game on OnlineFix's Photon app",
+                        detail: "The game asks Steam for an auth ticket, but every Photon id in its "
+                            + "files is one OnlineFix publishes. That app expects OnlineFix's custom "
+                            + "auth, so Photon refuses the Steam ticket with 32755.",
+                        remedy: "Restore the game's own Photon ids from the patch backup and keep "
+                            + "the real AppID on. The account must own the game for Steam to issue "
+                            + "the ticket; this cannot be patched around."))
+                }
+            } else if route.kind == .nativeCustom {
+                let own = route.ownIDs.first
+                diagnosis.add(FixFinding(
+                    code: "OF020", level: .notice,
+                    title: "The game uses its own Photon app",
+                    detail: "Its files carry \(own?.prefix(12) ?? "a Photon")… with no Steam-ticket "
+                        + "request and no OnlineFix patch. That is its own custom-auth route.",
+                    remedy: "Keep its Photon ids and leave OnlineFix's chain out."))
+            } else {
             // A realtime/voice pair is not an ambiguity: Unity stores the two fields in
             // order, and the patch writes each one. Only unrelated ids leave it unclear.
             let photonPlan = PhotonPatch.plan(for: candidates)
@@ -600,6 +669,7 @@ struct FixDiagnosis: Sendable {
                         detail: "Which one it connects to cannot be told from its files.",
                         remedy: "Leave them alone and let the patch sheet choose."))
                 }
+            }
             }
         }
 

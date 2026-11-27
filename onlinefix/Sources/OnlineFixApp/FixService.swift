@@ -190,8 +190,10 @@ enum FixService {
         }
 
         progress("Building the fix for \(name)…")
+        let log = PhotonLog.read(gameFolder: folder, prefix: scan.prefix)
         var plan = FixPlan.build(appID: appID, name: name, scan: scan,
-                                 package: package, diagnosis: diagnosis)
+                                 package: package, diagnosis: diagnosis,
+                                 candidates: candidates, log: log)
         var steps: [String] = []
         if !plan.copies.isEmpty { steps.append("copy \(plan.copies.count) file(s)") }
         if !plan.restores.isEmpty { steps.append("put \(plan.restores.count) back") }
@@ -224,7 +226,8 @@ enum FixService {
         for round in 1...6 {
             let audit = FixAudit.run(appID: appID, name: name, scan: latestScan,
                                      package: package, installed: plan,
-                                     expectedAPI: expectedAPI)
+                                     expectedAPI: expectedAPI,
+                                     candidates: candidates, log: log)
             for finding in audit.findings {
                 let key = finding.code + "|" + finding.title + "|" + finding.detail
                 guard !reported.contains(key) else { continue }
@@ -252,25 +255,40 @@ enum FixService {
             }
             // A Photon game whose chain only the consistency pass completed still
             // needs its app id patched, or the new plugin connects with the game's id.
-            let chainNames: Set<String> = ["custom.dll", "bepinex.preloader.dll"]
-            if audit.plan.copies.contains(where: {
-                chainNames.contains($0.destination.lastPathComponent.lowercased())
-            }) {
-                plan.photonSwap = true
-            }
+            // `plan.photonSwap` was decided before the first copy, from the game's
+            // log and package. An audit copy of the chain must not turn a Steam-auth
+            // route into a swap: the chain is only legitimate when the route is
+            // OnlineFix's shared app. Leave the flag alone.
             latestScan = GameScan.read(folder: folder, appID: appID, name: name)
         }
 
+        // A Mac build takes the patch in its own files. The files written are what
+        // the fix record holds, so the fix counts as installed (and the game stays
+        // routed as itself) and a repair can put them back.
+        var macWritten: [String] = []
         if plan.picoPark2, let bundle = latestScan.macBundle {
-
-            _ = try PicoPark2Patch.setEnabled(true, app: bundle)
+            macWritten = try MacBundlePatch.setEnabled(true, app: bundle)
         }
         var photonWritten: [String] = []
-        if plan.photonSwap {
+        let finalRoute = PhotonRoute.decide(
+            isPhoton: latestScan.isPhoton,
+            packagePresent: true,
+            packageSaysPhoton: package.iniValues["photonintegration"]?.lowercased() == "true"
+                || package.items.contains { $0.name == "custom.dll" },
+            packageHasCustom: package.items.contains { $0.name == "custom.dll" },
+            packageHasChain: package.hasPhotonChain,
+            installedChain: PhotonFix.status(gameFolder: folder, fixInstalled: true).isPhoton,
+            vendorLoader: PhotonChain.hasVendorLoader(in: folder, exe: latestScan.exe),
+            candidates: candidates,
+            usesSteamNetworking: latestScan.usesSteamNetworking,
+            log: log)
+        if plan.photonSwap, finalRoute.installsOnlineFix {
             let report = PhotonPatch.autoPatch(in: folder, realtime: photonRealtime,
                                                voice: photonVoice)
             photonWritten = report.written
             outcome.photonTargets = report.targets
+        } else if plan.photonSwap {
+            plan.photonSwap = false
         }
 
         var recipe = FixRecipe(
@@ -278,6 +296,7 @@ enum FixService {
             packageName: package.archiveName, findings: outcome.findings,
             entries: [], removed: applied.removed,
             keepRealAppID: plan.keepRealAppID, photonSwap: plan.photonSwap,
+            photonRoute: finalRoute.kind.rawValue,
             picoPark2: plan.picoPark2, wineDLLs: plan.wineDLLs,
             notes: applied.notes + plan.notes)
         recipe.photonPatched = photonWritten.map {
@@ -298,6 +317,9 @@ enum FixService {
         recipe.photonFileIDs = fileIDs
         recipe.notes.append(contentsOf: diagnosis.warnings.map { "\($0.code): \($0.title)." })
 
+        // The Mac build's own files are not entries: its patch keeps the untouched
+        // copies beside them, and undo and repair go through MacBundlePatch, so the
+        // pack does not need a second copy of a 100 MB binary.
         for wrote in applied.wrote {
             let url = folder.appendingPathComponent(wrote.relative)
             guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
@@ -318,7 +340,7 @@ enum FixService {
             + ".macsteam-onlinefix, so a repair needs no download.")
 
         outcome.files = applied.wrote.map { folder.appendingPathComponent($0.relative).path }
-            + photonWritten
+            + photonWritten + macWritten
         outcome.notes = recipe.notes
         outcome.keepRealAppID = plan.keepRealAppID
         outcome.installed = true
@@ -346,8 +368,11 @@ enum FixService {
             return FixPlan.Removal(path: path, reason: "removed by the fix")
         }
         let scan = GameScan.read(folder: folder, appID: appID, name: name)
+        let candidates = PhotonPatch.scan(in: folder)
+        let log = PhotonLog.read(gameFolder: folder, prefix: scan.prefix)
         let audit = FixAudit.run(appID: appID, name: name, scan: scan, package: nil,
-                                 installed: installed, expectedAPI: nil)
+                                 installed: installed, expectedAPI: nil,
+                                 candidates: candidates, log: log)
         guard audit.changed else { return }
         guard let applied = try? FixApply.apply(audit.plan, appID: appID, folder: folder) else {
             outcome.notes.append("The repair found more to do but could not apply it.")
@@ -417,7 +442,7 @@ enum FixService {
             auditRepair(&recipe, folder: folder, appID: appID, name: name, outcome: &outcome)
             recordPhotonPatch(&recipe, folder: folder)
             if recipe.picoPark2, let bundle = FixInstaller.nativeMacBundle(in: folder) {
-                _ = try? PicoPark2Patch.setEnabled(true, app: bundle)
+                _ = try? MacBundlePatch.setEnabled(true, app: bundle)
             }
             outcome.notes.append("Every file the fix put in place is still there.")
             return outcome
@@ -432,7 +457,7 @@ enum FixService {
         auditRepair(&recipe, folder: folder, appID: appID, name: name, outcome: &outcome)
         recordPhotonPatch(&recipe, folder: folder)
         if recipe.picoPark2, let bundle = FixInstaller.nativeMacBundle(in: folder) {
-            _ = try? PicoPark2Patch.setEnabled(true, app: bundle)
+            _ = try? MacBundlePatch.setEnabled(true, app: bundle)
         }
         ensureWine(recipe, appID: appID)
         prepareLaunchOverrides(recipe: recipe, folder: folder)
@@ -543,6 +568,21 @@ enum FixService {
         guard recipe.photonSwap,
               !(recipe.photonPatched ?? []).isEmpty || !(recipe.photonIDs ?? []).isEmpty
         else { return }
+        // Packs written before the route was recorded have no field. Read the folder
+        // rather than trusting the old flag: a ticket in the log outranks a swap.
+        if let stored = recipe.photonRoute {
+            guard stored == PhotonRoute.Kind.onlineFix.rawValue else { return }
+        } else {
+            let scan = GameScan.read(folder: folder, appID: recipe.appID, name: recipe.name)
+            let log = PhotonLog.read(gameFolder: folder, prefix: scan.prefix)
+            let route = PhotonRoute.decide(
+                isPhoton: scan.isPhoton, packagePresent: true,
+                installedChain: PhotonFix.status(gameFolder: folder,
+                                                 fixInstalled: true).isPhoton,
+                vendorLoader: PhotonChain.hasVendorLoader(in: folder, exe: scan.exe),
+                usesSteamNetworking: scan.usesSteamNetworking, log: log)
+            guard route.installsOnlineFix else { return }
+        }
         let targets = recipe.photonIDs ?? []
         let report = PhotonPatch.autoPatch(
             in: folder,

@@ -130,6 +130,118 @@ struct FixBuildTests {
         #expect(contents(game.appendingPathComponent("OnlineFix.ini")).contains("PhotonIntegration=true"))
     }
 
+    /// A custom-auth package may still import Steam networking for voice or
+    /// achievements. Without a ticket in the log, the package is the evidence that
+    /// says OnlineFix's shared app, not Steam auth.
+    @Test
+    func aCustomPackageOnARelayGameStillGetsTheChain() throws {
+        let game = try folder("custom-relay")
+        let package = try folder("custom-relay-package")
+        defer {
+            try? FileManager.default.removeItem(at: game)
+            try? FileManager.default.removeItem(at: package)
+        }
+        var exe = dotNet32
+        exe.append(Data("SteamNetworkingSockets".utf8))
+        try writeBinary(exe, to: game.appendingPathComponent("Game.exe"))
+        try write("managed", to: game.appendingPathComponent("Game_Data/Managed/PhotonRealtime.dll"))
+        try write("payload", to: package.appendingPathComponent("OnlineFix64.dll"))
+        try write("doorstop", to: package.appendingPathComponent("winmm.dll"))
+        try write("preloader", to: package.appendingPathComponent("BepInEx/core/BepInEx.Preloader.dll"))
+        try write("plugin", to: package.appendingPathComponent("Custom.dll"))
+        try write("[Main]\nRealAppId=1\nFakeAppId=480\nPhotonIntegration=true\n",
+                  to: package.appendingPathComponent("OnlineFix.ini"))
+
+        let scan = GameScan.read(folder: game, appID: 1, name: "Game")
+        #expect(scan.usesSteamNetworking)
+        let plan = FixPlan.build(appID: 1, name: "Game", scan: scan,
+                                 package: FixPackage.read(root: package))
+        #expect(plan.photonSwap)
+        #expect(plan.copies.contains { $0.relative.hasPrefix("BepInEx/") })
+        #expect(plan.copies.contains { $0.relative == "Custom.dll" })
+    }
+
+    /// Before its first log exists, R.E.P.O.'s own app pair is the evidence that
+    /// identifies the real game. A generic package still carries Custom.dll; that
+    /// must not turn a fresh install into a chain that Unity 6 hangs on.
+    @Test
+    func aFreshSteamAuthGameIsRecognisedByItsOwnPair() throws {
+        let game = try folder("fresh-steam-auth")
+        let package = try folder("fresh-steam-auth-package")
+        defer {
+            try? FileManager.default.removeItem(at: game)
+            try? FileManager.default.removeItem(at: package)
+        }
+        var exe = dotNet32
+        exe.append(Data("SteamNetworkingSockets".utf8))
+        try writeBinary(exe, to: game.appendingPathComponent("Game.exe"))
+        try write("managed", to: game.appendingPathComponent("Game_Data/Managed/PhotonRealtime.dll"))
+        try write("payload", to: package.appendingPathComponent("OnlineFix64.dll"))
+        try write("doorstop", to: package.appendingPathComponent("winmm.dll"))
+        try write("preloader", to: package.appendingPathComponent("BepInEx/core/BepInEx.Preloader.dll"))
+        try write("plugin", to: package.appendingPathComponent("Custom.dll"))
+        try write("[Main]\nRealAppId=1\nFakeAppId=480\nPhotonIntegration=true\n",
+                  to: package.appendingPathComponent("OnlineFix.ini"))
+        let own = [PhotonIDs.realtime, PhotonIDs.voice].map {
+            PhotonPatch.Candidate(file: game.appendingPathComponent("resources.assets"),
+                                  id: $0, kind: .guid, settings: true)
+        }
+
+        let scan = GameScan.read(folder: game, appID: 1, name: "Game")
+        let plan = FixPlan.build(appID: 1, name: "Game", scan: scan,
+                                 package: FixPackage.read(root: package),
+                                 candidates: own)
+        #expect(!plan.photonSwap)
+        #expect(plan.keepRealAppID)
+        #expect(!plan.copies.contains { $0.relative.hasPrefix("BepInEx/") })
+        #expect(!plan.copies.contains { $0.relative == "Custom.dll" })
+    }
+
+    /// R.E.P.O. is Unity 6 and asks Steam for a Photon auth ticket. Its real AppID
+    /// is the one the ticket is issued for, and BepInEx's preloader stops this
+    /// engine before the first frame, so the chain is not part of that route.
+    @Test
+    func aSteamAuthPhotonGameDoesNotGetTheBepInExChain() throws {
+        let game = try folder("steam-auth-photon")
+        let package = try folder("steam-auth-photon-package")
+        defer {
+            try? FileManager.default.removeItem(at: game)
+            try? FileManager.default.removeItem(at: package)
+        }
+        var exe = dotNet32
+        exe.append(Data("SteamNetworkingSockets".utf8))
+        try writeBinary(exe, to: game.appendingPathComponent("Game.exe"))
+        try write("managed", to: game.appendingPathComponent("Game_Data/Managed/PhotonRealtime.dll"))
+        try write("old", to: game.appendingPathComponent("winhttp.dll"))
+        try write("old", to: game.appendingPathComponent("BepInEx/core/BepInEx.Preloader.dll"))
+        try write("old", to: game.appendingPathComponent("Custom.dll"))
+
+        try write("payload", to: package.appendingPathComponent("OnlineFix64.dll"))
+        try write("loader", to: package.appendingPathComponent("winmm.dll"))
+        try write("doorway", to: package.appendingPathComponent("winhttp.dll"))
+        try write("preloader", to: package.appendingPathComponent("BepInEx/core/BepInEx.Preloader.dll"))
+        try write("plugin", to: package.appendingPathComponent("Custom.dll"))
+        try write("[Main]\nRealAppId=1\nFakeAppId=480\nPhotonIntegration=true\n",
+                  to: package.appendingPathComponent("OnlineFix.ini"))
+
+        let scan = GameScan.read(folder: game, appID: 1, name: "Game")
+        #expect(scan.usesSteamNetworking)
+        let log = PhotonLog.parse("Getting Steam Auth Ticket...\nAppID = 1\n",
+                                  source: game.appendingPathComponent("Player.log"))
+        let plan = FixPlan.build(appID: 1, name: "Game", scan: scan,
+                                 package: FixPackage.read(root: package), log: log)
+
+        #expect(!plan.photonSwap)
+        #expect(!plan.copies.contains { $0.relative.hasPrefix("BepInEx/") })
+        #expect(!plan.copies.contains { $0.relative == "winhttp.dll" })
+        #expect(!plan.copies.contains { $0.relative == "Custom.dll" })
+        #expect(plan.copies.contains { $0.relative == "OnlineFix64.dll" })
+        #expect(plan.removals.contains { $0.path.lastPathComponent == "winhttp.dll" })
+        #expect(plan.removals.contains { $0.path.lastPathComponent == "BepInEx" })
+        #expect(plan.removals.contains { $0.path.lastPathComponent == "Custom.dll" })
+        #expect(plan.edits.contains { $0.kind == .iniPhotonIntegrationOff })
+    }
+
     /// A package can put Custom.dll beside the executable, where dlllist.txt loads it
     /// through OnlineFix64. That layout must not also get BepInEx: the plugin would
     /// run twice, and a game that never needed the chain gets a second loader.

@@ -32,6 +32,8 @@ struct FixPlan: Sendable {
             case iniAppIDs
             /// PhotonIntegration=true, for a Photon game.
             case iniPhotonIntegration
+            /// PhotonIntegration=false, for a Steam-auth game that must not load the chain.
+            case iniPhotonIntegrationOff
             /// Name the payload, the overlay and a root Photon patch in dlllist.txt.
             case dllListEntries
             /// Drop the overlay from dlllist.txt.
@@ -66,17 +68,24 @@ struct FixPlan: Sendable {
     // MARK: - Building
 
     static func build(appID: Int, name: String, scan: GameScan, package: FixPackage?,
-                      diagnosis: FixDiagnosis? = nil) -> FixPlan {
+                      diagnosis: FixDiagnosis? = nil,
+                      candidates: [PhotonPatch.Candidate] = [],
+                      log: PhotonLog.Evidence? = nil) -> FixPlan {
         var plan = FixPlan()
 
         // A Mac build loads none of the fix's files. What works there is the routing
-        // and, for a game that needs it, the patch in its own files.
-        if scan.macBundle != nil {
+        // and, for a game whose Photon app id can be read, the patch in its own files.
+        if let bundle = scan.macBundle {
             plan.keepRealAppID = true
-            if appID == 2644470 {
+            if MacBundlePatch.profile(appID: appID, bundle: bundle) != nil
+                || MacBundlePatch.canPatch(bundle) {
                 plan.picoPark2 = true
-                plan.notes.append("PICO PARK 2's Mac build takes its Photon patch in its own "
-                    + "files: the Photon app id and the session limit.")
+                let profile = MacBundlePatch.profile(appID: appID, bundle: bundle)
+                let code = profile.map { $0.codePatches.map(\.name) } ?? []
+                var note = "\(name)'s Mac build takes its Photon patch in its own files: "
+                    + "the Photon app id"
+                if !code.isEmpty { note += " and \(code.joined(separator: ", "))" }
+                plan.notes.append(note + ".")
             } else {
                 plan.notes.append("This is the Mac build, so no Windows files are copied. "
                     + "It starts as itself.")
@@ -144,6 +153,29 @@ struct FixPlan: Sendable {
             return plan
         }
 
+        // A package that carries Custom.dll or says PhotonIntegration is a Photon fix
+        // even when the game's own assemblies are stripped, renamed or hidden in
+        // IL2CPP metadata. The package is evidence in its own right.
+        let packageSaysPhoton = package.iniValues["photonintegration"]?.lowercased() == "true"
+            || package.items.contains { $0.name == "custom.dll" }
+        // A Steam-auth Photon game must run as its real AppID and take its ticket
+        // from Steam. BepInEx's preloader is not needed for that route, and on
+        // Unity 6 it can stop the engine before the first frame (R.E.P.O. never
+        // reaches a window). The game's log is the strongest evidence; Steam
+        // networking alone is not, because a custom-auth game can use Steam's relay
+        // for voice or achievements.
+        let route = PhotonRoute.decide(
+            isPhoton: scan.isPhoton,
+            packagePresent: true,
+            packageSaysPhoton: packageSaysPhoton,
+            packageHasCustom: package.items.contains { $0.name == "custom.dll" },
+            packageHasChain: package.hasPhotonChain,
+            vendorLoader: PhotonChain.hasVendorLoader(in: scan.folder, exe: scan.exe),
+            candidates: candidates,
+            usesSteamNetworking: scan.usesSteamNetworking,
+            log: log ?? PhotonLog.read(gameFolder: scan.folder, prefix: scan.prefix))
+        let steamAuthPhoton = route.isSteamAuth
+
         // The Steam API DLL, where the game loads it.
         let apiFolder = scan.apiFolder ?? scan.launchFolder
         if let api = package.apiItem(needs64: scan.is64Bit), fits(api, scan: scan) {
@@ -153,8 +185,10 @@ struct FixPlan: Sendable {
 
         // Everything the loader needs, and nothing of Steam's own DLL again. A tree
         // such as `BepInEx/core` keeps its shape: the preloader is only found there.
+        let keepsOwnPhoton = steamAuthPhoton || route.kind == .nativeCustom
         for item in package.items where !FixPackage.apiNames.contains(item.name)
             && fits(item, scan: scan) {
+            if keepsOwnPhoton, isPhotonChainItem(item, package: package) { continue }
             let destination: URL
             if FixPackage.isChainPath(item.relative) {
                 destination = scan.launchFolder.appendingPathComponent(item.relative)
@@ -165,12 +199,7 @@ struct FixPlan: Sendable {
             plan.copies.append(copy(item, to: destination, scan: scan))
         }
 
-        // A package that carries Custom.dll or says PhotonIntegration is a Photon fix
-        // even when the game's own assemblies are stripped, renamed or hidden in
-        // IL2CPP metadata. The package is evidence in its own right.
-        let packageSaysPhoton = package.iniValues["photonintegration"]?.lowercased() == "true"
-            || package.items.contains { $0.name == "custom.dll" }
-        let photonWanted = scan.isPhoton || packageSaysPhoton
+        let photonWanted = route.installsOnlineFix
 
         // A Photon package can ship the plugin and no chain, or a doorway the game
         // never imports. The app carries the whole chain, so fill what the package
@@ -215,8 +244,29 @@ struct FixPlan: Sendable {
             plan.edits.append(Edit(kind: .iniAppIDs, path: ini))
             if photonWanted { plan.edits.append(Edit(kind: .iniPhotonIntegration, path: ini)) }
         }
+        // OnlineFix's own list names its managed patch, not just native files:
+        // REPO_Data\Managed\Assembly-CSharp.net.org, PhotonRealtime.net.org,
+        // PhotonUnityNetworking.net.org and Custom.net. OnlineFix64 loads those
+        // into the game's Mono, and that is what replaces Photon's Steam ticket.
+        // Rewriting the list for the vendor route drops the patch itself, which is
+        // why R.E.P.O. kept asking Steam for a ticket. The package's own list is
+        // kept as it ships; only a list this app wrote is completed.
+        let vendorList = package.dllList.contains {
+            let lower = $0.lowercased()
+            return lower.hasSuffix(".net.org") || lower == "custom.net"
+        }
         if let list = placed("dlllist.txt", in: plan) {
-            plan.edits.append(Edit(kind: .dllListEntries, path: list))
+            if vendorList && route.kind == .onlineFix {
+                plan.notes.append("Kept OnlineFix's own loader list: it names the managed "
+                    + "Photon patch (Assembly-CSharp.net.org, PhotonRealtime.net.org, "
+                    + "PhotonUnityNetworking.net.org and Custom.net).")
+            } else {
+                plan.edits.append(Edit(kind: .dllListEntries, path: list))
+            }
+        }
+        if steamAuthPhoton,
+           let ini = placed("onlinefix.ini", in: plan) ?? existing("onlinefix.ini", in: scan) {
+            plan.edits.append(Edit(kind: .iniPhotonIntegrationOff, path: ini))
         }
         if placed("onlinefix.ini", in: plan) == nil,
            let ini = existing("onlinefix.ini", in: scan) {
@@ -235,18 +285,64 @@ struct FixPlan: Sendable {
 
         // Every DLL the fix brought needs its native copy in the prefix, so Wine
         // cannot answer for the emulator with a copy of its own.
-        let dlls = Set(package.items.map(\.name).filter { $0.hasSuffix(".dll") }
+        let dlls = Set(package.items
+            .filter { !steamAuthPhoton || !isPhotonChainItem($0, package: package) }
+            .map(\.name).filter { $0.hasSuffix(".dll") }
             + plan.wineDLLs)
         plan.wineDLLs = dlls.sorted()
 
-        plan.keepRealAppID = scan.usesSteamNetworking
+        plan.keepRealAppID = scan.usesSteamNetworking || route.isSteamAuth
         plan.photonSwap = photonWanted && !plan.isEmpty
+        if steamAuthPhoton {
+            plan.notes.append("This Photon app takes Steam's auth ticket, so the game runs as "
+                + "its real AppID and the OnlineFix chain is left out. Its BepInEx preloader "
+                + "stops Unity 6 before the first frame, and the ticket does not need it.")
+            // A previous install may already have put the chain there. Take it out,
+            // or reinstalling the fix would keep the hang it is meant to avoid.
+            let loaderIsWinMM = package.item(named: "winmm.dll") != nil
+                || package.item(named: "OnlineFix64.dll") != nil
+            for name in ["winhttp.dll", "version.dll", "doorstop_config.ini"] {
+                if name == "winhttp.dll" && !loaderIsWinMM { continue }
+                let url = scan.launchFolder.appendingPathComponent(name)
+                guard Paths.fm.fileExists(atPath: url.path) else { continue }
+                plan.removals.append(Removal(
+                    path: url,
+                    reason: "The Steam-auth Photon route does not load OnlineFix's BepInEx chain"))
+            }
+            let bep = scan.launchFolder.appendingPathComponent("BepInEx", isDirectory: true)
+            if isDirectory(bep) {
+                plan.removals.append(Removal(
+                    path: bep,
+                    reason: "The Steam-auth Photon route does not load OnlineFix's BepInEx chain"))
+            }
+            // A root Custom.dll is loaded by dlllist.txt through OnlineFix64, not by
+            // BepInEx. Leaving it behind still loads the plugin into the game.
+            let custom = scan.launchFolder.appendingPathComponent("Custom.dll")
+            if Paths.fm.fileExists(atPath: custom.path) {
+                plan.removals.append(Removal(
+                    path: custom,
+                    reason: "The Steam-auth Photon route does not load OnlineFix's Photon plugin"))
+            }
+        }
         if photonWanted && !package.hasPhotonChain && !addedVendorChain {
             plan.notes.append("This package has no Photon patch (Custom.dll and its BepInEx "
                 + "preloader), and none was added, so a Photon game may still answer "
                 + "CustomAuthenticationError.")
         }
         return plan
+    }
+
+    /// The files only the BepInEx/Custom.dll chain needs. An OnlineFix loader named
+    /// winhttp.dll is kept: dropping it would also drop the Steam API fix.
+    private static func isPhotonChainItem(_ item: FixPackage.Item, package: FixPackage) -> Bool {
+        let name = item.name.lowercased()
+        if FixPackage.isChainPath(item.relative) || name == "doorstop_config.ini"
+            || name == "custom.dll" {
+            return true
+        }
+        let loaderIsWinMM = package.item(named: "winmm.dll") != nil
+            || package.item(named: "OnlineFix64.dll") != nil
+        return name == "winhttp.dll" && loaderIsWinMM
     }
 
     /// Adds the Photon chain the app ships where the package's own chain cannot run.

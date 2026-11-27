@@ -58,6 +58,19 @@ struct SteamNetworkingTests {
         #expect(!SteamNetworking.scan(folder: root))
     }
 
+    /// Steam updates a game in place. A cached "no" must not survive the executable
+    /// growing the relay entry points.
+    @Test
+    func aChangedExecutableIsScannedAgain() throws {
+        let root = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let exe = root.appendingPathComponent("Game.exe")
+        try write("SteamUserStats", to: exe)
+        #expect(!SteamNetworking.uses(appID: 9_900_001, gameFolder: root))
+        try write("SteamUserStats....SteamNetworkingSockets....", to: exe)
+        #expect(SteamNetworking.uses(appID: 9_900_001, gameFolder: root))
+    }
+
     /// RV There Yet? imports SteamNetworkingSockets and has an OnlineFix. The answer
     /// comes from the game's own code, not from the fix's files, which sit deep in
     /// the game's tree: that is where the walk has to look.

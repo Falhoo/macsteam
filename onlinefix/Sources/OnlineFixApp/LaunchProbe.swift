@@ -69,19 +69,7 @@ enum LaunchProbe {
     static func run(appID: Int, name: String, exe: URL?, seconds: Double = 75,
                     settle: Double = 0) -> Result {
         let before = gameWindows()
-        let client = Paths.steamSupport
-            .appendingPathComponent("Steam.AppBundle/Steam/Contents/MacOS/steam_osx")
-
-        var launched = false
-        let process = Process()
-        process.executableURL = client
-        process.arguments = ["-applaunch", "\(appID)"]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        if (try? process.run()) != nil {
-            launched = true
-            process.waitUntilExit()
-        }
+        let launched = SteamLaunch.run(appID: appID)
 
         let stem = exe?.deletingPathExtension().lastPathComponent.lowercased() ?? ""
         let start = Date()

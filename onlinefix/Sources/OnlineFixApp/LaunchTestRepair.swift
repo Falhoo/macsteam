@@ -38,7 +38,9 @@ enum LaunchTestRepair {
                                recipe: &recipe, report: &report)
         case .overlay, .dllList, .onlineFixInterface, .missingDLL:
             let package = loadPackage(folder: folder, recipe: recipe)
-            let audit = FixAudit.run(appID: appID, name: name, scan: scan, package: package)
+            let log = PhotonLog.read(gameFolder: folder, prefix: scan.prefix)
+            let audit = FixAudit.run(appID: appID, name: name, scan: scan,
+                                     package: package, log: log)
             guard audit.changed else {
                 report.notes.append(audit.notes.joined(separator: " "))
                 return report

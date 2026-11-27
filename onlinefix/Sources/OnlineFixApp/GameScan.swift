@@ -44,6 +44,12 @@ struct GameScan: Sendable {
     /// Loader files left at the game root while the game runs from a folder inside it.
     let rootLoaderFiles: [URL]
     let engine: Engine
+    /// The Unity version string from `globalgamemanagers`, when it can be read.
+    /// A package's BepInEx 5 chain is not automatically safe on every Unity 6
+    /// build; the audit reports the version instead of guessing.
+    let unityVersion: String?
+    /// The major part of `unityVersion` (5, 2021, 6000, …).
+    let unityMajor: Int?
     /// A .NET Framework game, which the fix's loader has more trouble with.
     let usesDotNet: Bool
     /// The game's own Steam API DLL, kept by the fix as `.of` or a backup.
@@ -138,6 +144,7 @@ struct GameScan: Sendable {
             $0.lastPathComponent.lowercased() == "steam_api64.dll"
         }
         let engine = engine(in: folder, executable: executable, launch: launch)
+        let unity = unityVersion(in: folder)
         let imported = imports(in: folder, launch: launch, exe: executable)
         let prefix = WineOverride.prefix(appID: appID)
         let appIDFile = steamAppIDFile(in: launch, folder: folder)
@@ -158,6 +165,8 @@ struct GameScan: Sendable {
             strayOverlayRenderers: renderers(in: folder, launch: launch),
             rootLoaderFiles: rootLeftovers(in: folder, launch: launch),
             engine: engine,
+            unityVersion: unity.version,
+            unityMajor: unity.major,
             usesDotNet: executable.map(usesDotNet) ?? false,
             originalSteamAPI: originalSteamAPI(in: folder, launch: launch, apiDLLs: apiDLLs),
             isPhoton: PhotonFix.isPhotonGame(in: folder),
@@ -190,6 +199,43 @@ struct GameScan: Sendable {
             return URL(fileURLWithPath: "/private" + path)
         }
         return URL(fileURLWithPath: path)
+    }
+
+    /// The Unity version a game was built with. Unity writes it as a plain line near
+    /// the start of `globalgamemanagers` (R.E.P.O. has `6000.3.28f1` at byte 48),
+    /// so a small read is enough rather than loading a 100 MB file.
+    static func unityVersion(in folder: URL) -> (version: String?, major: Int?) {
+        guard let enumerator = Paths.fm.enumerator(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return (nil, nil) }
+        var found: URL?
+        for case let url as URL in enumerator {
+            if enumerator.level > maxDepth {
+                enumerator.skipDescendants()
+                continue
+            }
+            if url.lastPathComponent == "globalgamemanagers" {
+                found = url
+                break
+            }
+        }
+        guard let url = found, let handle = try? FileHandle(forReadingFrom: url) else {
+            return (nil, nil)
+        }
+        defer { try? handle.close() }
+        let data = (try? handle.read(upToCount: 16 * 1024)) ?? Data()
+        let text = String(decoding: data, as: UTF8.self)
+        for line in text.split(whereSeparator: { $0.isNewline }) {
+            // The header before the version is binary, so the number is found
+            // inside the line instead of requiring a clean line.
+            guard let range = line.range(
+                of: #"[0-9]{4}\.[0-9]+\.[0-9]+[abfp][0-9]+"#,
+                options: .regularExpression) else { continue }
+            let value = String(line[range])
+            return (value, Int(value.split(separator: ".").first ?? ""))
+        }
+        return (nil, nil)
     }
 
     /// True for a .NET Framework executable: it imports mscoree and names the

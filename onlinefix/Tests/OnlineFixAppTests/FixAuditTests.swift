@@ -406,6 +406,73 @@ struct FixAuditTests {
         #expect(!audit.plan.photonSwap)
     }
 
+    /// The Steam-auth route runs as the game's own AppID and must not have OnlineFix's
+    /// BepInEx chain put back by an audit. The audit used to decide from the installed
+    /// pack alone, where keepRealAppID is false, and copied Custom.dll over and over.
+    @Test
+    func aSteamAuthGameDoesNotGetTheChainBack() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fixaudit-steam-auth-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let game = root.appendingPathComponent("game", isDirectory: true)
+        let package = root.appendingPathComponent("package", isDirectory: true)
+        try FileManager.default.createDirectory(at: game, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+
+        func write(_ text: String, _ url: URL) throws {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try Data(text.utf8).write(to: url)
+        }
+        // A minimal 32-bit .NET executable that also names Steam's relay entry point.
+        var bytes = [UInt8](repeating: 0, count: 0x48)
+        bytes[0x00] = 0x4D; bytes[0x01] = 0x5A
+        bytes[0x3C] = 0x40
+        bytes[0x40] = 0x50; bytes[0x41] = 0x45
+        bytes[0x44] = 0x4C; bytes[0x45] = 0x14
+        var exe = Data(bytes)
+        exe.append(Data("mscoree.dll".utf8))
+        exe.append(Data("v4.0.30319".utf8))
+        exe.append(Data("SteamNetworkingSockets".utf8))
+        try exe.write(to: game.appendingPathComponent("Game.exe"))
+        try write("managed", game.appendingPathComponent("Game_Data/Managed/PhotonRealtime.dll"))
+        try write("old", game.appendingPathComponent("winhttp.dll"))
+        try write("old", game.appendingPathComponent("BepInEx/core/BepInEx.Preloader.dll"))
+        try write("old", game.appendingPathComponent("Custom.dll"))
+        try write("[Main]\nRealAppId=1\nFakeAppId=480\nPhotonIntegration=true\n",
+                  game.appendingPathComponent("OnlineFix.ini"))
+
+        try write("payload", package.appendingPathComponent("OnlineFix64.dll"))
+        try write("loader", package.appendingPathComponent("winmm.dll"))
+        try write("preloader", package.appendingPathComponent("BepInEx/core/BepInEx.Preloader.dll"))
+        try write("plugin", package.appendingPathComponent("Custom.dll"))
+        try write("[Main]\nRealAppId=1\nFakeAppId=480\nPhotonIntegration=true\n",
+                  package.appendingPathComponent("OnlineFix.ini"))
+
+        let scan = GameScan.read(folder: game, appID: 1, name: "Game")
+        #expect(scan.usesSteamNetworking)
+        let own = [PhotonIDs.realtime, PhotonIDs.voice].map {
+            PhotonPatch.Candidate(file: game.appendingPathComponent("resources.assets"),
+                                  id: $0, kind: .guid, settings: true)
+        }
+        let built = FixPlan.build(appID: 1, name: "Game", scan: scan,
+                                  package: FixPackage.read(root: package),
+                                  candidates: own)
+        #expect(!built.copies.contains { $0.relative.hasPrefix("BepInEx/") })
+        #expect(!built.copies.contains { $0.relative == "Custom.dll" })
+
+        let audit = FixAudit.run(appID: 1, name: "Game", scan: scan,
+                                 package: FixPackage.read(root: package),
+                                 installed: built, expectedAPI: nil,
+                                 candidates: own)
+        #expect(!audit.plan.copies.contains { $0.relative.hasPrefix("BepInEx/") })
+        #expect(!audit.plan.copies.contains { $0.relative == "Custom.dll" })
+        #expect(audit.plan.removals.contains { $0.path.lastPathComponent == "BepInEx" })
+        #expect(audit.plan.removals.contains { $0.path.lastPathComponent == "Custom.dll" })
+        #expect(audit.plan.edits.contains { $0.kind == .iniPhotonIntegrationOff })
+        #expect(!audit.plan.photonSwap)
+    }
+
     /// A non-PE fixture still names the doorway it loads, and the fallback is only
     /// asked for when the PE reader says the file is not a PE.
     @Test

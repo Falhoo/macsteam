@@ -25,6 +25,13 @@ enum PhotonIDs {
         ("f06cfaa3-c29b-4dba-a8ca-551f45bf9b6d", false),
     ]
 
+    /// The apps OnlineFix publishes for games other than R.E.P.O. R.E.P.O.'s own
+    /// pair is a game app, not a shared one: a ticket request against it is the
+    /// game asking for its own licence, not a game pointed at OnlineFix's app.
+    static var shared: [String] {
+        knownDefaults.filter { $0.id != realtime && $0.id != voice }.map { $0.id }
+    }
+
     /// Where a Unity game keeps its data, and the backups this makes.
     private static let backupSuffix = ".onlinefix-photon-backup"
 
@@ -51,10 +58,6 @@ enum PhotonIDs {
             }
         }
 
-        // Use the field-aware scanner: a PhotonServerSettings pair can hold the same
-        // value twice, and replacing every copy would put the realtime id in the
-        // voice field. Settings are found by name, so this also reaches a game whose
-        // stock ids are not in the list below (PEAK's, for one).
         // Use the field-aware scanner: a PhotonServerSettings pair can hold the same
         // value twice, and replacing every copy would put the realtime id in the
         // voice field. Settings are found by name, so this also reaches a game whose

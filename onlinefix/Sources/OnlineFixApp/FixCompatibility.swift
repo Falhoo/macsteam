@@ -71,6 +71,21 @@ enum FixCompatibility {
         }
 
         if let bundle = FixInstaller.nativeMacBundle(in: folder) {
+            // A Mac build loads none of the fix's files, but the Photon app id it
+            // connects to sits in its own data, and that is the part that makes a
+            // Photon game meet other players. Where it can be read, the fix is
+            // written into the bundle instead of copied beside it.
+            let patch = MacBundlePatch.state(of: bundle)
+            if patch.canPatch {
+                return FixCompatibilityCheck(
+                    verdict: .works,
+                    title: "The fix goes into the Mac build's own files",
+                    reason: "Steam installed the native macOS build of \(name) "
+                        + "(\(bundle.lastPathComponent)). OnlineFix's Windows DLLs cannot load "
+                        + "into it, but its Photon app id is in the bundle's data, so installing "
+                        + "replaces that id with OnlineFix's and signs the game again. "
+                        + patch.summary)
+            }
             return FixCompatibilityCheck(
                 verdict: .unsupported,
                 title: "OnlineFix cannot work here",

@@ -35,7 +35,9 @@ enum FixAudit {
     /// Reads the installed fix and the game, then returns the repairs it would make.
     /// The caller applies them with the same FixApply an install uses.
     static func run(appID: Int, name: String, scan: GameScan, package: FixPackage?,
-                    installed: FixPlan? = nil, expectedAPI: URL? = nil) -> Report {
+                    installed: FixPlan? = nil, expectedAPI: URL? = nil,
+                    candidates: [PhotonPatch.Candidate] = [],
+                    log: PhotonLog.Evidence? = nil) -> Report {
         var report = Report()
         // A Mac build loads none of these files. The plan leaves it alone, and the
         // audit must too, or installing a Windows fix would scatter DLLs in the app.
@@ -413,8 +415,56 @@ enum FixAudit {
 
         let packageSaysPhoton = package?.iniValues["photonintegration"]?.lowercased() == "true"
         let packageHasCustom = package?.items.contains { $0.name == "custom.dll" } ?? false
-        let photon = scan.isPhoton || packageSaysPhoton || packageHasCustom
+        let photonCandidate = scan.isPhoton || packageSaysPhoton || packageHasCustom
             || (installed?.photonSwap ?? false)
+        // A Steam-auth game keeps its own Photon app. Its ticket is checked against
+        // that app's Steam AppID, and BepInEx's preloader can stop Unity 6. The
+        // log's ticket line outranks Steam networking, which a custom-auth game can
+        // also import for voice or achievements.
+        let route = PhotonRoute.decide(
+            isPhoton: photonCandidate,
+            packagePresent: package != nil,
+            packageSaysPhoton: packageSaysPhoton,
+            packageHasCustom: packageHasCustom,
+            packageHasChain: package?.hasPhotonChain ?? false,
+            installedChain: PhotonFix.status(gameFolder: launch, fixInstalled: true).isPhoton,
+            vendorLoader: PhotonChain.hasVendorLoader(in: launch, exe: scan.exe),
+            candidates: candidates,
+            usesSteamNetworking: scan.usesSteamNetworking,
+            log: log ?? PhotonLog.read(gameFolder: scan.folder, prefix: scan.prefix))
+        let steamAuthPhoton = route.isSteamAuth
+        let photon = route.installsOnlineFix
+        // An earlier install may have written the chain that this route must not
+        // load. Take it out here too, not only in FixPlan: a repair runs the audit
+        // on the folder as it is, and must not leave the Unity 6 hang behind.
+        if steamAuthPhoton, !routingOnly {
+            let bep = launch.appendingPathComponent("BepInEx", isDirectory: true)
+            var isBepDirectory: ObjCBool = false
+            if Paths.fm.fileExists(atPath: bep.path, isDirectory: &isBepDirectory),
+               isBepDirectory.boolValue {
+                report.plan.removals.append(FixPlan.Removal(
+                    path: bep,
+                    reason: "The Steam-auth Photon route does not load OnlineFix's BepInEx chain"))
+                for name in ["winhttp.dll", "version.dll", "doorstop_config.ini"] {
+                    let url = launch.appendingPathComponent(name)
+                    if Paths.fm.fileExists(atPath: url.path) {
+                        report.plan.removals.append(FixPlan.Removal(
+                            path: url,
+                            reason: "The Steam-auth Photon route does not load OnlineFix's BepInEx chain"))
+                    }
+                }
+            }
+            let custom = launch.appendingPathComponent("Custom.dll")
+            if Paths.fm.fileExists(atPath: custom.path) {
+                report.plan.removals.append(FixPlan.Removal(
+                    path: custom,
+                    reason: "The Steam-auth Photon route does not load OnlineFix's Photon plugin"))
+            }
+            if !report.plan.removals.isEmpty {
+                report.plan.notes.append("Removed OnlineFix's BepInEx chain: this Steam-auth "
+                    + "Photon game runs as its own AppID and does not use it.")
+            }
+        }
         if photon, !routingOnly {
             let launchCustom = launch.appendingPathComponent("Custom.dll")
             // BepInEx lives beside the executable, not at the install root.
@@ -538,7 +588,15 @@ enum FixAudit {
                             detail: "The payload needs RealAppId=\(appID) and FakeAppId=480.",
                             remedy: "Write the game's AppID and 480 into the ini.")
                 }
-                if photon && !FixApply.hasPhotonIntegration(text) {
+                if steamAuthPhoton, FixApply.hasPhotonIntegration(text) {
+                    addEdit(.iniPhotonIntegrationOff, at: ini, code: "OF109",
+                            title: "The OnlineFix Photon chain is switched on",
+                            detail: "This game takes Steam's Photon ticket and runs as its own "
+                                + "AppID. PhotonIntegration=true makes the loader look for a chain "
+                                + "that is not part of this route.",
+                            remedy: "Turn PhotonIntegration off; the game's own Photon app "
+                                + "receives the ticket.")
+                } else if photon && !FixApply.hasPhotonIntegration(text) {
                     addEdit(.iniPhotonIntegration, at: ini, code: "OF109",
                             title: "Photon is not switched on in OnlineFix.ini",
                             detail: "The game is a Photon game, but the ini has no "
@@ -596,7 +654,12 @@ enum FixAudit {
                     wanted.append(copy.destination.lastPathComponent)
                 }
             }
-            let hasCustomNet = lines.contains("custom.net")
+            // OnlineFix's own list names managed patch assemblies (…net.org) and
+            // Custom.net on purpose: OnlineFix64 loads them into the game's Mono and
+            // that is the Photon patch. Only a list written without them treats
+            // Custom.net as the typo it is elsewhere.
+            let vendorPatchList = lines.contains { $0.hasSuffix(".net.org") }
+            let hasCustomNet = !vendorPatchList && lines.contains("custom.net")
             let rawLines = FixApply.dllListLines(text)
             let ordered = rawLines
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }

@@ -155,6 +155,35 @@ if let index = CommandLine.arguments.firstIndex(of: "--onlinefix-test"),
     exit(code)
 }
 
+// Reads a Mac build and says what the OnlineFix patch would do with it. Nothing
+// is written without --apply: --onlinefix-mac-patch <folder> [--apply] [--off].
+if let index = CommandLine.arguments.firstIndex(of: "--onlinefix-mac-patch"),
+   CommandLine.arguments.count > index + 1 {
+    let folder = URL(fileURLWithPath: CommandLine.arguments[index + 1])
+    exit(OnlineFixCommand.macPatch(
+        folder: folder,
+        apply: CommandLine.arguments.contains("--apply"),
+        off: CommandLine.arguments.contains("--off")))
+}
+
+// Reads every piece of Photon evidence and says which route it selects, writing
+// nothing: --onlinefix-photon-audit <appid> [--name <name>].
+if let index = CommandLine.arguments.firstIndex(of: "--onlinefix-photon-audit"),
+   CommandLine.arguments.count > index + 1,
+   let appID = Int(CommandLine.arguments[index + 1]) {
+    var name = ""
+    if let nameIndex = CommandLine.arguments.firstIndex(of: "--name"),
+       CommandLine.arguments.count > nameIndex + 1 {
+        name = CommandLine.arguments[nameIndex + 1]
+    }
+    var folder: URL?
+    if let folderIndex = CommandLine.arguments.firstIndex(of: "--folder"),
+       CommandLine.arguments.count > folderIndex + 1 {
+        folder = URL(fileURLWithPath: CommandLine.arguments[folderIndex + 1])
+    }
+    exit(OnlineFixCommand.photonAudit(appID: appID, name: name, folder: folder))
+}
+
 // Reads the game's own log and says what Photon made of its last connection:
 // --onlinefix-photon <appid> [--name <name>]. Read only.
 if let index = CommandLine.arguments.firstIndex(of: "--onlinefix-photon"),

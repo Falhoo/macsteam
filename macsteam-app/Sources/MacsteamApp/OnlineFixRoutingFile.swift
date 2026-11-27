@@ -1,18 +1,18 @@
-// The game list the injected OnlineFix dylib routes through AppID 480.
+// The game list the injected OnlineFix dylib reads at each launch.
 //
-// The manager's games.json is the list of My Games; not every game in it should
-// be remapped. A game whose multiplayer runs on Steam's own networking (SDR
-// relay, as RV There Yet? does) never gets past "connecting to Steam relay
-// servers" while the game's Steam pipe carries Spacewar's AppID 480, so it has
-// to reach the client as itself — the same thing the LuaTools fixes do by
-// keeping the game's real AppID.
+// The manager's games.json is the list of My Games. Every game in it is written
+// out, including the ones set to "Keep real AppID": the dylib needs the entry to
+// know about the game at all, and the entry carries the flag that tells it to
+// start the game as itself. A game that is absent is not routed, which the dylib
+// treats as Spacewar (480) — exactly the wrong answer for a Steam-relay game or
+// a Photon game whose app expects a Steam ticket for the real AppID.
 //
-// A game whose recorded fix files are gone is left out too: Steam puts the game's
+// A game whose recorded fix files are gone is left out: Steam puts the game's
 // own files back on a verify, update or repair, and starting that game as
 // Spacewar without the fix that goes with it is how a game stops launching.
 //
-// The dylib reads its own JSON (ONLINEFIX_CONFIG), so the routed subset is
-// written out next to the manager's file rather than editing theirs.
+// The dylib reads its own JSON (ONLINEFIX_CONFIG), so this file is written out
+// next to the manager's file rather than editing theirs.
 import Foundation
 
 enum OnlineFixRoutingFile {
@@ -35,9 +35,10 @@ enum OnlineFixRoutingFile {
         }
     }
 
-    /// The manager's games minus the ones set to keep their real AppID and the
-    /// ones whose fix is no longer on disk. The entries are copied unchanged so
-    /// every patch flag the dylib reads survives.
+    /// The manager's games minus the ones whose fix is no longer on disk. The
+    /// entries are copied unchanged, including `keepRealAppID`, so the dylib can
+    /// tell a keep-real game from a missing one. A missing entry means 480 to it,
+    /// never "keep the real AppID".
     static func routedGames(from file: URL) -> [[String: Any]] {
         guard
             let data = try? Data(contentsOf: file),
@@ -49,8 +50,7 @@ enum OnlineFixRoutingFile {
 
         return games.filter { game in
             guard let id = game["id"] as? Int, id > 0, id != 480 else { return false }
-            if broken.contains(id) { return false }
-            return !(game["keepRealAppID"] as? Bool ?? false)
+            return !broken.contains(id)
         }
     }
 

@@ -416,6 +416,40 @@ struct FixDiagnosisTests {
         #expect(PhotonPatch.plan(for: candidates).changes.count == 2)
     }
 
+    /// A Steam-auth Photon game must keep its own app id. The old advice here was
+    /// always "replace it with OnlineFix's", which is exactly what makes Photon
+    /// answer 32755: its app is registered for custom auth, not Steam tickets.
+    @Test
+    func aSteamAuthPhotonGameKeepsItsOwnAppID() throws {
+        let gameFolder = try game("steam-auth")
+        let packageRoot = try package("steam-auth")
+        defer {
+            try? FileManager.default.removeItem(at: gameFolder)
+            try? FileManager.default.removeItem(at: packageRoot)
+        }
+        try write("assembly", to: gameFolder.appendingPathComponent("Game_Data/Managed/PhotonRealtime.dll"))
+        let own = "9551e103-6003-43b6-9415-d4ff80eefaea"
+        var assets = Data("PhotonServerSettings".utf8)
+        assets.append(Data([0x24, 0x00, 0x00, 0x00]))
+        assets.append(Data(own.utf8))
+        try writeBinary(assets, to: gameFolder.appendingPathComponent("Game_Data/resources.assets"))
+        try write("""
+        Photon - AppId (Realtime): \(PhotonIDs.realtime)
+        Getting Steam Auth Ticket...
+        OperationResponse 230: ReturnCode: 32755 (Authentication type not supported (none configured)).
+        """, to: gameFolder.appendingPathComponent(PhotonLog.pluginLog))
+
+        let scan = GameScan.read(folder: gameFolder, appID: 100, name: "Game")
+        let candidates = PhotonPatch.scan(in: gameFolder)
+        let diagnosis = FixDiagnosis.run(scan: scan, package: FixPackage.read(root: packageRoot),
+                                         candidates: candidates)
+        let finding = diagnosis.findings.first { $0.code == "OF020" }
+
+        #expect(finding?.title == "This Photon app expects Steam auth")
+        #expect(finding?.remedy.contains("Keep real AppID") == true)
+        #expect(finding?.remedy.contains("Replace") == false)
+    }
+
     /// OF055 is retired: a package's `[Hashes]` values name no file, so one that
     /// matches nothing proves nothing. PEAK's GDK package hashes the Xbox build and
     /// R.E.P.O.'s is older than the installed one, yet both fixes work.

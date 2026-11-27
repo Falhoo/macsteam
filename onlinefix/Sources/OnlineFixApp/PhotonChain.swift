@@ -151,6 +151,39 @@ enum PhotonChain {
 
     // MARK: - What is on disk
 
+    /// OnlineFix's own loader, the one its package ships instead of BepInEx: the
+    /// doorway `winmm.dll` starts `OnlineFix64.dll` inside the game's own Mono
+    /// runtime (`MonoBleedingEdge\EmbedRuntime\mono-2.0-bdwgc.dll`), and that
+    /// payload is what replaces Photon's Steam ticket with OnlineFix's custom
+    /// auth. It loads under the runner: the launch log shows both files as native
+    /// modules, for R.E.P.O. and for PICO PARK 2. A game with this loader on disk
+    /// therefore has OnlineFix's Photon patch available, whatever the game's own
+    /// code asks Photon for.
+    static let vendorLoaderNames = ["onlinefix64.dll", "onlinefix.dll"]
+
+    /// True when the vendor's own loader sits beside the game: in the folder the
+    /// executable is in, or in the folder Steam starts it from.
+    static func hasVendorLoader(in folder: URL, exe: URL?) -> Bool {
+        var folders = [folder]
+        if let exe {
+            let launch = exe.deletingLastPathComponent()
+            if launch.standardizedFileURL.path != folder.standardizedFileURL.path {
+                folders.append(launch)
+            }
+        }
+        for base in folders {
+            let entries = (try? Paths.fm.contentsOfDirectory(atPath: base.path)) ?? []
+            if entries.contains(where: { vendorLoaderNames.contains($0.lowercased()) }) {
+                return true
+            }
+            for name in vendorLoaderNames where
+                Paths.fm.fileExists(atPath: base.appendingPathComponent(name).path) {
+                return true
+            }
+        }
+        return false
+    }
+
     /// The files the chain needs and the game folder does not have.
     static func missing(in folder: URL, doorway: String?) -> [String] {
         var wanted: [String] = [config] + core + [plugin]

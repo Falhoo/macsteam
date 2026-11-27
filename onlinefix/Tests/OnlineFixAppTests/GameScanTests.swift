@@ -19,6 +19,20 @@ struct GameScanTests {
         try Data(text.utf8).write(to: url)
     }
 
+    /// Unity writes its version near the start of globalgamemanagers. The scan
+    /// reads that small header, not the whole multi-gigabyte data tree.
+    @Test
+    func theUnityVersionIsReadFromTheManagerHeader() throws {
+        let game = GameScan.canonical(try folder())
+        defer { try? FileManager.default.removeItem(at: game) }
+        try write("exe", to: game.appendingPathComponent("Game.exe"))
+        try write("\0\0\0\0\0\0\0\0\0\0\0\06000.3.28f1\n",
+                  to: game.appendingPathComponent("Game_Data/globalgamemanagers"))
+        let scan = GameScan.read(folder: game, appID: 1, name: "Game")
+        #expect(scan.unityVersion == "6000.3.28f1")
+        #expect(scan.unityMajor == 6000)
+    }
+
     /// A game with a copy beside the exe and a stale one in Unity's plugin folder.
     /// Windows loads the one beside the exe, so that is where the fix belongs.
     @Test

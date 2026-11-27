@@ -39,7 +39,7 @@ enum PhotonPatch {
         /// is nothing left to replace.
         var isOnlineFixShared: Bool {
             if kind == .quantum { return id == PhotonPatch.onlineFixQuantumID }
-            return PhotonIDs.knownDefaults.contains { $0.id.lowercased() == id.lowercased() }
+            return PhotonIDs.shared.contains { $0.lowercased() == id.lowercased() }
         }
     }
 

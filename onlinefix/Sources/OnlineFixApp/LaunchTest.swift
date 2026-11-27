@@ -204,22 +204,11 @@ enum LaunchTest {
         }
 
         progress("Starting Steam…")
-        let client = Paths.steamSupport
-            .appendingPathComponent("Steam.AppBundle/Steam/Contents/MacOS/steam_osx")
-        let launcher = Process()
-        launcher.executableURL = client
-        launcher.arguments = ["-applaunch", "\(appID)"]
-        launcher.standardOutput = FileHandle.nullDevice
-        launcher.standardError = FileHandle.nullDevice
-        defer { withExtendedLifetime(launcher) {} }
-        var launched = false
-        do {
-            // Do not wait for steam_osx here. It usually returns after telling the
-            // running client to start the game, but waiting on it would block the
-            // main actor and take the Cancel button with it.
-            try launcher.run()
-            launched = true
-        } catch {}
+        // LaunchServices opens the patched /Applications/Steam.app, which carries
+        // DYLD_INSERT_LIBRARIES in its Info.plist. Running Steam.AppBundle's
+        // steam_osx directly starts an unpatched second client with no licences.
+        // open(1) returns quickly, so this does not block the main actor.
+        let launched = SteamLaunch.run(appID: appID)
 
         var gamePIDs: Set<Int32> = []
         var found: Window?

@@ -726,8 +726,10 @@ struct PatchSheetView: View {
                 RowDivider()
                 keepRealAppIDRow(game, binding)
                 // A Mac build takes no fix files at all; the routing above is the
-                // whole fix for it, so say so where the choice is.
-                if let mac = model.macAppStatus(game.id) {
+                // whole fix for it, so say so where the choice is. A build whose own
+                // Photon app id can be patched gets that row instead.
+                if let mac = model.macAppStatus(game.id),
+                   model.macBuildPatch(appID: game.id) == nil {
                     RowDivider()
                     macBuildRow(mac)
                 }
@@ -735,9 +737,9 @@ struct PatchSheetView: View {
                     RowDivider()
                     repoPhotonRow(game, binding)
                 }
-                if game.id == 2644470 {
+                if model.macBuildPatch(appID: game.id) != nil {
                     RowDivider()
-                    picoPark2Row(game, binding)
+                    macPatchRow(game, binding)
                 }
                 if showsPhotonRow(game) {
                     RowDivider()
@@ -793,6 +795,15 @@ struct PatchSheetView: View {
                      warning: !keepReal)
                     .transition(.blurReplace)
             }
+            // A Photon game that asks Steam for an auth ticket cannot use OnlineFix's
+            // shared app: Photon checks the ticket against the app's registered Steam
+            // AppID. Say that here, next to the toggle that decides it.
+            if let photon = model.photonProfile(game.id),
+               photon.route == .steamAuth || photon.route == .steamAuthWithSharedApp {
+                note(photon.remedy,
+                     warning: photon.route == .steamAuthWithSharedApp || !keepReal)
+                    .transition(.blurReplace)
+            }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 15)
@@ -807,31 +818,36 @@ struct PatchSheetView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// PICO PARK 2's online play runs on Photon, so the AppID routing above does nothing
-    /// for it. The fix for a Mac build is made to the game's own files instead, which is
-    /// what this switch does.
-    private func picoPark2Row(_ game: ManagedGame, _ binding: Binding<ManagedGame>) -> some View {
-        let state = PicoPark2Patch.state(in: Store.gameFolder(for: game.id, name: game.name))
+    /// A Photon game's online play does not run on Steam, so the AppID routing above
+    /// does nothing for it. The fix for a Mac build is made to the game's own files
+    /// instead, which is what this switch does: the Photon app id it connects to is
+    /// swapped for OnlineFix's, and any code change its profile names is written in.
+    private func macPatchRow(_ game: ManagedGame, _ binding: Binding<ManagedGame>) -> some View {
+        let state = model.macBuildPatch(appID: game.id) ?? MacBundlePatch.State()
+        let profile = state.bundle.flatMap { MacBundlePatch.profile(for: $0) }
+        let code = profile?.codePatches.map(\.name) ?? []
+        var detail = "This game's online play runs on Photon, not Steam, so AppID routing "
+            + "cannot make it connect. The fix belongs in the game's own files: its Photon "
+            + "app id is swapped for OnlineFix's"
+        detail += code.isEmpty ? "" : ", and " + code.joined(separator: " and ") + " is changed"
+        detail += ". macSteam applies it as soon as the fix is installed, and again after a "
+            + "game update. Only the Mac build can be patched this way; a Windows build needs "
+            + "the fix's own DLLs."
         return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("PICO PARK 2 Photon fix")
+                    Text("Mac build patch")
                         .font(.body.weight(.medium))
-                    Text("This game's online play runs on Photon, not Steam, so AppID routing "
-                         + "cannot make it connect. The fix belongs in the game's own files: its "
-                         + "Photon app id is swapped for OnlineFix's, and the session limit that "
-                         + "holds it to one player is lifted. macSteam applies it as soon as the "
-                         + "fix is installed, and again after a game update. Only the Mac build "
-                         + "can be patched this way; a Windows build needs the fix's own DLLs.")
+                    Text(detail)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .lineSpacing(1.5)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
-                Toggle("PICO PARK 2 Photon fix", isOn: Binding(
+                Toggle("Mac build patch", isOn: Binding(
                     get: { binding.wrappedValue.picoPark2Photon || state.isPatched },
-                    set: { model.setPicoPark2Photon($0, game: game) }
+                    set: { model.setMacBuildPatch($0, game: game) }
                 ))
                 .labelsHidden()
                 .toggleStyle(.switch)

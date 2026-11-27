@@ -42,6 +42,7 @@ struct PhotonLogTests {
         #expect(evidence.isFailure)
         #expect(evidence.title.contains("Steam ticket"))
         #expect(evidence.remedy.contains("own AppID"))
+        #expect(evidence.requestsSteamTicket)
         #expect(evidence.lines.contains { $0.contains("Steam auth ticket received") })
     }
 
@@ -89,6 +90,28 @@ struct PhotonLogTests {
         // `.none` on an optional means nil, so the case is spelled out.
         #expect(evidence?.failure == PhotonLog.Evidence.Failure.none)
         #expect(evidence?.source.lastPathComponent == "Player.log")
+    }
+
+    /// A stale patch log does not hide the newer Player.log the game wrote after
+    /// the patch was removed.
+    @Test
+    func aStalePatchLogDoesNotHideTheNewerGameLog() throws {
+        let prefix = try folder("stale-prefix")
+        defer { try? FileManager.default.removeItem(at: prefix) }
+        let low = prefix.appendingPathComponent(
+            "drive_c/users/steamuser/AppData/LocalLow/LandCrab/PEAK", isDirectory: true)
+        let gameLog = low.appendingPathComponent("Player.log")
+        try write("Connected to region eu\n", to: gameLog)
+        let game = try folder("stale-game")
+        defer { try? FileManager.default.removeItem(at: game) }
+        let plugin = game.appendingPathComponent(PhotonLog.pluginLog)
+        try write(peak, to: plugin)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -3600)], ofItemAtPath: plugin.path)
+
+        let evidence = PhotonLog.read(gameFolder: game, prefix: prefix)
+        #expect(evidence?.source.lastPathComponent == "Player.log")
+        #expect(evidence?.failure == PhotonLog.Evidence.Failure.none)
     }
 
     /// A game that has never run has written no log, so there is nothing to say.

@@ -135,12 +135,13 @@ enum PhotonLog {
         return found
     }
 
-    /// The newest log this game wrote: the Photon patch's own if it is there, else
-    /// the Unity log that was written last.
+    /// The newest log this game wrote, including the Photon patch's own. A stale
+    /// `photondiag.log` from an earlier attempt must not hide the Player.log the
+    /// game wrote after it: the patch's log is only preferred when it is newer.
     static func newestLog(gameFolder: URL, prefix: URL?) -> URL? {
+        var candidates = logs(in: prefix)
         let plugin = gameFolder.appendingPathComponent(pluginLog)
-        if Paths.fm.fileExists(atPath: plugin.path) { return plugin }
-        let candidates = logs(in: prefix)
+        if Paths.fm.fileExists(atPath: plugin.path) { candidates.append(plugin) }
         return candidates.max { one, other in
             modified(one) < modified(other)
         }

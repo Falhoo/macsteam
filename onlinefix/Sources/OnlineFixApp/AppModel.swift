@@ -224,6 +224,12 @@ final class AppModel: ObservableObject {
     }
 
     /// The native Mac build a game folder holds right now, if any.
+    /// The Mac build patch's state for a game, or nil when it has no Mac build.
+    func macBuildPatch(appID: Int) -> MacBundlePatch.State? {
+        let name = games.first { $0.id == appID }?.name ?? ""
+        return MacBundlePatch.state(in: Store.gameFolder(for: appID, name: name))
+    }
+
     func macAppStatus(_ appID: Int) -> MacAppFix.Status? {
         let name = games.first { $0.id == appID }?.name ?? ""
         return MacAppFix.status(gameFolder: Store.gameFolder(for: appID, name: name))
@@ -244,15 +250,34 @@ final class AppModel: ObservableObject {
         return photonConnectionIssue(appID)
     }
 
+    /// The route this game's Photon files and log point at: its own Steam-auth app,
+    /// OnlineFix's shared app, or neither. Read-only; the scan is only run when a
+    /// caller already asked for it, so opening a game does not read every asset.
+    func photonProfile(_ appID: Int) -> PhotonProfile.Profile? {
+        guard let game = games.first(where: { $0.id == appID }),
+              let folder = Store.gameFolder(for: appID, name: game.name) else { return nil }
+        let status = photonStatus(appID)
+        let candidates = photonScans[appID] ?? []
+        let log = PhotonLog.read(gameFolder: folder,
+                                 prefix: WineOverride.prefix(appID: appID))
+        let isPhoton = status.isPhoton || !candidates.isEmpty
+            || PhotonFix.isPhotonGame(in: folder)
+        return PhotonProfile.read(isPhoton: isPhoton, status: status,
+                                  candidates: candidates, log: log)
+    }
+
     /// What the game's own log says Photon made of the last connection it tried.
     /// "Failed to connect to Photon Network" is the game's text for every reason
     /// Photon can refuse, so the log is the only thing that says which one it was.
     func photonConnectionIssue(_ appID: Int) -> String? {
         guard let game = games.first(where: { $0.id == appID }),
-              let folder = Store.gameFolder(for: appID, name: game.name),
-              let evidence = PhotonLog.read(gameFolder: folder,
-                                            prefix: WineOverride.prefix(appID: appID)),
-              evidence.isFailure else { return nil }
+              let folder = Store.gameFolder(for: appID, name: game.name) else { return nil }
+        let evidence = PhotonLog.read(gameFolder: folder,
+                                      prefix: WineOverride.prefix(appID: appID))
+        if let profile = photonProfile(appID), profile.needsAttention {
+            return "\(profile.title). \(profile.detail) \(profile.remedy)"
+        }
+        guard let evidence, evidence.isFailure else { return nil }
         return "\(evidence.title). \(evidence.detail) \(evidence.remedy)"
     }
 
@@ -945,29 +970,29 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// PICO PARK 2's Photon fix, for the Mac build: the two file changes the game needs
-    /// before it will use OnlineFix's Photon app. A Windows build cannot take them, and
-    /// its own fix does the same thing from inside the game instead.
-    func setPicoPark2Photon(_ on: Bool, game: ManagedGame) {
+    /// The Mac build's own patch: the Photon app id the game connects to, and any code
+    /// change its profile names. A Windows build cannot take it, and its fix does the
+    /// same thing from inside the game instead.
+    func setMacBuildPatch(_ on: Bool, game: ManagedGame) {
         guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
         let folder = Store.gameFolder(for: game.id, name: game.name)
         guard let app = folder.flatMap({ FixInstaller.nativeMacBundle(in: $0) }) else {
-            fixMessage = "PICO PARK 2's Photon fix is for the Mac build. In Steam, open the "
-                + "game's Properties, Compatibility, turn off the forced Windows version, and "
-                + "let Steam install the Mac build first."
+            fixMessage = "The Mac patch is for the Mac build. In Steam, open the game's "
+                + "Properties, Compatibility, turn off the forced Windows version, and let "
+                + "Steam install the Mac build first."
             return
         }
         do {
-            let written = try PicoPark2Patch.setEnabled(on, app: app)
+            let written = try MacBundlePatch.setEnabled(on, app: app)
             games[index].picoPark2Photon = on
             persist()
             if !on {
-                fixMessage = "PICO PARK 2's Photon fix is off, and the game's own files are back."
+                fixMessage = "The Mac patch is off, and the game's own files are back."
             } else if written.isEmpty {
-                fixMessage = "PICO PARK 2's Photon fix was already in place."
+                fixMessage = "The Mac patch was already in place."
             } else {
-                fixMessage = "Patched PICO PARK 2's files for OnlineFix's Photon app, and "
-                    + "signed the game again. Launch it from Steam."
+                fixMessage = "Patched the game's files for OnlineFix's Photon app, and "
+                    + "signed it again. Launch it from Steam."
             }
         } catch {
             fixMessage = error.localizedDescription
@@ -1010,10 +1035,27 @@ final class AppModel: ObservableObject {
         guard fixIsInstalled(appID), found.contains(where: { !$0.isOnlineFixShared }) else {
             return nil
         }
-        if appID == 2644470 {
-            if let game = games.first(where: { $0.id == appID }) {
-                setPicoPark2Photon(true, game: game)
-            }
+        // A ticket in the game's own log makes this a Steam-auth route even when
+        // the package also carries Custom.dll. Steam networking alone does not:
+        // a custom-auth game can use Steam's relay for voice or achievements.
+        let log = PhotonLog.read(gameFolder: folder,
+                                 prefix: WineOverride.prefix(appID: appID))
+        let route = PhotonRoute.decide(
+            isPhoton: true,
+            packagePresent: true,
+            installedChain: PhotonFix.status(gameFolder: folder,
+                                             fixInstalled: true).isPhoton,
+            vendorLoader: PhotonChain.hasVendorLoader(in: folder, exe: nil),
+            candidates: found,
+            usesSteamNetworking: SteamNetworking.uses(appID: appID, gameFolder: folder),
+            log: log)
+        guard route.installsOnlineFix else { return nil }
+        // A Mac build takes the patch in its own files: the Photon app id, and any code
+        // change the game's profile names. There is no Windows chain to complete, and
+        // the routing applies as it does for any other build.
+        if let bundle = FixInstaller.nativeMacBundle(in: folder),
+           MacBundlePatch.canPatch(bundle) {
+            _ = try? MacBundlePatch.setEnabled(true, app: bundle)
             return nil
         }
         // The candidates are proof enough that this is a Photon game. Asking the
@@ -1042,10 +1084,22 @@ final class AppModel: ObservableObject {
         guard found.contains(where: { !$0.isOnlineFixShared }) else { return }
         guard !photonScanning.contains(appID) else { return }
         guard let folder = Store.gameFolder(for: appID, name: name) else { return }
+        let log = PhotonLog.read(gameFolder: folder,
+                                 prefix: WineOverride.prefix(appID: appID))
+        let route = PhotonRoute.decide(
+            isPhoton: true,
+            packagePresent: true,
+            installedChain: PhotonFix.status(gameFolder: folder,
+                                             fixInstalled: true).isPhoton,
+            vendorLoader: PhotonChain.hasVendorLoader(in: folder, exe: nil),
+            candidates: found,
+            usesSteamNetworking: SteamNetworking.uses(appID: appID, gameFolder: folder),
+            log: log)
+        guard route.installsOnlineFix else { return }
 
-        if appID == 2644470 {
-            guard let game = games.first(where: { $0.id == appID }) else { return }
-            setPicoPark2Photon(true, game: game)
+        if let bundle = FixInstaller.nativeMacBundle(in: folder),
+           MacBundlePatch.canPatch(bundle) {
+            _ = try? MacBundlePatch.setEnabled(true, app: bundle)
             return
         }
         let targets = photonTargets(appID: appID)
@@ -1213,11 +1267,13 @@ final class AppModel: ObservableObject {
         }
         // OnlineFix is Windows PE files that hook Windows Steam's API. A native build
         // runs as a Mach-O process and loads `libsteam_api.dylib`, so its files can
-        // never load there. The way in is to switch the game to NotProton and let
-        // Steam download the Windows build, which is what the store page does with
-        // this reply; "just give me the files" asks for the copy instead.
+        // never load there. A build whose Photon app id can be read is patched in its
+        // own files instead; otherwise the way in is to switch the game to NotProton
+        // and let Steam download the Windows build, which is what the store page does
+        // with this reply.
         let nativeBuild = FixInstaller.nativeMacBundle(in: folder)
-        if let bundle = nativeBuild, !confirmed {
+        let patchableMac = nativeBuild.map { MacBundlePatch.canPatch($0) } ?? false
+        if let bundle = nativeBuild, !confirmed, !patchableMac {
             // Nothing is installed yet: the page switches Steam to NotProton first, so
             // the Windows build is what gets downloaded, and the fix has a folder it
             // can work in.

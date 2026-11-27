@@ -29,6 +29,9 @@ struct FixRecipe: Codable, Sendable, Equatable {
     var removed: [String]
     var keepRealAppID: Bool
     var photonSwap: Bool
+    /// The route the install used, so a repair does not re-apply a Photon swap to a
+    /// Steam-auth game. Optional so packs written by older builds still decode.
+    var photonRoute: String? = nil
     var picoPark2: Bool
     /// Files the Photon swap changed in place, as paths from the game folder. Their
     /// untouched copies are beside them with `.onlinefix-photon-backup`.
@@ -365,10 +368,10 @@ enum FixPack {
         if recipe.picoPark2,
            let bundle = FixInstaller.nativeMacBundle(in: gameFolder) {
             do {
-                try PicoPark2Patch.setEnabled(false, app: bundle)
+                try MacBundlePatch.setEnabled(false, app: bundle)
                 changed += 1
             } catch {
-                failed.append("PICO PARK 2's patch")
+                failed.append("the Mac build's patch")
             }
         }
 

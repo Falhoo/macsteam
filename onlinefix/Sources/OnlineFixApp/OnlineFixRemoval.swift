@@ -153,7 +153,7 @@ enum OnlineFixRemoval {
                     report.restoredPhoton.append(contentsOf: restored)
                 }
                 if let app = FixInstaller.nativeMacBundle(in: folder) {
-                    if let written = try? PicoPark2Patch.setEnabled(false, app: app) {
+                    if let written = try? MacBundlePatch.setEnabled(false, app: app) {
                         report.restoredPhoton.append(contentsOf: written)
                     }
                 }

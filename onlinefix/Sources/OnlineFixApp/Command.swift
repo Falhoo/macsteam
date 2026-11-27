@@ -109,6 +109,96 @@ public enum OnlineFixCommand {
         return 0
     }
 
+    /// Reads a Mac build and says what the patch would do with it, writing nothing:
+    /// --onlinefix-mac-patch <folder> (read only unless --apply is given).
+    ///
+    /// The folder is a game folder, not a bundle: the bundle inside it is found the
+    /// same way the install finds it.
+    public static func macPatch(folder: URL, apply: Bool, off: Bool) -> Int32 {
+        guard let bundle = FixInstaller.nativeMacBundle(in: folder) else {
+            FileHandle.standardError.write(Data(
+                "No macOS app bundle in \(folder.path).\n".utf8))
+            return 1
+        }
+        let profile = MacBundlePatch.profile(for: bundle)
+        print("bundle: \(bundle.path)")
+        print("profile: \(profile?.name ?? "none (the Photon app id alone)")")
+        let state = MacBundlePatch.state(of: bundle)
+        print("can patch: \(state.canPatch ? "yes" : "no"), patched: \(state.isPatched ? "yes" : "no")")
+        for id in state.photonIDs { print("Photon app id: \(id)") }
+        if let message = state.message { print("message: \(message)") }
+        guard apply else { return 0 }
+        do {
+            let written = try MacBundlePatch.setEnabled(!off, app: bundle)
+            print(written.isEmpty ? "nothing to change" : "wrote:")
+            for path in written { print("  \(path)") }
+            return 0
+        } catch {
+            FileHandle.standardError.write(Data((error.localizedDescription + "\n").utf8))
+            return 1
+        }
+    }
+
+    /// Reports every piece of Photon evidence and the route it selects, writing
+    /// nothing: --onlinefix-photon-audit <appid> [--name <name>].
+    public static func photonAudit(appID: Int, name: String = "",
+                                   folder override: URL? = nil) -> Int32 {
+        let stored = Store.load().games.first { $0.id == appID }?.name ?? ""
+        let typed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let display = typed.isEmpty ? (stored.isEmpty ? "App \(appID)" : stored) : typed
+        let folder = override ?? Store.gameFolder(for: appID, name: display)
+        guard let folder else {
+            FileHandle.standardError.write(Data(
+                "\(display) (\(appID)) has no folder in this Steam library.\n".utf8))
+            return 1
+        }
+        let scan = GameScan.read(folder: folder, appID: appID, name: display)
+        let candidates = PhotonPatch.scan(in: folder)
+        let status = PhotonFix.status(gameFolder: folder,
+                                      fixInstalled: PhotonFix.isPhotonGame(in: folder))
+        let log = PhotonLog.read(gameFolder: folder, prefix: scan.prefix)
+        let route = PhotonRoute.decide(
+            isPhoton: scan.isPhoton || status.isPhoton,
+            packagePresent: status.isPhoton,
+            installedChain: status.isPhoton,
+            vendorLoader: PhotonChain.hasVendorLoader(in: folder, exe: scan.exe),
+            candidates: candidates,
+            usesSteamNetworking: scan.usesSteamNetworking,
+            log: log)
+
+        print("\(display) (\(appID))")
+        print("folder: \(folder.path)")
+        print("Unity: \(scan.unityVersion ?? "unknown")")
+        print("route: \(route.kind.rawValue)  (\(route.title))")
+        print("Photon: \(route.isPhoton ? "yes" : "no")  "
+            + "Steam networking: \(route.usesSteamNetworking ? "yes" : "no")  "
+            + "Steam ticket: \(route.requestsSteamTicket ? "yes" : "no")")
+        print("OnlineFix chain: \(status.isPhoton ? "present" : "absent")"
+            + (status.missing.isEmpty ? "" : " (missing: \(status.missing.map(\.name).joined(separator: ", ")))"))
+        print("own app ids: \(route.ownIDs.isEmpty ? "none" : route.ownIDs.joined(separator: ", "))")
+        print("shared app ids: \(route.sharedIDs.isEmpty ? "none" : route.sharedIDs.joined(separator: ", "))")
+        for reason in route.reasons { print("  evidence: \(reason)") }
+        if let log {
+            print("log: \(log.source.path)")
+            print("  \(log.detail)")
+        } else {
+            print("log: none")
+        }
+        switch route.kind {
+        case .steamAuth:
+            print("install: keep the game's own ids, keep the real AppID, no chain")
+        case .onlineFix:
+            print("install: OnlineFix's chain and shared Photon app")
+        case .nativeCustom:
+            print("install: keep the game's own ids, no chain")
+        case .ambiguous:
+            print("install: nothing until the conflicting evidence is resolved")
+        case .notPhoton:
+            print("install: no Photon route")
+        }
+        return 0
+    }
+
     /// Reports what a game and a fix package need, writing nothing. This is the lab's
     /// read-only check, and what tells a player why a fix will not work.
     public static func diagnose(appID: Int, name: String = "", packageRoot: URL? = nil) -> Int32 {

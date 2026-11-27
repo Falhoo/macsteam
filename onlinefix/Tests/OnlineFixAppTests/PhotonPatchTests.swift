@@ -217,6 +217,18 @@ struct PhotonPatchTests {
         return url
     }
 
+    /// R.E.P.O.'s stock pair belongs to R.E.P.O., not to OnlineFix's shared app.
+    /// Treating it as shared made the auto-patch replace the game's own ids.
+    @Test
+    func repoStockPairIsNotOnlineFixShared() {
+        for id in [PhotonIDs.realtime, PhotonIDs.voice] {
+            let candidate = PhotonPatch.Candidate(
+                file: URL(fileURLWithPath: "/tmp/photon"), id: id,
+                kind: .guid, settings: true)
+            #expect(candidate.isOnlineFixShared == false)
+        }
+    }
+
     /// A build whose id sits in the IL2CPP string table, glued to its neighbours: the
     /// 64-character run rule cannot see it, so the known id is matched by its bytes.
     @Test

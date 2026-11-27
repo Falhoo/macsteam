@@ -105,6 +105,30 @@ struct OverlayStubTests {
         #expect(!FixApply.enablePhotonIntegration(at: ini))
     }
 
+    /// The Steam-auth route keeps the game's own Photon app and leaves OnlineFix's
+    /// chain out. The switch has to go off in place, not leave a second key behind.
+    @Test
+    func photonIntegrationIsTurnedOffForTheSteamAuthRoute() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let ini = root.appendingPathComponent("OnlineFix.ini")
+        try Data("[Main]\nRealAppId=1\n\n[Misc]\nPhotonIntegration=true\nExtraProtection=false\n"
+            .utf8).write(to: ini)
+
+        #expect(FixApply.disablePhotonIntegration(at: ini))
+
+        let text = try String(contentsOf: ini, encoding: .utf8)
+        #expect(text.contains("PhotonIntegration=false"))
+        #expect(!text.lowercased().contains("photonintegration=true"))
+        #expect(text.components(separatedBy: "PhotonIntegration").count == 2)
+        #expect(text.contains("ExtraProtection=false"))
+        #expect(!FixApply.disablePhotonIntegration(at: ini))
+
+        // Absent already means off; there is nothing to write.
+        try Data("[Main]\nRealAppId=1\n".utf8).write(to: ini)
+        #expect(!FixApply.disablePhotonIntegration(at: ini))
+    }
+
     /// A package can carry an ini from another game. A key that is present but
     /// wrong is replaced in place, and a missing key is added under [Main].
     @Test
