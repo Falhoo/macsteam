@@ -4,5 +4,25 @@
     <title>macSteam</title>
     <description>Combined macSteam + NotProton releases. Add each one with scripts/appcast-add.sh.</description>
     <language>en</language>
+    <item>
+      <title>Version 0.8.11</title>
+      <pubDate>Fri, 27 Nov 2026 09:15:59 GMT</pubDate>
+      <sparkle:version>0.8.11</sparkle:version>
+      <sparkle:shortVersionString>0.8.11</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<div style="white-space: pre-wrap">Automatic updates are on. This is the release that installs them.
+
+- &quot;Check for Updates…&quot; works, and the app checks once a day by default.
+- Updates come from this repo&#x27;s own signed feed, never from plain macSteam&#x27;s, so an update can no longer replace this app with the other one.
+- The build number is now the real version; it was a fixed 19 before, so no release could ever look newer.
+
+Copies installed before this release cannot update themselves: install this one by hand, and later ones arrive on their own.
+
+Also in this build: the OnlineFix scanner reads more places for a Photon app id (Unity text assets, YAML, small binary settings), checks both encodings an id is stored in, and no longer loses a patch to a repair after a Steam verify.</div>]]></description>
+      <enclosure url="https://github.com/Falhoo/macsteam/releases/download/v0.8.11/macSteam-0.8.11.dmg"
+                 type="application/octet-stream"
+                 sparkle:edSignature="LGXr1i4WyKkOor+a2d6w59qQEdotTuYt60FPV8tmqqzIkShteB52u+hshLjaVJeBg17goHzj5ll+wxlcD9u1Bg=="
+                 length="89787603" />
+    </item>
   </channel>
 </rss>
