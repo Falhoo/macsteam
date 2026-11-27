@@ -261,7 +261,8 @@ profile is still patched when its id can be read. `MacBundlePatch.profiles` is t
 per-game list, so adding a game is a profile, not an engine change.
 
 Where it plugs in: `FixBuild` sets `plan.picoPark2` when the folder holds a patchable
-bundle, `FixService` writes the patch during install and repair and records the written
+bundle (a folder that also holds the Windows build is the forced-Windows install, where
+Steam still starts the `.exe`, so the patch is written but the force is left alone), `FixService` writes the patch during install and repair and records the written
 files so the fix counts as installed and the game stays routed as itself, `FixPack.undo`
 and `OnlineFixRemoval` call `MacBundlePatch.setEnabled(false)`, and `FixCompatibility`
 offers rather than refuses the install. `--onlinefix-mac-patch <folder> [--apply] [--off]`

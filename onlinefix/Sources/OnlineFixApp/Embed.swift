@@ -98,11 +98,15 @@ public enum OnlineFixEmbed {
                                      progress: progress)
     }
 
-    /// True when the game's folder holds a Mac build the fix can patch. Steam has to
-    /// start such a game natively, not through NotProton, for the patch to be what runs.
+    /// True when the game's folder holds a Mac build the fix can patch *and* no
+    /// Windows build beside it. Steam has to start such a game natively for the patch
+    /// to be what runs, and it only can when the Mac depot is the installed one; a
+    /// folder that also holds the Windows build is the forced-Windows install, where
+    /// taking the force off would leave Steam with nothing it can launch.
     public static func hasPatchableMacBuild(appID: Int) -> Bool {
         guard let folder = Store.gameFolder(for: appID),
-              let bundle = FixInstaller.nativeMacBundle(in: folder) else { return false }
+              let bundle = FixInstaller.nativeMacBundle(in: folder),
+              !FixInstaller.hasWindowsBuild(in: folder) else { return false }
         return MacBundlePatch.canPatch(bundle)
     }
 
