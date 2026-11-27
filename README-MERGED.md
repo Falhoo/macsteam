@@ -51,9 +51,11 @@ NotProton remembers where the app lives, so keep it in Applications.
   checked to apply cleanly to the real 1.2.6 source, but nothing has been compiled or run. If `./build.sh`
   stops with a compiler error, copy the red text and send it to me; it should be a quick fix.
 - **Steam client version.** This macSteam accepts Steam builds 1792618285 and 1794424036. 1794424036 is also NotProton's stable build, so it is the one that suits both. If Steam is on any other build, Install offers to switch it.
-- **Updates are off** in this build (macSteam's updater would replace this app with plain macSteam).
-  To update either project, rebuild from newer sources. The patch in `patches/` is tied to NotProton 1.2.6
-  and may need updating for other versions.
+- **Automatic updates** come from this repo's own `appcast.xml`, never from plain macSteam's feed.
+  They are on once `SPARKLE_PUBLIC_KEY` in `build.sh` holds this repo's Sparkle key; until then builds
+  don't update, as before. For each release: build, upload the DMG to the GitHub release, then run
+  `./scripts/appcast-add.sh dist/macSteam-X.Y.Z.dmg X.Y.Z` and push `appcast.xml`.
+  The patch in `patches/` is tied to NotProton 1.2.6 and may need updating for other versions.
 - **NotProton's menu-bar items** (Setup, Prefix menus, keyboard shortcuts) aren't in this app. The same
   actions are buttons inside the NotProton pages. Its Refresh and prefix buttons are in a bar at the top of
   each page.
