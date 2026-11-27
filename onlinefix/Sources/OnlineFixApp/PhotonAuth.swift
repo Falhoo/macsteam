@@ -29,19 +29,26 @@ enum PhotonAuth {
     /// The suffix for the untouched copy of a patched assembly.
     static let backupSuffix = ".onlinefix-photonauth-backup"
 
-    /// Which auth type the patch writes. `custom` is what an app configured for
-    /// OnlineFix's custom auth expects. `none` strips auth altogether, for an app
-    /// with auth switched off; it also has to stop Photon reading the auth values,
-    /// which is a second, shape-matched change.
+    /// Which auth type the patch writes.
+    ///
+    /// `steam` is what OnlineFix's own applications are registered for: Photon has
+    /// Steam check a ticket. Their app is registered for Spacewar (480), so the ticket
+    /// that passes is the one Steam signs for the 480 route — an unowned account can
+    /// always get that one, and can never get a ticket Steam vouches for on the game's
+    /// own AppID. `custom` suits an app registered for custom auth. `none` strips auth
+    /// altogether, for an app with it switched off; that also stops Photon reading the
+    /// auth values, which is a second, shape-matched change.
     enum Mode: String, Sendable {
+        case steam
         case custom
         case none
 
-        var value: Int32 { self == .custom ? 0 : -1 }
-
         var title: String {
-            self == .custom ? "CustomAuthenticationType.Custom"
-                            : "no auth at all"
+            switch self {
+            case .steam: return "CustomAuthenticationType.Steam"
+            case .custom: return "CustomAuthenticationType.Custom"
+            case .none: return "no auth at all"
+            }
         }
     }
 
@@ -54,6 +61,8 @@ enum PhotonAuth {
         var members: [(name: String, value: Int32)]
         /// The value that asks for OnlineFix's custom auth.
         var custom: Int32?
+        /// The value that asks Photon to have Steam check a ticket.
+        var steam: Int32?
         /// What the getter returns now, when that can be read.
         var current: Int32?
         var getterShape: Shape
@@ -72,6 +81,15 @@ enum PhotonAuth {
             /// A body this does not recognise, left alone.
             case unknown
             case missing
+        }
+
+        /// The value this assembly should send for a mode, when its enum has one.
+        func value(for mode: Mode) -> Int32? {
+            switch mode {
+            case .steam: return steam
+            case .custom: return custom
+            case .none: return -1
+            }
         }
 
         /// True when this assembly can take the patch.
@@ -120,7 +138,7 @@ enum PhotonAuth {
         }) else { return nil }
 
         var info = Info(file: file, enumName: "CustomAuthenticationType", members: [],
-                        custom: nil, current: nil, getterShape: .missing,
+                        custom: nil, steam: nil, current: nil, getterShape: .missing,
                         setterShape: .missing, patched: false, problem: nil)
 
         // The enum the property is typed with, and its members.
@@ -132,6 +150,7 @@ enum PhotonAuth {
                     info.members.append((member.name, value))
                 }
                 info.custom = info.members.first { $0.name == "Custom" }?.value
+                info.steam = info.members.first { $0.name == "Steam" }?.value
             }
         }
 
@@ -180,6 +199,16 @@ enum PhotonAuth {
 
     // MARK: - Applying
 
+    /// The mode an unowned Photon game should use. OnlineFix's own apps are
+    /// registered for Steam auth against Spacewar (480), and every account can get a
+    /// 480 ticket, so `steam` is the one that fits them. An assembly whose enum has no
+    /// Steam member is left with custom auth.
+    static func unlicensedMode(in gameFolder: URL) -> Mode? {
+        let infos = inspect(gameFolder: gameFolder).filter(\.canPatch)
+        if infos.contains(where: { $0.steam != nil }) { return .steam }
+        return infos.isEmpty ? nil : .custom
+    }
+
     /// Turns the auth-type patch on or off. Returns the files written.
     @discardableResult
     static func setEnabled(_ on: Bool, in gameFolder: URL, mode: Mode = .custom) throws -> [String] {
@@ -198,10 +227,11 @@ enum PhotonAuth {
                       $0.name == "get_AuthType"
                   }),
                   let body = assembly.ilBody(rva: getter.rva) else { continue }
-            let wanted = mode.value
-            // Already in the asked-for state: custom auth that is written and not
-            // stripped, or a strip that is done.
-            if mode == .custom, info.patched, !info.nonePatched { continue }
+            // The value comes from the assembly's own enum, and so does the check for
+            // whether the work is already done: the getter returns a constant only
+            // when it was patched, and a stock one reads the field (nil here).
+            guard let wanted = info.value(for: mode) else { continue }
+            if info.current == wanted, !info.nonePatched { continue }
             if mode == .none, info.nonePatched { continue }
 
             var data = assembly.data
@@ -245,7 +275,7 @@ enum PhotonAuth {
             if mode == .none, let site = authenticateSite(in: assembly) {
                 data.replaceSubrange(site.offset..<(site.offset + 6),
                                      with: [0x14, 0, 0, 0, 0, 0])
-            } else if mode == .custom, info.nonePatched, let site = authenticateSite(in: assembly),
+            } else if mode != .none, info.nonePatched, let site = authenticateSite(in: assembly),
                       let read = stockRead(file: info.file, at: site.offset) {
                 data.replaceSubrange(site.offset..<(site.offset + 6), with: read)
             }

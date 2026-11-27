@@ -1,6 +1,7 @@
 // Ticket trickery
 #include "ticket.h"
 #include "../config/config.h"
+#include "../onlinefix/onlinefix.h"
 #include "../util/log.h"
 #include <string.h>
 #include <stdint.h>
@@ -34,10 +35,12 @@ typedef int64_t (*fn_get_ticket_impl)(void *self, uint32_t appId, void *buf,
                                        uint32_t *pOffSteamId, uint32_t *pOffSig,
                                        uint32_t *pSigSize);
 
-#define SOURCE_APPID       7
 // Spacewar: every account owns it, so Steam always signs a ticket for it, and
-// OnlineFix's Photon apps are registered against it.
+// OnlineFix's Photon apps are registered against it. It is also the source a ticket is
+// taken from: a ticket for 7 is signed, but Photon's Steam check refuses it, because
+// the app names 480 as the AppID it accepts.
 #define SPACEWAR_APPID     480
+#define SOURCE_APPID       SPACEWAR_APPID
 static _Atomic(uint32_t) g_source_app = SOURCE_APPID;
 uint32_t sx_ticket_source_app(void) { return atomic_load(&g_source_app); }
 void sx_ticket_set_source_app(uint32_t app_id) {
@@ -102,6 +105,17 @@ int sx_ticket_serve_extended(void *server_this, void *reqReader, void *respWrite
     // ticket for at all.
     uint8_t *ticket_buf = (uint8_t *)calloc(1, req_cbMax);
     if (!ticket_buf) return 0;
+
+    // On the Spacewar route the game is not itself: Steam tracks it as 480, and the
+    // Photon app an OnlineFix copy connects to is registered against 480. A ticket the
+    // client signs here carries the game's own id, because macSteam answers ownership
+    // for it, and Photon's Steam check then refuses it ("error response from Steam",
+    // CustomAuthenticationFailed). Asking for 480 up front is what makes the ticket one
+    // Steam vouches for. A game kept on its real AppID still asks for its own.
+    {
+        OFSession session = of_session();
+        if (session.game && !session.keep_id) req_appId = SPACEWAR_APPID;
+    }
 
     uint32_t offAppId = 0, offSteamId = 0, offSig = 0, sigSize = 0;
     int64_t ret = impl(server_this, req_appId, ticket_buf, req_cbMax,

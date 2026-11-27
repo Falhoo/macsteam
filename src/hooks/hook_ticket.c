@@ -1,6 +1,7 @@
 // Ticket trickery
 #include "hooks.h"
 #include "../feats/ticket.h"
+#include "../onlinefix/onlinefix.h"
 #include "../config/config.h"
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -13,6 +14,7 @@
 #define METHOD_HASH_EXTENDED_DATA 0xC7E71245u
 #define METHOD_HASH_UPDATE_TICKET 0xCEDD4F18u
 #define UPDATE_TICKET_FENCE_DELTA 0x003DC67Au
+#define SPACEWAR_APPID     480
 #define TICKET_REFRESH_SOURCE_APPID 7u
 
 static void *orig_ServerDispatch = NULL;
@@ -90,6 +92,15 @@ static int64_t hook_ServerDispatch(void *server_this, void *reqReader,
             uint32_t appid;
             memcpy(&appid, argument, 4);
             uint32_t source = sx_ticket_source_app();
+            // The Photon app an OnlineFix copy connects to is registered against
+            // Spacewar (480), and every account can be issued a ticket for it. A ticket
+            // for this client's own numbered source is signed, then refused: Photon's
+            // Steam check names the app, and Steam will not vouch for another one's
+            // ticket. The session is no help here — this runs in the client process,
+            // which never saw the game's command line — so the source is fixed.
+            // Only while OnlineFix is actually running in this client: a Steam-auth
+            // game that keeps its real AppID has no fix loaded and wants its own.
+            if (of_ready) source = SPACEWAR_APPID;
             // The extended getter uses this same cached source ticket.
             // Refresh that same real ticket using Steam's own cache/expiry and
             // network logic, instead of waiting for a ticket we never consume.

@@ -84,8 +84,8 @@ struct FixPlan: Sendable {
             // exactly as on a Windows build. The bundle's Photon assembly takes the
             // same auth patch, so it is decided here with the id swap.
             if PhotonLog.ownsApp(appID: appID, folder: scan.folder, prefix: scan.prefix) == false,
-               PhotonAuth.inspect(gameFolder: bundle).contains(where: { $0.canPatch }) {
-                plan.photonAuth = .custom
+               let mode = PhotonAuth.unlicensedMode(in: bundle) {
+                plan.photonAuth = mode
                 plan.notes.append("Steam has no licence for this game, so its Photon assembly "
                     + "is changed to send custom auth instead of a Steam ticket.")
             }
@@ -314,11 +314,22 @@ struct FixPlan: Sendable {
         // validated, which is the whole reason for the route.
         if route.kind == .customUnlicensed, !PhotonIDs.shared.isEmpty {
             plan.photonSwap = true
-            plan.photonAuth = .custom
+            // OnlineFix's own apps are registered for Steam auth against Spacewar (480);
+            // custom auth is the fallback for a build whose enum has no Steam member.
+            plan.photonAuth = PhotonAuth.unlicensedMode(in: scan.folder)
+            // The ticket Photon has Steam check has to be the app's own. OnlineFix's
+            // apps are registered for 480, so the game must run as 480 for the ticket to
+            // be one Steam will vouch for — and every other fixed copy is 480 too. This
+            // outranks the relay rule below: a relay for the game's own AppID is worth
+            // nothing while the ticket is refused.
+            plan.keepRealAppID = false
+            plan.notes.append("It is started as Spacewar (480) too, which is the AppID "
+                + "OnlineFix's Photon app checks a ticket for. ")
             plan.notes.append("Steam has no licence for this game, so its own Photon app "
-                + "cannot check the ticket. It runs on OnlineFix's shared app with custom "
-                + "auth instead: the app id is replaced and the auth type its Photon "
-                + "assembly sends is changed. Both are backed up and put back on removal.")
+                + "cannot check the ticket. It runs on OnlineFix's shared app instead, which "
+                + "checks a Spacewar (480) ticket the account can always get: the app id is "
+                + "replaced and the auth type its Photon assembly sends is changed. Both are "
+                + "backed up and put back on removal.")
         }
         if steamAuthPhoton {
             plan.notes.append("This Photon app takes Steam's auth ticket, so the game runs as "
