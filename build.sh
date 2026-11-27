@@ -185,7 +185,7 @@ NP_APP_VERSION="$(sed -n 's/^#define NOTPROTON_VERSION "\(.*\)"/\1/p' "$NP_DIR/d
 # Until the key is pasted after ":-" below, builds leave updates off, as before.
 # Set MACSTEAM_FEED_URL="" to build a copy that never updates.
 SPARKLE_FEED_URL="${MACSTEAM_FEED_URL-https://raw.githubusercontent.com/Falhoo/macsteam/main/appcast.xml}"
-SPARKLE_PUBLIC_KEY="${MACSTEAM_SPARKLE_PUBLIC_KEY:-}"
+SPARKLE_PUBLIC_KEY="${MACSTEAM_SPARKLE_PUBLIC_KEY:-6RrQmVDggbP9mn2I5o7yJDyBtgr6/4PsrOI84sFg+XE=}"
 SPARKLE_PLIST=""
 if [ -n "$SPARKLE_FEED_URL" ] && [ -n "$SPARKLE_PUBLIC_KEY" ]; then
     SPARKLE_PLIST="<key>SUFeedURL</key> <string>$SPARKLE_FEED_URL</string>
