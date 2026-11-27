@@ -170,7 +170,10 @@ struct GameScan: Sendable {
             usesDotNet: executable.map(usesDotNet) ?? false,
             originalSteamAPI: originalSteamAPI(in: folder, launch: launch, apiDLLs: apiDLLs),
             isPhoton: PhotonFix.isPhotonGame(in: folder),
-            importedDLLs: imported.dlls,
+            // A doorway is decided from the game's own binaries. The wider set is only
+            // used when nothing core imports anything, which is a build whose real
+            // executable sits in a folder the scan did not take for the launch folder.
+            importedDLLs: imported.coreDLLs.isEmpty ? imported.dlls : imported.coreDLLs,
             importedFunctions: imported.functions,
             coreImportedFunctions: imported.coreFunctions,
             isIL2CPP: engine == .unityIL2CPP,
@@ -259,7 +262,13 @@ struct GameScan: Sendable {
     /// both are left out. A game wrapped in a folder of its own is walked from the
     /// launch folder, where the executable lives.
     struct ImportScan: Sendable {
+        /// Every module any scanned binary imports, which is what export checks need:
+        /// a doorway missing a function breaks whichever binary calls it.
         var dlls: Set<String>
+        /// The modules the executable, the engine and the binaries beside them import.
+        /// A bundled helper the game never launches imports plenty of system DLLs of
+        /// its own, so this is the set a doorway decision may be made from.
+        var coreDLLs: Set<String>
         var functions: [String: Set<String>]
         var coreFunctions: [String: Set<String>]
     }
@@ -304,17 +313,19 @@ struct GameScan: Sendable {
             }
         }
         var imports = Set<String>()
+        var coreImports = Set<String>()
         var functions: [String: Set<String>] = [:]
         var coreFunctions: [String: Set<String>] = [:]
         for file in files {
+            let name = file.lastPathComponent.lowercased()
+            let core = file == exe
+                || ["unityplayer.dll", "gameassembly.dll"].contains(name)
+                || file.deletingLastPathComponent().standardizedFileURL
+                    == launch.standardizedFileURL
             if let pe = PortableExecutable.read(file) {
                 if !pe.isManaged {
                     imports.formUnion(pe.imports)
-                    let name = file.lastPathComponent.lowercased()
-                    let core = file == exe
-                        || ["unityplayer.dll", "gameassembly.dll"].contains(name)
-                        || file.deletingLastPathComponent().standardizedFileURL
-                            == launch.standardizedFileURL
+                    if core { coreImports.formUnion(pe.imports) }
                     for (module, names) in pe.importedFunctions {
                         functions[module, default: []].formUnion(names)
                         if core {
@@ -323,10 +334,12 @@ struct GameScan: Sendable {
                     }
                 }
             } else {
-                imports.formUnion(PortableExecutable.fallbackImports(in: file))
+                let fallback = PortableExecutable.fallbackImports(in: file)
+                imports.formUnion(fallback)
+                if core { coreImports.formUnion(fallback) }
             }
         }
-        return ImportScan(dlls: imports, functions: functions,
+        return ImportScan(dlls: imports, coreDLLs: coreImports, functions: functions,
                          coreFunctions: coreFunctions)
     }
 

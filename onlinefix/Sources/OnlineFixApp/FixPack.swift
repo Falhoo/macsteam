@@ -165,10 +165,10 @@ enum FixPack {
                 guard let file = file(relative, in: gameFolder),
                       let data = try? Data(contentsOf: file, options: [.mappedIfSafe])
                 else { continue }
-                let carrying = ids.filter { data.range(of: Data($0.utf8)) != nil }
+                let carrying = ids.filter { PhotonPatch.carries(data, id: $0) }
                 if !carrying.isEmpty { files.insert(relative) }
                 let kept = (fileIDs[relative] ?? []).filter {
-                    data.range(of: Data($0.utf8)) != nil
+                    PhotonPatch.carries(data, id: $0)
                 }
                 if !carrying.isEmpty || !kept.isEmpty {
                     fileIDs[relative] = Array(Set(carrying + kept)).sorted()
@@ -197,7 +197,7 @@ enum FixPack {
                   let data = try? Data(contentsOf: file, options: [.mappedIfSafe]) else {
                 continue
             }
-            let carrying = ids.filter { data.range(of: Data($0.utf8)) != nil }
+            let carrying = ids.filter { PhotonPatch.carries(data, id: $0) }
             if !carrying.isEmpty { fileIDs[relative] = carrying }
         }
         if files.isEmpty || ids.isEmpty {
@@ -274,7 +274,7 @@ enum FixPack {
                 let wanted = recipe.photonFileIDs?[relative] ?? ids
                 guard Paths.fm.fileExists(atPath: backup.path),
                       let data = try? Data(contentsOf: file, options: [.mappedIfSafe]),
-                      wanted.allSatisfy({ data.range(of: Data($0.utf8)) != nil }) else {
+                      wanted.allSatisfy({ PhotonPatch.carries(data, id: $0) }) else {
                     changed.append(relative)
                     continue
                 }

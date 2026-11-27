@@ -35,6 +35,9 @@ enum PhotonLog {
             case ticketRejected
             /// Photon refused the app id itself.
             case appIDRefused
+            /// The app does not accept the auth type the client sent: "Authentication
+            /// type not supported" means the app is registered for another one.
+            case authTypeRefused
             /// Photon refused the credentials for another reason, or never connected.
             case authRefused
         }
@@ -44,6 +47,7 @@ enum PhotonLog {
             case .none: return "Photon's log shows no refusal"
             case .ticketRejected: return "Photon refused the Steam ticket"
             case .appIDRefused: return "Photon refused the app id"
+            case .authTypeRefused: return "Photon does not accept the auth type used"
             case .authRefused: return "Photon refused the connection"
             }
         }
@@ -69,6 +73,11 @@ enum PhotonLog {
             case .appIDRefused:
                 text += " The app id the game connected with is not one Photon accepts for "
                     + "this game, so no player reaches a room."
+            case .authTypeRefused:
+                text += " The app is registered for a different authentication type, so the "
+                    + "credentials were refused before any room was joined. Which type it "
+                    + "wants is the app's setting, not the game's: a Steam-auth app takes the "
+                    + "game's own ticket, OnlineFix's apps take custom auth."
             case .authRefused:
                 text += " The credentials Photon received were refused before any room was "
                     + "joined."
@@ -88,6 +97,11 @@ enum PhotonLog {
             case .appIDRefused:
                 return "Use OnlineFix's Photon app id: install its Photon patch, or replace "
                     + "the id in the game's own files."
+            case .authTypeRefused:
+                return "Match the app to the credentials: an unowned game plays on OnlineFix's "
+                    + "shared app with the custom auth the fix writes, and an owned one on the "
+                    + "game's own app with Steam's ticket. Which of the two is in the files is "
+                    + "what the app id says."
             case .authRefused:
                 return "Read the lines above; they name what Photon objected to."
             }
@@ -110,27 +124,42 @@ enum PhotonLog {
 
     // MARK: - Finding the log
 
-    /// Every log a Unity game writes for itself in its Wine prefix.
-    static func logs(in prefix: URL?) -> [URL] {
-        guard let prefix else { return [] }
+    /// Every log a game writes for itself in its Wine prefix.
+    ///
+    /// Unity uses `AppData/LocalLow/<company>/<product>/Player.log`, and some builds
+    /// are told to use `AppData/Local` instead. An Unreal build writes
+    /// `AppData/Local/<project>/Saved/Logs/*.log`, and a launcher the game ships can
+    /// write its own crash log beside the executable, which Photon's answer sometimes
+    /// reaches rather than Unity's. All three are read; the newest wins.
+    static func logs(in prefix: URL?, gameFolder: URL? = nil) -> [URL] {
+        var found: [URL] = []
+        if let gameFolder {
+            for name in ["Player.log", "output_log.txt", "photon.log"] {
+                let url = gameFolder.appendingPathComponent(name)
+                if Paths.fm.fileExists(atPath: url.path) { found.append(url) }
+            }
+        }
+        guard let prefix else { return found }
         let users = prefix.appendingPathComponent("drive_c/users", isDirectory: true)
         let entries = (try? Paths.fm.contentsOfDirectory(
             at: users, includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles])) ?? []
-        var found: [URL] = []
         for user in entries {
-            let low = user.appendingPathComponent("AppData/LocalLow", isDirectory: true)
-            let companies = (try? Paths.fm.contentsOfDirectory(
-                at: low, includingPropertiesForKeys: [.isDirectoryKey],
-                options: [.skipsHiddenFiles])) ?? []
-            for company in companies {
-                let products = (try? Paths.fm.contentsOfDirectory(
-                    at: company, includingPropertiesForKeys: [.isDirectoryKey],
-                    options: [.skipsHiddenFiles])) ?? []
-                for product in products {
-                    for name in ["Player.log", "Player-prev.log"] {
-                        let url = product.appendingPathComponent(name)
-                        if Paths.fm.fileExists(atPath: url.path) { found.append(url) }
+            for base in ["AppData/LocalLow", "AppData/Local"] {
+                let root = user.appendingPathComponent(base, isDirectory: true)
+                for company in directories(in: root) {
+                    for product in directories(in: company) {
+                        for name in ["Player.log", "Player-prev.log"] {
+                            let url = product.appendingPathComponent(name)
+                            if Paths.fm.fileExists(atPath: url.path) { found.append(url) }
+                        }
+                        // Unreal's logs, and its crash folder.
+                        for folder in ["Saved/Logs", "Saved/Crashes"] {
+                            let dir = product.appendingPathComponent(folder, isDirectory: true)
+                            for url in files(in: dir) where url.pathExtension.lowercased() == "log" {
+                                found.append(url)
+                            }
+                        }
                     }
                 }
             }
@@ -138,11 +167,28 @@ enum PhotonLog {
         return found
     }
 
+    private static func entries(in url: URL, key: URLResourceKey) -> [URL] {
+        let found: [URL] = (try? Paths.fm.contentsOfDirectory(
+            at: url, includingPropertiesForKeys: [key],
+            options: [.skipsHiddenFiles])) ?? []
+        return found.filter {
+            (try? $0.resourceValues(forKeys: [key]))?.allValues[key] as? Bool == true
+        }
+    }
+
+    private static func directories(in url: URL) -> [URL] {
+        entries(in: url, key: .isDirectoryKey)
+    }
+
+    private static func files(in url: URL) -> [URL] {
+        entries(in: url, key: .isRegularFileKey)
+    }
+
     /// The newest log this game wrote, including the Photon patch's own. A stale
     /// `photondiag.log` from an earlier attempt must not hide the Player.log the
     /// game wrote after it: the patch's log is only preferred when it is newer.
     static func newestLog(gameFolder: URL, prefix: URL?) -> URL? {
-        var candidates = logs(in: prefix)
+        var candidates = logs(in: prefix, gameFolder: gameFolder)
         let plugin = gameFolder.appendingPathComponent(pluginLog)
         if Paths.fm.fileExists(atPath: plugin.path) { candidates.append(plugin) }
         return candidates.max { one, other in
@@ -179,17 +225,42 @@ enum PhotonLog {
     }
 
     /// The last thing the client logged about owning this AppID.
+    ///
+    /// The client's log runs to megabytes and is asked about once per finding, per
+    /// plan and per round of the consistency pass, so the answer is kept until the
+    /// log grows. A nil is kept too: "never mentioned" does not change while the file
+    /// does not.
     static func clientOwnership(appID: Int) -> Bool? {
         let file = Paths.home
             .appendingPathComponent("Library/Application Support/macsteam/macsteam.log")
+        let stamp = ((try? file.resourceValues(forKeys: [.contentModificationDateKey,
+                                                         .fileSizeKey]))).map {
+            "\($0.contentModificationDate?.timeIntervalSince1970 ?? 0)|\($0.fileSize ?? 0)"
+        } ?? ""
+
+        ownershipLock.lock()
+        if let cached = ownershipCache[appID], cached.stamp == stamp {
+            ownershipLock.unlock()
+            return cached.answer
+        }
+        ownershipLock.unlock()
+
         guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
         let window: UInt64 = 2 * 1024 * 1024
         try? handle.seek(toOffset: size > window ? size - window : 0)
-        guard let data = try? handle.readToEnd() else { return nil }
-        return ownership(inClientLog: String(decoding: data, as: UTF8.self), appID: appID)
+        let data = (try? handle.readToEnd()) ?? Data()
+        let answer = ownership(inClientLog: String(decoding: data, as: UTF8.self), appID: appID)
+
+        ownershipLock.lock()
+        ownershipCache[appID] = (stamp, answer)
+        ownershipLock.unlock()
+        return answer
     }
+
+    private static let ownershipLock = NSLock()
+    nonisolated(unsafe) private static var ownershipCache: [Int: (stamp: String, answer: Bool?)] = [:]
 
     /// The last verdict the client logged about owning `appID`, from a log's text.
     /// Nil when the client never mentioned it.
@@ -205,10 +276,27 @@ enum PhotonLog {
     }
 
     private static func text(at url: URL) -> String? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        guard let data = tail(of: url) else { return nil }
         // UTF-8 first; the replacement decoder never fails, so one bad byte in a
         // log does not throw the whole answer away.
         return String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+    }
+
+    /// The end of a log. A `Player.log` runs to tens of megabytes on a game that has
+    /// been played for a while, and the connection attempt is at the end of it, so only
+    /// the last stretch is read. The window is generous enough to hold the whole of a
+    /// launch, and starts on a line break so the first line is not cut in half.
+    static func tail(of url: URL, bytes: UInt64 = 2 * 1024 * 1024) -> Data? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let from = size > bytes ? size - bytes : 0
+        try? handle.seek(toOffset: from)
+        guard var data = try? handle.readToEnd() else { return nil }
+        if from > 0, let newline = data.firstIndex(of: 0x0A) {
+            data = data[data.index(after: newline)...]
+        }
+        return data
     }
 
     /// The lines of a log, turned into the one answer that matters.
@@ -264,6 +352,10 @@ enum PhotonLog {
     static func classify(message: String?, returnCode: Int?, text: String) -> Evidence.Failure {
         // Photon writes "app id", "AppId" and "ApplicationId" for the same thing.
         let said = (message ?? "").lowercased().replacingOccurrences(of: " ", with: "")
+        // "Authentication type not supported (none configured)": the app answered about
+        // the type itself, before any ticket was checked. It outranks the token rule:
+        // OnlineFix's apps put the words "custom auth" in the same message.
+        if said.contains("authenticationtype") { return .authTypeRefused }
         if said.contains("steam") || said.contains("ticket") {
             return .ticketRejected
         }

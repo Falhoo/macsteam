@@ -106,3 +106,91 @@ struct PhotonAuthTests {
         #expect(try PhotonAuth.setEnabled(true, in: root).isEmpty)
     }
 }
+
+/// Switching between the two modes. Both live in the same assembly, and going back
+/// to custom has to undo the change the no-auth mode made: the getter is already the
+/// custom constant, so only the stopped read is left to put back. It was dropped
+/// before, and the result was a build that said "custom" while still sending nothing.
+@Suite
+struct PhotonAuthModeSwitchTests {
+
+    private func folder() throws -> URL {
+        let url = try #require(Bundle.module.url(forResource: "PhotonRealtime",
+                                                 withExtension: "dll",
+                                                 subdirectory: "Fixtures"))
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("photonauth-switch-\(UUID().uuidString)", isDirectory: true)
+        let managed = root.appendingPathComponent("Game_Data/Managed", isDirectory: true)
+        try FileManager.default.createDirectory(at: managed, withIntermediateDirectories: true)
+        try Data(contentsOf: url).write(to: managed.appendingPathComponent("PhotonRealtime.dll"))
+        return root
+    }
+
+    private func file(_ root: URL) -> URL {
+        root.appendingPathComponent("Game_Data/Managed/PhotonRealtime.dll")
+    }
+
+    @Test
+    func noneFromCustomApplies() throws {
+        let root = try folder()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        _ = try PhotonAuth.setEnabled(true, in: root, mode: .custom)
+        let written = try PhotonAuth.setEnabled(true, in: root, mode: .none)
+
+        #expect(written.contains { $0.hasSuffix("PhotonRealtime.dll") })
+        let info = try #require(PhotonAuth.inspect(file: file(root)))
+        #expect(info.nonePatched)
+    }
+
+    @Test
+    func customAfterNoneUndoesTheStoppedRead() throws {
+        let root = try folder()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        _ = try PhotonAuth.setEnabled(true, in: root, mode: .none)
+        let written = try PhotonAuth.setEnabled(true, in: root, mode: .custom)
+
+        #expect(written.contains { $0.hasSuffix("PhotonRealtime.dll") })
+        let info = try #require(PhotonAuth.inspect(file: file(root)))
+        #expect(info.patched)
+        #expect(!info.nonePatched, "the auth read is back, so custom auth is sent again")
+    }
+
+    @Test
+    func stayingOnCustomWritesNothing() throws {
+        let root = try folder()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        _ = try PhotonAuth.setEnabled(true, in: root, mode: .custom)
+        #expect(try PhotonAuth.setEnabled(true, in: root, mode: .custom).isEmpty)
+    }
+}
+
+/// A backup on its own does not mean patched. A Steam verify puts the stock assembly
+/// back and leaves the backup, so a repair that trusted the file name skipped the very
+/// file it was there to fix.
+@Suite
+struct PhotonAuthVerifyTests {
+
+    @Test
+    func aRestoredAssemblyIsSeenAsUnpatched() throws {
+        let url = try #require(Bundle.module.url(forResource: "PhotonRealtime",
+                                                 withExtension: "dll",
+                                                 subdirectory: "Fixtures"))
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("photonauth-verify-\(UUID().uuidString)", isDirectory: true)
+        let managed = root.appendingPathComponent("Game_Data/Managed", isDirectory: true)
+        try FileManager.default.createDirectory(at: managed, withIntermediateDirectories: true)
+        let file = managed.appendingPathComponent("PhotonRealtime.dll")
+        let stock = try Data(contentsOf: url)
+        try stock.write(to: file)
+
+        _ = try PhotonAuth.setEnabled(true, in: root, mode: .custom)
+        try stock.write(to: file)   // what a verify does: the backup stays
+
+        #expect(PhotonAuth.inspect(file: file)?.patched == false)
+        let written = try PhotonAuth.setEnabled(true, in: root, mode: .custom)
+        #expect(written.contains { $0.hasSuffix("PhotonRealtime.dll") })
+    }
+}

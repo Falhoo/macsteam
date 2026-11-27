@@ -304,7 +304,7 @@ from the dylib, so rebuilding the dylib is not enough for a runner change to tak
 `CrossOverInstaller.swift` and `Resources/crossover-install.sh` are the merged 0.8.5 work,
 with the script's licence patch tail deliberately removed.
 
-Tests: `swift test` in `onlinefix/`, 266 Swift Testing tests in 33 suites, all passing;
+Tests: `swift test` in `onlinefix/`, 278 Swift Testing tests in 38 suites, all passing;
 `macsteam-app` has 46 XCTest cases. Use
 `--disable-sandbox` (or `/tmp/swiftshim/swift`) if the macro plugin fails under the
 sandbox, and delete `.build/.lock` after a killed run. `git checkout` in `macsteam-repo`
@@ -341,6 +341,21 @@ fails with an index lock permission error; use `git_restore` instead.
   and `FixPack.undo` both check `.onlinefix-photonauth-backup` and
   `.onlinefix-photon-backup` before removing anything, and `FixPack.verify` leaves a
   file the auth patch owns to that patch.
+- A Photon id is stored two ways (ASCII in assets, UTF-16 in Mono assemblies) and
+  every check that looks for one has to try both. `PhotonPatch.carries` is that check;
+  an ASCII-only comparison made a correctly patched assembly look changed, so a repair
+  kept trying to put it back and reported "Still to put back" forever.
+- "Patched" means what the getter returns, never that a backup file exists: a Steam
+  verify puts the stock assembly back and leaves the backup, so trusting the backup
+  made a repair skip the file it was there to fix. `PhotonAuth.differsFromBackup` is the
+  fallback only when the IL cannot be read.
+- The auth patch has two modes and they are not independent: `none` writes the getter
+  to -1 *and* nulls the read, so going back to `custom` has to undo the null from the
+  backup and rewrite the getter. The guard also cannot test for a trailing `ret`: a
+  patched body ends in padding nops, so a second pass used to bail out.
+- A `PhotonServerSettings` saved as text (Unity's Force Text) holds its ids as YAML with
+  the field names written out. `PhotonPatch.textSettings` reads those, and the field name
+  is what orders a pair, so a game keeping them in two files can still be patched.
 - The SwiftPM release executable needs `@executable_path/../Frameworks` added with
   `install_name_tool` before it is put in the app bundle; otherwise Sparkle fails to
   load at launch. The installed 0.8.10 has that rpath.

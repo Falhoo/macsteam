@@ -452,6 +452,7 @@ enum FixAudit {
             vendorLoader: PhotonChain.hasVendorLoader(in: launch, exe: scan.exe),
             candidates: candidates,
             usesSteamNetworking: scan.usesSteamNetworking,
+            ownsApp: PhotonLog.ownsApp(appID: appID, folder: scan.folder, prefix: scan.prefix),
             log: log ?? PhotonLog.read(gameFolder: scan.folder, prefix: scan.prefix))
         let steamAuthPhoton = route.isSteamAuth
         let photon = route.installsOnlineFix

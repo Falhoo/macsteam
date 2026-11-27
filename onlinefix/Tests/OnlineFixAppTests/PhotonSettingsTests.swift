@@ -129,4 +129,122 @@ struct PhotonSettingsTests {
         #expect(PhotonPatch.isReadable(root.appendingPathComponent("global-metadata.dat")))
         #expect(!PhotonPatch.isReadable(root.appendingPathComponent("cache.dat")))
     }
+
+    /// The files the other serialization and engine formats keep settings in. A Unity
+    /// text asset is the one that also names its fields.
+    @Test
+    func settingsFilesOfOtherFormatsAreRead() {
+        let root = URL(fileURLWithPath: "/tmp/game")
+        for name in ["PhotonServerSettings.asset", "appsettings.json", "DefaultEngine.ini",
+                     "photon.cfg", "settings.yaml", "PhotonAppSettings.bytes"] {
+            #expect(PhotonPatch.isReadable(root.appendingPathComponent(name)))
+        }
+        // A bulky blob is only read while it is small enough to be settings.
+        #expect(PhotonPatch.sizeAllows(root.appendingPathComponent("PhotonAppSettings.bytes"),
+                                      size: 4_000))
+        #expect(!PhotonPatch.sizeAllows(root.appendingPathComponent("settings.bin"),
+                                       size: 64 * 1024 * 1024))
+        #expect(PhotonPatch.sizeAllows(root.appendingPathComponent("global-metadata.dat"),
+                                      size: 64 * 1024 * 1024))
+    }
+}
+
+/// A project saved with Unity's text serialization writes `PhotonServerSettings.asset`
+/// as YAML, with the field names spelled out. Before this was read, such a game had no
+/// candidate at all: its ids are not length-prefixed, and the field names are the only
+/// thing that says which field is which.
+@Suite
+struct PhotonTextSettingsTests {
+
+    private let realtime = "2be03cc8-3633-4033-a22e-7ef1c243b1fd"
+    private let voice = "ba60e90a-af6f-4965-80cf-ff783c91c992"
+
+    private func folder() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("photon-text-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url.resolvingSymlinksInPath()
+    }
+
+    private func asset(realtime: String, voice: String) -> Data {
+        Data("""
+        %YAML 1.1
+        %TAG !u! tag:unity3d.com,2011:
+        --- !u!114 &11400000
+        MonoBehaviour:
+          m_Script: {fileID: 11500000, guid: 8d4e1e5f, type: 3}
+          AppIdRealtime: \(realtime)
+          AppIdVoice: \(voice)
+          AppVersion: 4.1
+        """.utf8)
+    }
+
+    @Test
+    func aTextAssetNamesItsFields() {
+        let found = PhotonPatch.textSettings(in: asset(realtime: realtime, voice: voice))
+        #expect(found.map(\.id) == [realtime, voice])
+        #expect(found.map(\.field) == ["appidrealtime", "appidvoice"])
+    }
+
+    @Test
+    func aPairIsOrderedByNameAcrossTwoFiles() throws {
+        // Both values in separate assets, which field order alone cannot order.
+        let root = try folder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try asset(realtime: realtime, voice: "").write(to: root.appendingPathComponent("a.asset"))
+        let second = root.appendingPathComponent("b.asset")
+        try asset(realtime: voice, voice: "").write(to: second)
+        // Rewrite the second file's field so it is the voice one.
+        var text = String(decoding: try Data(contentsOf: second), as: UTF8.self)
+        text = text.replacingOccurrences(of: "AppIdRealtime", with: "AppIdVoice")
+        try Data(text.utf8).write(to: second)
+
+        let plan = PhotonPatch.plan(for: PhotonPatch.scan(in: root))
+        #expect(plan.skipped == nil)
+        #expect(plan.id == realtime)
+        #expect(plan.voiceID == voice)
+    }
+
+    @Test
+    func thePairIsPatched() throws {
+        let root = try folder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("PhotonServerSettings.asset")
+        try asset(realtime: realtime, voice: voice).write(to: file)
+
+        let report = PhotonPatch.autoPatch(in: root, sign: { _ in })
+        // The enumerator spells a temp path `/private/var`, the caller `/var`.
+        #expect(report.written.map { GameScan.canonical(URL(fileURLWithPath: $0)) }
+            == [GameScan.canonical(file)])
+        let after = String(decoding: try Data(contentsOf: file), as: UTF8.self)
+        #expect(after.contains("AppIdRealtime: \(PhotonIDs.realtime)"))
+        #expect(after.contains("AppIdVoice: \(PhotonIDs.voice)"))
+        #expect(!after.contains(realtime))
+    }
+
+    /// A line that only looks like a field, and a value that is not an id.
+    @Test
+    func nonFieldsAndNonIdsAreIgnored() {
+        let text = Data("""
+          m_AppIdRealtime: nope
+          AppIdRealtime: 9551e103-6003-43b6-9415-d4ff80eefaea
+        """.utf8)
+        let found = PhotonPatch.textSettings(in: text)
+        #expect(found.map(\.id) == ["9551e103-6003-43b6-9415-d4ff80eefaea"])
+    }
+}
+
+/// An id is stored two ways and both count. A Mono assembly keeps its strings as
+/// UTF-16, so an ASCII-only check called a correctly patched assembly "changed" and a
+/// repair kept trying to put it back.
+@Suite
+struct PhotonEncodingsTests {
+    @Test
+    func bothEncodingsAreSeen() {
+        let id = "80449c66-0a91-49a5-acb6-ca805e84e605"
+        let wide = Data(id.utf16.flatMap { [UInt8($0 & 0xFF), UInt8($0 >> 8)] })
+        #expect(PhotonPatch.carries(Data(("x" + id + "y").utf8), id: id))
+        #expect(PhotonPatch.carries(wide, id: id))
+        #expect(!PhotonPatch.carries(Data("nothing".utf8), id: id))
+    }
 }

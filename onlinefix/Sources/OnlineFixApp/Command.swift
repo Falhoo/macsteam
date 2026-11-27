@@ -202,6 +202,7 @@ public enum OnlineFixCommand {
             vendorLoader: PhotonChain.hasVendorLoader(in: folder, exe: scan.exe),
             candidates: candidates,
             usesSteamNetworking: scan.usesSteamNetworking,
+            ownsApp: PhotonLog.ownsApp(appID: appID, folder: scan.folder, prefix: scan.prefix),
             log: log)
 
         print("\(display) (\(appID))")

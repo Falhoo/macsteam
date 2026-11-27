@@ -269,7 +269,7 @@ enum FixService {
         // routed as itself) and a repair can put them back.
         var macWritten: [String] = []
         if plan.picoPark2, let bundle = latestScan.macBundle {
-            macWritten = try MacBundlePatch.setEnabled(true, app: bundle)
+            macWritten = try MacBundlePatch.setEnabled(true, app: bundle, auth: plan.photonAuth)
         }
         var photonWritten: [String] = []
         let finalRoute = PhotonRoute.decide(
@@ -327,7 +327,7 @@ enum FixService {
                 continue
             }
             let carrying = outcome.photonTargets.filter {
-                data.range(of: Data($0.utf8)) != nil
+                PhotonPatch.carries(data, id: $0)
             }
             if !carrying.isEmpty { fileIDs[relative] = carrying }
         }
@@ -368,28 +368,35 @@ enum FixService {
     /// are not in the pack, so `FixPack.verify` cannot see them; this is where that
     /// half is restored, and it says so when it had work to do.
     /// Puts the Photon auth patch back if a Steam verify replaced the assembly.
+    /// Returns true when it had to write anything.
+    @discardableResult
     private static func repatchPhotonAuth(_ recipe: FixRecipe, folder: URL,
-                                          outcome: inout Outcome) {
+                                          outcome: inout Outcome) -> Bool {
         guard let raw = recipe.photonAuth, let mode = PhotonAuth.Mode(rawValue: raw) else {
-            return
+            return false
         }
         guard let written = try? PhotonAuth.setEnabled(true, in: folder, mode: mode),
-              !written.isEmpty else { return }
+              !written.isEmpty else { return false }
         outcome.notes.append("Put the Photon auth patch back in "
             + written.map { URL(fileURLWithPath: $0).lastPathComponent }
                 .joined(separator: ", ") + ".")
+        return true
     }
 
+    /// Returns true when it had to write anything.
+    @discardableResult
     private static func repatchMacBuild(_ recipe: FixRecipe, folder: URL,
-                                        outcome: inout Outcome) {
+                                        outcome: inout Outcome) -> Bool {
         guard recipe.picoPark2,
-              let bundle = FixInstaller.nativeMacBundle(in: folder) else { return }
-        guard let written = try? MacBundlePatch.setEnabled(true, app: bundle),
-              !written.isEmpty else { return }
+              let bundle = FixInstaller.nativeMacBundle(in: folder) else { return false }
+        let auth = recipe.photonAuth.flatMap(PhotonAuth.Mode.init(rawValue:))
+        guard let written = try? MacBundlePatch.setEnabled(true, app: bundle, auth: auth),
+              !written.isEmpty else { return false }
         let names = written.map { URL(fileURLWithPath: $0).lastPathComponent }
         outcome.findings.removeAll { $0.code == "OF032" }
         outcome.notes.append("Put the Mac build's patch back in "
             + names.joined(separator: ", ") + " and signed it again.")
+        return true
     }
 
     // MARK: - Repair
@@ -480,15 +487,19 @@ enum FixService {
         let changed = FixPack.verify(in: folder)
         guard !changed.isEmpty else {
             // The patch a game takes in its own files is not one of the copied files,
-            // so it is checked and re-applied here; both calls are idempotent.
+            // so it is checked and re-applied here; every call is idempotent. A
+            // repair must not stop at "no copied file changed" when the game's own
+            // file lost its patch, which is exactly what a Steam verify leaves.
             ensureWine(recipe, appID: appID)
             prepareLaunchOverrides(recipe: recipe, folder: folder)
             clearLaunchWarning(recipe: &recipe, outcome: &outcome, folder: folder)
             auditRepair(&recipe, folder: folder, appID: appID, name: name, outcome: &outcome)
             recordPhotonPatch(&recipe, folder: folder)
-            repatchMacBuild(recipe, folder: folder, outcome: &outcome)
-            repatchPhotonAuth(recipe, folder: folder, outcome: &outcome)
-            outcome.notes.append("Every file the fix put in place is still there.")
+            let macPatched = repatchMacBuild(recipe, folder: folder, outcome: &outcome)
+            let authPatched = repatchPhotonAuth(recipe, folder: folder, outcome: &outcome)
+            if !macPatched, !authPatched {
+                outcome.notes.append("Every file the fix put in place is still there.")
+            }
             return outcome
         }
 
@@ -644,7 +655,7 @@ enum FixService {
                 continue
             }
             let carrying = report.targets.filter {
-                data.range(of: Data($0.utf8)) != nil
+                PhotonPatch.carries(data, id: $0)
             }
             if !carrying.isEmpty { fileIDs[relative] = carrying }
         }

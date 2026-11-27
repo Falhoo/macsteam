@@ -202,3 +202,62 @@ struct MacBundlePatchTests {
         #expect(MacBundlePatch.profile(for: app)?.name == "PICO PARK 2")
     }
 }
+
+/// The auth-type patch is part of the Mac fix for a game nobody owns: the bundle's
+/// Photon assembly is changed like the Windows one, and undone with the rest.
+@Suite
+struct MacBundleAuthPatchTests {
+
+    private func bundle() throws -> URL {
+        let fixture = try #require(Bundle.module.url(forResource: "PhotonRealtime",
+                                                    withExtension: "dll",
+                                                    subdirectory: "Fixtures"))
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macauth-\(UUID().uuidString)", isDirectory: true)
+        let app = root.appendingPathComponent("PhotonGame.app", isDirectory: true)
+        let managed = app.appendingPathComponent("Contents/Resources/Data/Managed",
+                                                isDirectory: true)
+        let assets = app.appendingPathComponent("Contents/Resources/Data", isDirectory: true)
+        try FileManager.default.createDirectory(at: managed, withIntermediateDirectories: true)
+        try Data(contentsOf: fixture).write(to: managed.appendingPathComponent("PhotonRealtime.dll"))
+        var blob = Data("PhotonServerSettings".utf8)
+        blob.append(contentsOf: [UInt8](repeating: 0, count: 8))
+        blob.append(contentsOf: [0x24, 0, 0, 0])
+        blob.append(Data("0f8c1e42-7d33-4b6a-9c21-5eb0a7f2d114".utf8))
+        try blob.write(to: assets.appendingPathComponent("resources.assets"))
+        return app
+    }
+
+    @Test
+    func theAuthTypeIsWrittenAndUndone() throws {
+        let app = try bundle()
+        defer { try? FileManager.default.removeItem(at: app.deletingLastPathComponent()) }
+        let assembly = app.appendingPathComponent(
+            "Contents/Resources/Data/Managed/PhotonRealtime.dll")
+
+        let written = try MacBundlePatch.setEnabled(true, app: app, auth: .custom, sign: { _ in })
+        #expect(written.contains { $0.hasSuffix("PhotonRealtime.dll") })
+        let info = try #require(PhotonAuth.inspect(file: assembly))
+        #expect(info.patched)
+
+        let undone = try MacBundlePatch.setEnabled(false, app: app, sign: { _ in })
+        #expect(undone.contains { $0.hasSuffix("PhotonRealtime.dll") })
+        let after = try #require(PhotonAuth.inspect(file: assembly))
+        #expect(!after.patched)
+        #expect(!FileManager.default.fileExists(
+            atPath: assembly.path + PhotonAuth.backupSuffix))
+    }
+
+    /// Without the mode nothing about auth is touched, which is what an owned game or
+    /// a non-Photon build needs.
+    @Test
+    func noModeLeavesTheAuthTypeAlone() throws {
+        let app = try bundle()
+        defer { try? FileManager.default.removeItem(at: app.deletingLastPathComponent()) }
+        let assembly = app.appendingPathComponent(
+            "Contents/Resources/Data/Managed/PhotonRealtime.dll")
+
+        _ = try MacBundlePatch.setEnabled(true, app: app, sign: { _ in })
+        #expect(!PhotonAuth.inspect(file: assembly)!.patched)
+    }
+}

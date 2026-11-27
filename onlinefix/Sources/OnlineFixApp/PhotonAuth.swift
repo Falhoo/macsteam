@@ -162,11 +162,18 @@ enum PhotonAuth {
             info.problem = "\(file.lastPathComponent): get_AuthType is not the shape this "
                 + "patch knows, so it was left alone."
         }
-        if info.custom != nil, let current = info.current {
-            info.patched = current == info.custom
-        } else if info.custom != nil {
-            info.patched = readsConstant(file: file, custom: info.custom!) 
-                || hasBackup(file)
+        // "Patched" is what the getter returns, not that a backup exists: a Steam
+        // verify puts the stock assembly back and leaves the backup behind, so a
+        // backup on its own said "already done" and the repair skipped it. The backup
+        // only decides when the getter cannot be read at all, and then only if the
+        // file actually differs from it.
+        if info.custom != nil {
+            if let current = info.current {
+                info.patched = current == info.custom
+            } else {
+                info.patched = readsConstant(file: file, custom: info.custom!)
+                    || differsFromBackup(file)
+            }
         }
         return info
     }
@@ -192,32 +199,41 @@ enum PhotonAuth {
                   }),
                   let body = assembly.ilBody(rva: getter.rva) else { continue }
             let wanted = mode.value
-            if mode == .custom, info.patched { continue }
-            if mode == .none, info.patched, info.nonePatched { continue }
+            // Already in the asked-for state: custom auth that is written and not
+            // stripped, or a strip that is done.
+            if mode == .custom, info.patched, !info.nonePatched { continue }
+            if mode == .none, info.nonePatched { continue }
 
             var data = assembly.data
-            let code = Array(data[body.code])
-            guard let constant = ldc(wanted, length: code.count - 1),
-                  code.count >= 2, code.last == 0x2A else { continue }
-            var patched = constant
-            patched.append(0x2A)
-            while patched.count < code.count { patched.append(0x00) } // nop
-            data.replaceSubrange(body.code, with: patched)
+            do {
+                let code = Array(data[body.code])
+                // The body is checked by its shape, not by its last byte: an already
+                // patched body ends in padding nops, so `ret` is not last there and a
+                // second pass (none after custom, or custom after a strip) would bail.
+                guard info.getterShape == .simple, code.count >= 2,
+                      let constant = ldc(wanted, length: code.count - 1) else { continue }
+                var patched = constant
+                patched.append(0x2A)
+                while patched.count < code.count { patched.append(0x00) } // nop
+                data.replaceSubrange(body.code, with: patched)
 
-            // The setter, when the constant fits the room the body already has: the
-            // argument load becomes the constant. The getter alone is enough for
-            // Photon's own read of `AuthType`, so a setter that does not fit is left
-            // alone rather than grown (growing moves every method after it).
-            if let setter = assembly.methods(of: type).first(where: { $0.name == "set_AuthType" }),
-               let setterBody = assembly.ilBody(rva: setter.rva) {
-                let setterCode = Array(data[setterBody.code])
-                if isSimpleSetter(setterCode),
-                   let one = ldc(wanted, length: setterCode.count - 7), one.count == 1 {
-                    var replacement: [UInt8] = [0x02]                  // ldarg.0
-                    replacement.append(contentsOf: one)                // the constant
-                    replacement.append(contentsOf: setterCode.suffix(from: 2)) // stfld, ret
-                    if replacement.count == setterCode.count {
-                        data.replaceSubrange(setterBody.code, with: replacement)
+                // The setter, when the constant fits the room the body already has: the
+                // argument load becomes the constant. The getter alone is enough for
+                // Photon's own read of `AuthType`, so a setter that does not fit is left
+                // alone rather than grown (growing moves every method after it).
+                if let setter = assembly.methods(of: type).first(where: {
+                    $0.name == "set_AuthType"
+                }),
+                   let setterBody = assembly.ilBody(rva: setter.rva) {
+                    let setterCode = Array(data[setterBody.code])
+                    if isSimpleSetter(setterCode),
+                       let one = ldc(wanted, length: setterCode.count - 7), one.count == 1 {
+                        var replacement: [UInt8] = [0x02]                  // ldarg.0
+                        replacement.append(contentsOf: one)                // the constant
+                        replacement.append(contentsOf: setterCode.suffix(from: 2)) // stfld, ret
+                        if replacement.count == setterCode.count {
+                            data.replaceSubrange(setterBody.code, with: replacement)
+                        }
                     }
                 }
             }
@@ -225,9 +241,13 @@ enum PhotonAuth {
             // No-auth mode: stop Photon reading the auth values, so nothing about
             // authentication reaches the server. An app with auth switched off
             // refuses every type it is sent, and accepts a client that sends none.
-            if mode == .none, !info.nonePatched, let site = authenticateSite(in: assembly) {
+            // The read it replaces is in the backup, so it can be put back.
+            if mode == .none, let site = authenticateSite(in: assembly) {
                 data.replaceSubrange(site.offset..<(site.offset + 6),
                                      with: [0x14, 0, 0, 0, 0, 0])
+            } else if mode == .custom, info.nonePatched, let site = authenticateSite(in: assembly),
+                      let read = stockRead(file: info.file, at: site.offset) {
+                data.replaceSubrange(site.offset..<(site.offset + 6), with: read)
             }
 
             let backup = URL(fileURLWithPath: info.file.path + backupSuffix)
@@ -324,6 +344,19 @@ enum PhotonAuth {
         return bytes.count <= length ? bytes : nil
     }
 
+    /// The six bytes of the read that `authenticateSite` replaces, taken from the
+    /// untouched copy at the same place. Nil when the copy is gone or has moved.
+    private static func stockRead(file: URL, at offset: Int) -> [UInt8]? {
+        let backup = URL(fileURLWithPath: file.path + backupSuffix)
+        guard Paths.fm.fileExists(atPath: backup.path),
+              let data = try? Data(contentsOf: backup, options: [.mappedIfSafe]),
+              offset >= 0, offset + 6 <= data.count else { return nil }
+        let bytes = Array(data[offset..<(offset + 6)])
+        // `ldarg.0; ldfld <token>`: the shape the site was found by.
+        guard bytes[0] == 0x02, bytes[1] == 0x7B else { return nil }
+        return bytes
+    }
+
     // MARK: - Stopping the read
 
     /// The place in `CallAuthenticate` that decides whether to authenticate at all:
@@ -397,6 +430,17 @@ enum PhotonAuth {
 
     private static func hasBackup(_ file: URL) -> Bool {
         Paths.fm.fileExists(atPath: file.path + backupSuffix)
+    }
+
+    /// True when the assembly no longer matches its untouched copy, which is the
+    /// question a backup is really being asked.
+    private static func differsFromBackup(_ file: URL) -> Bool {
+        let backup = URL(fileURLWithPath: file.path + backupSuffix)
+        guard let current = try? Data(contentsOf: file, options: [.mappedIfSafe]),
+              let original = try? Data(contentsOf: backup, options: [.mappedIfSafe]) else {
+            return false
+        }
+        return current != original
     }
 
     // MARK: - Cache

@@ -80,6 +80,15 @@ struct FixPlan: Sendable {
         // and, for a game whose Photon app id can be read, the patch in its own files.
         if let bundle = scan.macBundle {
             plan.keepRealAppID = true
+            // An unowned Photon game reaches Photon with a ticket Steam cannot sign,
+            // exactly as on a Windows build. The bundle's Photon assembly takes the
+            // same auth patch, so it is decided here with the id swap.
+            if PhotonLog.ownsApp(appID: appID, folder: scan.folder, prefix: scan.prefix) == false,
+               PhotonAuth.inspect(gameFolder: bundle).contains(where: { $0.canPatch }) {
+                plan.photonAuth = .custom
+                plan.notes.append("Steam has no licence for this game, so its Photon assembly "
+                    + "is changed to send custom auth instead of a Steam ticket.")
+            }
             if MacBundlePatch.profile(appID: appID, bundle: bundle) != nil
                 || MacBundlePatch.canPatch(bundle) {
                 plan.picoPark2 = true

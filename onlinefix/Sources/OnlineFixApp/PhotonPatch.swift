@@ -35,6 +35,10 @@ enum PhotonPatch {
         /// fields. That is the strong evidence: the class name and the values sit in
         /// one object, while a plain GUID in a large file can be anything.
         var settings: Bool = false
+        /// The field the value was written under, lowercased (`appidrealtime`,
+        /// `appidvoice`), when the asset is text and names it. A field name says which
+        /// id is which, so a pair stored in two files can still be told apart.
+        var field: String? = nil
         /// True when this is the app OnlineFix's own patch points the game at, so there
         /// is nothing left to replace.
         var isOnlineFixShared: Bool {
@@ -48,6 +52,7 @@ enum PhotonPatch {
         let id: String
         let kind: Kind
         let offset: Int
+        var field: String? = nil
     }
 
     static let backupSuffix = ".onlinefix-photon-backup"
@@ -93,6 +98,11 @@ enum PhotonPatch {
     /// only by a settings field's name; a 64-character base64 run is specific enough
     /// that the library's name is evidence enough.
     static let fieldMarkers = ["appid", "applicationid", "appsettings"]
+
+    /// The same, for a text asset where the field name is written out in full:
+    /// `AppIdRealtime: …`, `AppIdVoice: …`, `AppIdChat: …`.
+    static let appIDFieldMarkers = ["appidrealtime", "appidvoice", "appidchat",
+                                    "appidpuns", "fixedregion"]
     static let libraryMarkers = ["photon", "quantum"]
 
     /// Files a fix itself installs. They carry Photon's names too, and patching them
@@ -110,9 +120,14 @@ enum PhotonPatch {
     /// size (a 166 MB `resources.resource` is typical) and hold texture and audio
     /// blobs, never settings. Reading them cost 10–15 seconds a scan and found nothing.
     static let readExtensions: Set<String> = [
-        "assets", "dat", "dll", "dylib", "exe", "json", "txt", "ini", "xml", "cfg",
-        "settings", "unity3d",
+        "assets", "asset", "dat", "dll", "dylib", "exe", "json", "txt", "ini", "xml",
+        "cfg", "settings", "unity3d", "yaml", "yml", "bin", "bytes", "plist",
     ]
+
+    /// Extensions whose files are bigger than a settings file and hold bulk data.
+    /// `resources.assets` can be hundreds of megabytes, so a `.bin` or `.dat` blob is
+    /// only read when it is small enough to be a settings island.
+    static let bulkExtensions: Set<String> = ["bin", "bytes", "dat"]
 
     /// True for a file that can carry an id. `globalgamemanagers` has no extension,
     /// and only `global-metadata.dat` is a metadata file, so a game's other `.dat`
@@ -122,9 +137,23 @@ enum PhotonPatch {
         if name == "globalgamemanagers" || name == "global-metadata.dat" { return true }
         let ext = url.pathExtension.lowercased()
         guard readExtensions.contains(ext) else { return false }
+        // `.dat` is used for both: only the metadata file is settings, the rest are
+        // the audio and cache blobs a game writes at run time.
         if ext == "dat" { return name == "global-metadata.dat" }
         return true
     }
+
+    /// True when a file is worth reading at this size. A metadata file is read whole
+    /// whatever it weighs; a bulk blob only while it is small enough to be settings.
+    static func sizeAllows(_ url: URL, size: Int) -> Bool {
+        let name = url.lastPathComponent.lowercased()
+        if name == "globalgamemanagers" || name == "global-metadata.dat" { return true }
+        if bulkExtensions.contains(url.pathExtension.lowercased()) { return size <= smallFile } 
+        return true
+    }
+
+    /// The size under which a bulk file is read as settings rather than data.
+    static let smallFile = 8 * 1024 * 1024
 
     private static let guidLength = 36
     private static let quantumLength = 64
@@ -165,6 +194,7 @@ enum PhotonPatch {
             guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
                   values.isRegularFile == true,
                   let size = values.fileSize, size > 0, size <= maxFileSize,
+                  sizeAllows(url, size: size),
                   let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else { continue }
             var items = ids(in: data)
             // An IL2CPP build packs its string literals end to end, so an id with a
@@ -185,7 +215,10 @@ enum PhotonPatch {
             // strings with no field name beside them. The class name is the evidence,
             // and each value is kept with its offset so a realtime/voice pair that
             // holds the same value twice is patched field by field.
-            let fromSettings = assetIDs(in: data)
+            // A text-serialized asset writes the same fields as YAML, with the field
+            // name beside each value. The name is what tells a realtime id from a
+            // voice one, so those are read first and kept whatever else the file holds.
+            let fromSettings = assetIDs(in: data) + textSettings(in: data)
             let settingsOffsets = Set(fromSettings.map(\.offset))
             // The general GUID pass sees the same bytes in the same asset; drop those
             // copies so one field is not offered twice.
@@ -194,11 +227,25 @@ enum PhotonPatch {
             // counts by the file carrying Photon's name somewhere, which every Photon
             // build does and a build of something else does not.
             let photonNamed = !literalIDs.isEmpty && namesPhoton(data)
+            // Settings values are already anchored to the class name, so they are taken
+            // even when no other marker is near, and they get their own budget: a long
+            // assets file can hold a dozen unrelated GUIDs ahead of them, and running
+            // out of room before the settings would lose the only real id in the file.
+            var settingsCount = 0
+            for item in fromSettings {
+                let key = "\(url.path)|\(item.id)|\(item.offset)"
+                guard seen.insert(key).inserted else { continue }
+                found.append(Candidate(file: url, id: item.id, kind: item.kind,
+                                       offset: item.offset, settings: true,
+                                       field: item.field))
+                settingsCount += 1
+                if settingsCount >= maxCandidatesPerFile { break }
+            }
             var perFile = 0
             for item in items {
                 // Only the ids sitting next to something Photon names are the app id.
                 let markers = item.kind == .guid
-                    ? fieldMarkers
+                    ? fieldMarkers + appIDFieldMarkers
                     : fieldMarkers + libraryMarkers
                 guard isKnown(item.id) || isKnownStock(item.id)
                         || hasMarker(data, at: item.offset, markers: markers)
@@ -208,16 +255,6 @@ enum PhotonPatch {
                 guard seen.insert(key).inserted else { continue }
                 found.append(Candidate(file: url, id: item.id, kind: item.kind,
                                        offset: item.offset))
-                perFile += 1
-                if perFile >= maxCandidatesPerFile { break }
-            }
-            // Settings values are already anchored to the class name, so they are taken
-            // even when no other marker is near.
-            for item in fromSettings {
-                let key = "\(url.path)|\(item.id)|\(item.offset)"
-                guard seen.insert(key).inserted else { continue }
-                found.append(Candidate(file: url, id: item.id, kind: item.kind,
-                                       offset: item.offset, settings: true))
                 perFile += 1
                 if perFile >= maxCandidatesPerFile { break }
             }
@@ -376,6 +413,82 @@ enum PhotonPatch {
             search = range.upperBound
         }
         return found.sorted { $0.offset < $1.offset }
+    }
+
+    /// The app ids of a Unity asset saved as text, which Unity does under `Force Text`
+    /// serialization and which is how `PhotonServerSettings.asset` looks in many
+    /// projects: the field name, a colon, then the value.
+    ///
+    /// This is the only shape where the field name is part of the file, so it is also
+    /// the only shape that says which id is the realtime one and which the voice one
+    /// when a game keeps them apart.
+    static func textSettings(in data: Data) -> [Found] {
+        // Settings text is small and ASCII; a compressed or huge asset would be
+        // binary and nothing here would match.
+        guard data.count < 2 * 1024 * 1024,
+              let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16),
+              text.localizedCaseInsensitiveContains("appid") else { return [] }
+        var found: [Found] = []
+        let bytes = [UInt8](data)
+        // Walk the UTF-8 bytes rather than String offsets: the value's position in the
+        // file is what the patch writes at.
+        var index = 0
+        func matches(_ needle: String, at position: Int) -> Bool {
+            let target = Array(needle.utf8)
+            guard position + target.count <= bytes.count else { return false }
+            for offset in 0..<target.count {
+                guard lowercased(bytes[position + offset]) == target[offset] else { return false }
+            }
+            return true
+        }
+        while index < bytes.count {
+            guard lowercased(bytes[index]) == UInt8(ascii: "a") else {
+                index += 1
+                continue
+            }
+            for field in appIDFieldMarkers {
+                guard matches(field, at: index) else { continue }
+                // The name has to start the line: `AppIdRealtime:`, not `MyAppIdThing`.
+                let lineStart = bytes[..<index].lastIndex(where: { $0 == 0x0A })
+                    .map { $0 + 1 } ?? 0
+                let lead = bytes[lineStart..<index]
+                guard lead.allSatisfy({ $0 == 0x20 || $0 == 0x09 || $0 == 0x2D }) else { break }
+                var cursor = index + field.utf8.count
+                while cursor < bytes.count, bytes[cursor] == 0x20 || bytes[cursor] == 0x09 {
+                    cursor += 1
+                }
+                guard cursor < bytes.count,
+                      bytes[cursor] == UInt8(ascii: ":") || bytes[cursor] == UInt8(ascii: "=")
+                else { break }
+                cursor += 1
+                // Skip a space, then any opening quote.
+                while cursor < bytes.count,
+                      bytes[cursor] == 0x20 || bytes[cursor] == 0x09 || bytes[cursor] == 0x22 {
+                    cursor += 1
+                }
+                let start = cursor
+                while cursor < bytes.count, isBase64(bytes[cursor]) || bytes[cursor] == dashByte {
+                    cursor += 1
+                }
+                guard cursor > start,
+                      let id = String(data: data.subdata(in: start..<cursor), encoding: .utf8),
+                      let kind = kind(of: id) else { break }
+                found.append(Found(id: id, kind: kind, offset: start, field: field))
+                break
+            }
+            index += 1
+        }
+        return found
+    }
+
+    /// True when these bytes carry the id, in either encoding an id is stored in: a
+    /// Mono assembly keeps its strings as UTF-16, an assets file keeps bytes as they
+    /// are. A comparison that only tried ASCII found nothing in the assembly and
+    /// reported a correctly patched file as a lost one.
+    static func carries(_ data: Data, id: String) -> Bool {
+        if data.range(of: Data(id.utf8)) != nil { return true }
+        let wide = Data(id.utf16.flatMap { [UInt8($0 & 0xFF), UInt8($0 >> 8)] })
+        return data.range(of: wide) != nil
     }
 
     /// True when one of these names sits anywhere in the data, whatever capitals it is
@@ -612,11 +725,20 @@ enum PhotonPatch {
                 + "Nothing was changed."
             return plan
         }
-        if settings.count == 2, settings[0].file.path != settings[1].file.path {
-            // Field order only means realtime-then-voice within one asset. Two files
-            // give no order, and swapping them would break the game's own connection.
-            plan.skipped = "This game keeps its Photon app ids in two different files, so "
-                + "which is the realtime id and which the voice id is unclear. Nothing was changed."
+        // A text asset names each field, so a pair is ordered by its names whatever
+        // file each one is in. Without names, field order only means
+        // realtime-then-voice inside one asset: two files give no order, and swapping
+        // them would break the game's own connection.
+        var pair = settings
+        if settings.count == 2,
+           let realtime = settings.first(where: { $0.field?.lowercased() == "appidrealtime" }),
+           let voice = settings.first(where: { $0.field?.lowercased() == "appidvoice" }),
+           realtime.offset != voice.offset {
+            pair = [realtime, voice]
+        } else if settings.count == 2, settings[0].file.path != settings[1].file.path {
+            plan.skipped = "This game keeps its Photon app ids in two different files and does "
+                + "not name which field each one is, so which is the realtime id and which the "
+                + "voice id is unclear. Nothing was changed."
             return plan
         }
 
@@ -625,8 +747,8 @@ enum PhotonPatch {
         // says there is nothing to replace once the target is already there.
         let live = candidates
         guard let fallback = live.first else { return plan }
-        let realtimeField = settings.count == 2 ? settings[0] : (settings.first ?? fallback)
-        let voiceField = settings.count == 2 ? settings[1] : nil
+        let realtimeField = pair.count == 2 ? pair[0] : (pair.first ?? fallback)
+        let voiceField = pair.count == 2 ? pair[1] : nil
         let oldRealtime = realtimeField.id
         let oldVoice = voiceField?.id
         // An id that is neither the realtime nor the voice value says this game uses

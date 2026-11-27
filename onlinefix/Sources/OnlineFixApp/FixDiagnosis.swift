@@ -222,9 +222,12 @@ struct FixDiagnosis: Sendable {
             // valid for the game's own Photon app. What is left is OnlineFix's shared
             // app and the auth type its Photon assembly sends, both of which the
             // install writes.
-            if unlicensed,
-               let auth = PhotonAuth.inspect(gameFolder: scan.folder).first,
-               auth.canPatch {
+            // Any assembly that carries the patchable property, not the first one:
+            // the folder can hold several Photon-named assemblies and only one of
+            // them be the client the patch knows.
+            if unlicensed, PhotonAuth.inspect(gameFolder: scan.folder).contains(where: {
+                $0.canPatch
+            }) {
                 diagnosis.add(FixFinding(
                     code: "OF071", level: .notice,
                     title: "Steam has no licence for this game",
@@ -596,10 +599,26 @@ struct FixDiagnosis: Sendable {
                 vendorLoader: PhotonChain.hasVendorLoader(in: scan.folder, exe: scan.exe),
                 candidates: candidates,
                 usesSteamNetworking: scan.usesSteamNetworking,
+                // Ownership outranks everything else in the decision: it was read
+                // above for OF071 and must reach the rule, or the route says
+                // "OnlineFix shared app" for a game no ticket can be signed for.
+                ownsApp: PhotonLog.ownsApp(appID: scan.appID, folder: scan.folder,
+                                           prefix: scan.prefix),
                 log: log)
             let gameDoorway = PhotonChain.doorway(in: scan.folder, exe: scan.exe)
             let bundled = gameDoorway.map { bundleHas($0) } ?? false
-            if route.isSteamAuth {
+            if route.kind == .customUnlicensed {
+                // This route asks Photon nothing about Steam, so OnlineFix's chain is
+                // not what carries it: the game's own assembly is changed instead.
+                diagnosis.add(FixFinding(
+                    code: "OF021", level: .notice,
+                    title: "Photon game; the auth type is written into its assembly",
+                    detail: "The account does not own the game, so the fix does not rely on "
+                        + "OnlineFix's Custom.dll chain. It rewrites the auth type the game's "
+                        + "Photon assembly sends, and the app id it connects to.",
+                    remedy: "Install the fix: both writes are backed up and put back on "
+                        + "removal, and the loader's chain is left out."))
+            } else if route.isSteamAuth {
                 diagnosis.add(FixFinding(
                     code: "OF021", level: .notice,
                     title: "Steam-auth Photon game",

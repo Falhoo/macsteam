@@ -213,13 +213,16 @@ enum MacBundlePatch {
     ///
     /// `sign` is the re-signing step, so a test can run the file work without a real
     /// Mach-O bundle.
+    /// `auth` writes the auth type as well, for a game whose own Steam ticket cannot
+    /// be accepted. It is part of the same patch, so it is undone with it.
     @discardableResult
-    static func setEnabled(_ on: Bool, app: URL,
+    static func setEnabled(_ on: Bool, app: URL, auth: PhotonAuth.Mode? = nil,
                            sign: (URL) throws -> Void = PhotonPatch.resign) throws -> [String] {
-        on ? try applyAll(on: app, sign: sign) : try restoreAll(app: app, sign: sign)
+        on ? try applyAll(on: app, auth: auth, sign: sign)
+           : try restoreAll(app: app, sign: sign)
     }
 
-    private static func applyAll(on app: URL,
+    private static func applyAll(on app: URL, auth: PhotonAuth.Mode?,
                                  sign: (URL) throws -> Void) throws -> [String] {
         let profile = profile(for: app)
         let carried = carriedIDs(in: app)
@@ -251,12 +254,36 @@ enum MacBundlePatch {
         if let profile, !profile.codePatches.isEmpty {
             written += try applyCode(profile, in: app, sign: sign)
         }
+        // An unowned game must not ask Photon for a ticket: no ticket Steam can sign
+        // for its own app exists. The assembly is patched in place like anything else
+        // in the bundle, and `applyCode` has already signed the binaries it wrote, so
+        // the bundle is signed once more at the end.
+        // Always tried, not only when this pass wrote something: the ids can already
+        // be the target ones from an earlier install that had no auth to add.
+        if let auth {
+            let patched = try PhotonAuth.setEnabled(true, in: app, mode: auth)
+            if !patched.isEmpty {
+                for path in patched {
+                    try sign(URL(fileURLWithPath: path))
+                }
+                written += patched
+            }
+        }
         invalidate(app)
         return Array(Set(written)).sorted()
     }
 
     private static func restoreAll(app: URL, sign: (URL) throws -> Void) throws -> [String] {
         var written = try PhotonPatch.restore(in: app, sign: sign)
+        // The auth patch keeps its own copies in the same bundle; both suffixes are
+        // restored here, so an undo leaves the bundle as Steam shipped it.
+        do {
+            let restored = try PhotonAuth.setEnabled(false, in: app)
+            for path in restored { try sign(URL(fileURLWithPath: path)) }
+            written += restored
+        } catch {
+            // A bundle with no auth patch of its own still undoes its ids above.
+        }
         if let profile = profile(for: app) {
             for patch in profile.codePatches {
                 if let restored = try? restoreCode(patch, profile: profile, in: app, sign: sign) {
@@ -341,11 +368,13 @@ enum MacBundlePatch {
             }
             let name = url.lastPathComponent.lowercased()
             if name.hasSuffix(PhotonPatch.backupSuffix)
-                || name.hasSuffix(PicoPark2Patch.backupSuffix) { continue }
+                || name.hasSuffix(PicoPark2Patch.backupSuffix)
+                || name.hasSuffix(PhotonAuth.backupSuffix) { continue }
             guard PhotonPatch.isReadable(url) else { continue }
             guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
                   values.isRegularFile == true,
-                  let size = values.fileSize, size > 0, size <= PhotonPatch.maxFileSize
+                  let size = values.fileSize, size > 0, size <= PhotonPatch.maxFileSize,
+                  PhotonPatch.sizeAllows(url, size: size)
             else { continue }
             out.append(url)
         }
