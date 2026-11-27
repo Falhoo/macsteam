@@ -3,14 +3,14 @@
 // An OnlineFix is Windows PE DLLs a game's own process loads in place of its
 // Steam API: `steam_api64.dll`, `OnlineFix64.dll`, `winmm.dll`. A native Mac game
 // is a Mach-O process, its Steam API is `libsteam_api.dylib`, and macOS will not
-// load a PE file into it. So no OnlineFix package can be installed into a Mac
-// build, and the app says so instead of copying files that can never run.
+// load a PE file into it, so no OnlineFix file is copied into a Mac build.
 //
-// What does work, and is the whole fix for such a game, is the identity. macSteam
-// hooks the Steam client and starts the game's Steam pipe as Spacewar (480),
-// which is what an OnlineFix would otherwise have done from inside the game.
-// A Mac build Steam sells needs nothing else: it is not a Windows PE file for a
-// fix to patch.
+// What a Mac build can take is the fix's *content*: `MacBundlePatch` writes the
+// Photon app id (and any code change a profile names) into the bundle's own files,
+// and `MacBundlePatch.canPatch` says whether a build has any such place. A build
+// with none has only the identity left, which is what this file describes: macSteam
+// starts the game's Steam pipe as Spacewar (480), as an OnlineFix would from inside
+// the game. That is the whole fix for a Mac build with nothing to write into.
 import Foundation
 
 enum MacAppFix {
@@ -22,23 +22,23 @@ enum MacAppFix {
         /// client and the routing applies to it.
         let hasSteamAPI: Bool
 
-        /// One line for the patch sheet: no fix files, routing only.
+        /// One line for the patch sheet, for a build with nothing to write into.
         var summary: String {
             hasSteamAPI
-                ? "This is the Mac build: OnlineFix's Windows files cannot load here, so there "
-                    + "is nothing to install. Routing through 480 is the whole fix for it."
+                ? "This Mac build has no Photon app id or named code change for the fix to "
+                    + "write into, so the routing is its fix: it starts as Spacewar (480)."
                 : "This is the Mac build, and it does not use Steam's API, so neither a fix "
                     + "nor routing applies to it."
         }
 
-        /// What this Mac build can be given instead of a fix.
+        /// What this Mac build can be given when there is nowhere to write a patch.
         var message: String {
-            "This is the Mac build of the game. OnlineFix's Windows DLLs cannot load "
-                + "into a Mac process, so nothing from online-fix.me can be installed here. "
+            "This is the Mac build of the game and its own files have nothing the fix can "
+                + "change. "
                 + (hasSteamAPI
-                    ? "macSteam can still start it as Spacewar (480), which is what an "
-                        + "OnlineFix does for a Windows build: turn off Keep real AppID for "
-                        + "this game and it is routed like a fixed one."
+                    ? "macSteam starts it as Spacewar (480) instead, which is what an "
+                        + "OnlineFix does from inside a Windows build: turn off Keep real "
+                        + "AppID for this game and it is routed like a fixed one."
                     : "The game does not use Steam's API, so there is nothing to route either.")
         }
     }

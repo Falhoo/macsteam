@@ -898,18 +898,22 @@
                 const note = document.createElement('div');
                 note.style.cssText = 'font-size:12px;color:#acb2b8;margin-top:8px;'
                     + 'max-width:560px;line-height:1.45';
-                note.textContent = onlineRouteInstalled
-                    ? 'Installed. This is the Mac build, so the fix is only the AppID 480 '
-                      + '(Spacewar) routing: the game starts the way a fixed game does and '
-                      + 'no game files were changed. Uninstall the fix to go back to normal.'
-                    : 'This is the Mac build, so OnlineFix\'s Windows files cannot load here. '
-                      + 'Install sets up the AppID 480 (Spacewar) routing instead, which is '
-                      + 'the whole fix for a Mac build, and changes no game files. Uninstall '
-                      + 'the fix to go back to normal.';
+                // The Mac build's own files are where this fix goes now, for a game whose
+                // bundle carries the Photon app id or a code patch. Only a build with
+                // nothing to write into is left with the identity alone.
+                note.textContent = result.macPatchable
+                    ? 'This is the Mac build. Install writes the fix into the game\'s own '
+                      + 'files: its Photon app id is swapped for OnlineFix\'s, so no '
+                      + 'Windows file is needed.'
+                    : onlineRouteInstalled
+                        ? 'Installed. This Mac build has nothing for the fix to write into, '
+                          + 'so it starts with the AppID 480 (Spacewar) routing.'
+                        : 'This Mac build has nothing for the fix to write into, so Install '
+                          + 'sets up the AppID 480 (Spacewar) routing.';
                 onlineRoot.appendChild(note);
-                // The routing is the Mac path; the Windows build is the other one, and it
-                // is what lets the real fix files install and work.
-                if (!onlineRouteInstalled) {
+                // A Mac build with a patchable bundle is fixed where it stands; only one
+                // without it is better off as the Windows build.
+                if (!onlineRouteInstalled && !result.macPatchable) {
                     const windows = actionButton('Get the Windows version',
                         () => { void switchToWindowsBuild(); });
                     windows.style.marginLeft = '0';

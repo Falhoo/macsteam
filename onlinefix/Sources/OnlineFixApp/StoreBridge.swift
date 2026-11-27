@@ -19,9 +19,14 @@ public struct OnlineFixStoreStatus: Codable, Sendable {
     /// behind a "show me anyway" tick.
     public let gdkRestricted: Bool
     /// Steam installed the native macOS build, which runs as a Mach-O process with
-    /// `libsteam_api.dylib`: OnlineFix's Windows files cannot load there, so the card
-    /// offers Steam-side routing instead of an install.
+    /// `libsteam_api.dylib`. No OnlineFix file can load into it, so the fix has to be
+    /// written into the bundle's own files or into the identity Steam starts it with.
     public let nativeMacBuild: Bool
+    /// The Mac build carries something the fix can write into it (a Photon app id it
+    /// connects to, or a code change a profile names), so installing is more than the
+    /// AppID routing. A Windows build beside it means Steam launches the `.exe`, so
+    /// this is false there.
+    public let macPatchable: Bool
     /// The NotProton compatibility tool Steam has installed, which the card hands to
     /// `SteamClient.Apps.SpecifyCompatTool` for a native build.
     public let compatTool: String?

@@ -243,7 +243,10 @@ final class AppModel: ObservableObject {
            let issue = FixInstaller.gdkIssue(for: fix) {
             return issue
         }
-        if fixes.contains(where: { $0.id == appID }), let mac = macAppStatus(appID) {
+        // A Mac build the patch can reach is fixed where it stands, so the Windows
+        // files the fix left behind are not a problem there.
+        if fixes.contains(where: { $0.id == appID }), let mac = macAppStatus(appID),
+           macBuildPatch(appID: appID) == nil {
             return mac.message
         }
         if let photon = photonStatus(appID).message { return photon }
@@ -917,6 +920,9 @@ final class AppModel: ObservableObject {
         let name = games.first { $0.id == appID }?.name ?? ""
         let folder = Store.gameFolder(for: appID, name: name)
         let nativeMac = folder.map { FixInstaller.nativeMacBundle(in: $0) != nil } ?? false
+        let macPatchable = folder.flatMap { FixInstaller.nativeMacBundle(in: $0) }
+            .map { MacBundlePatch.canPatch($0) } ?? false
+        let windowsBuild = folder.map { FixInstaller.hasWindowsBuild(in: $0) } ?? false
         let installed = fixIsInstalled(appID)
         return OnlineFixStoreStatus(
             inList: alreadyAdded(appID),
@@ -927,8 +933,9 @@ final class AppModel: ObservableObject {
             photonIssue: fixIssue(appID),
             gdkRestricted: FixCompatibility.isGDK(folder: folder),
             nativeMacBuild: nativeMac,
+            macPatchable: macPatchable && !windowsBuild,
             compatTool: Steam.notProtonTool(),
-            windowsBuildInstalled: folder.map { FixInstaller.hasWindowsBuild(in: $0) } ?? false,
+            windowsBuildInstalled: windowsBuild,
             overlayStub: fixes.first { $0.id == appID }?.files.contains {
                 ($0 as NSString).lastPathComponent == "SteamOverlay64.dll"
             } ?? false,

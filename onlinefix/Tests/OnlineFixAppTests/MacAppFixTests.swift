@@ -51,7 +51,10 @@ struct MacAppFixTests {
 
         #expect(status?.hasSteamAPI == true)
         #expect(status?.message.contains("Spacewar (480)") == true)
-        #expect(status?.summary.contains("nothing to install") == true)
+        // The story is now about where the fix goes, not about there being nothing
+        // to install: a Mac build is patched in its own files when it has a place.
+        #expect(status?.summary.contains("routing is its fix") == true)
+        #expect(status?.summary.contains("nothing to install") == false)
     }
 
     @Test
