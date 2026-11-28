@@ -64,6 +64,10 @@ enum LaunchTest {
         var matchmaking = false
         var photonFailure: String?
         var line: String?
+        /// What the game's own Photon client answered when the autopilot made it try.
+        var autopilot: String?
+        /// The same answer in Photon's own words, for classifying it.
+        var autopilotCause: String?
 
         /// The launch line carries keep-id=1 when the game intentionally starts as
         /// itself (for Steam's relay), so "OnlineFix launched" is not the same as
@@ -75,10 +79,16 @@ enum LaunchTest {
         }
 
         var note: String {
+            if let autopilot {
+                return autopilot
+                    + (startsAsSpacewar ? " The game ran as Spacewar (480)." : "")
+            }
             if startsAsSpacewar && matchmaking {
                 return "Spacewar (480) confirmed: Steam started the game as AppID 480 and "
                     + "OnlineFix's networking loaded. Live online play is not confirmed by "
-                    + "this test — enter an online lobby to check another player can join."
+                    + "this test. The game's own Photon client was asked, so the auth it "
+                    + "wrote is the one this game's app takes — but a lobby join is not "
+                    + "the same thing as authenticating, so check one before inviting a friend."
             }
             if let photonFailure { return "Photon reported: \(photonFailure)." }
             if matchmaking {
@@ -201,6 +211,24 @@ enum LaunchTest {
         if let marker, !markerExisted { try? Data().write(to: marker) }
         defer {
             if let marker, !markerExisted { try? Paths.fm.removeItem(at: marker) }
+            if let folder = Store.gameFolder(for: appID, name: name) {
+                Autopilot.finish(in: folder)
+            }
+        }
+
+        // A Monogame that speaks Photon can be asked to connect for us, which beats
+        // walking menus nobody can see.
+        let folder = Store.gameFolder(for: appID, name: name)
+        var drove = false
+        if let folder, Autopilot.canDrive(photonGame: PhotonFix.isPhotonGame(in: folder),
+                              managed: !PhotonFix.managedFolders(in: folder).isEmpty,
+                              nativeMacBuild: GameBuildInUse.resolve(appID: appID, folder: folder)
+                                == .mac) {
+            let launch = (FixInstaller.launchFolder(in: folder) ?? folder)
+            if Autopilot.ready(in: folder, launchFolder: launch) {
+                Autopilot.start(in: folder)
+                drove = true
+            }
         }
 
         progress("Starting Steam…")
@@ -211,6 +239,8 @@ enum LaunchTest {
         let launched = SteamLaunch.run(appID: appID)
 
         var gamePIDs: Set<Int32> = []
+        // What the game's own Photon client answered, if the autopilot is driving it.
+        var answer: Autopilot.Outcome?
         var found: Window?
         var foundAt: Double?
         while Date().timeIntervalSince(start) < timeout {
@@ -226,29 +256,46 @@ enum LaunchTest {
                 gamePIDs.insert(fresh.pid)
                 break
             }
+            // The autopilot answers whether or not the window was found: the game's own
+            // client talks before its window is always on screen, and that answer is
+            // the thing this run exists for.
+            if let folder, drove, let said = Autopilot.outcome(in: folder), said.isAnswer {
+                answer = said
+                progress(said.summary)
+                break
+            }
             if !launched && Date().timeIntervalSince(start) > 3 { break }
             try? await Task.sleep(for: .milliseconds(500))
         }
 
-        guard let window = found else {
+        // An answer without a window still counts: Photon was asked and it replied, so
+        // the test has done its job even if the window was never matched.
+        guard let window = found ?? (answer?.isAnswer == true ? Window(number: 0, pid: 0,
+                                                                     owner: "", name: "",
+                                                                     width: 0, height: 0) : nil)
+        else {
             let alive = gamePIDs.contains { processAlive($0) }
             let outcome: Outcome = cancel() ? .cancelled : (!launched ? .launchRefused
                 : (alive ? .timedOut : .failed))
             return finish(appID: appID, name: name, start: start, exe: exe,
                           outcome: outcome, window: nil, windowAt: nil,
-                          pids: gamePIDs, offsets: offsets, repairs: [])
+                          pids: gamePIDs, offsets: offsets, repairs: [], answer: answer)
         }
 
-        progress("Window appeared, checking stability…")
+        if window.number != 0 { progress("Window appeared, checking stability…") }
         let stableUntil = Date().addingTimeInterval(8)
         while Date() < stableUntil {
             if cancel() { return finish(appID: appID, name: name, start: start, exe: exe,
                                         outcome: .cancelled, window: window, windowAt: foundAt,
-                                        pids: gamePIDs, offsets: offsets, repairs: []) }
-            if !processAlive(window.pid) && !gamePIDs.contains(where: { processAlive($0) }) {
+                                        pids: gamePIDs, offsets: offsets, repairs: [],
+                                        answer: answer) }
+            // Liveness is asked of the game's own processes, not of one window's pid:
+            // Unity loads its crash reporter, which opens a window of its own and can
+            // come and go, while the game behind it keeps running.
+            if gameProcesses(exe: exe, stem: stem, in: processes()) == nil {
                 return finish(appID: appID, name: name, start: start, exe: exe,
                               outcome: .stoppedByUser, window: window, windowAt: foundAt,
-                              pids: gamePIDs, offsets: offsets, repairs: [])
+                              pids: gamePIDs, offsets: offsets, repairs: [], answer: answer)
             }
             try? await Task.sleep(for: .milliseconds(500))
         }
@@ -256,13 +303,29 @@ enum LaunchTest {
         // The log only says what Photon thinks once the game has asked it something,
         // so the menu is walked for the player before the log is read. A game that
         // needs no help is left alone: the loop stops the moment an attempt appears.
-        let folder = Store.gameFolder(for: appID, name: name)
         func attemptSeen() -> Bool {
             guard let folder, let evidence = PhotonLog.read(gameFolder: folder, prefix: nil)
             else { return false }
             return evidence.isFailure || evidence.returnCode != nil
         }
-        if !attemptSeen() {
+        // The autopilot's answer is the game's own client talking, so it is waited for
+        // first and the menus are only walked when it says nothing: a menu walk is a
+        // guess at where a button is, and this is not.
+        if answer == nil, drove, let folder {
+            let deadline = Date().addingTimeInterval(75)
+            progress("Trying the game's online connection for you…")
+            while Date() < deadline, !cancel() {
+                if let said = Autopilot.outcome(in: folder), said.isAnswer {
+                    answer = said
+                    progress(said.summary)
+                    break
+                }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+        // Nothing from the autopilot: fall back to pressing the game's menus, which is
+        // a guess at where the button is but still better than silence.
+        if answer == nil, !attemptSeen() {
             _ = await MenuDriver.attemptOnline(appID: appID, window: window,
                                                cancel: cancel, progress: progress,
                                                attemptSeen: attemptSeen)
@@ -271,22 +334,25 @@ enum LaunchTest {
         // A game that opened but never said anything to Photon leaves one question:
         // can this Mac reach Photon at all? Answering it here saves the player from
         // being told to "check the auth type" when the machine is offline.
-        if !attemptSeen() {
+        if answer == nil, !attemptSeen() {
             let pings = PhotonProbe.ping()
             progress(PhotonProbe.summary(pings))
         }
-
         progress("Reading the game's logs…")
         if settle > 0 {
             let end = Date().addingTimeInterval(settle)
             while Date() < end {
                 if cancel() { return finish(appID: appID, name: name, start: start, exe: exe,
                                             outcome: .cancelled, window: window, windowAt: foundAt,
-                                            pids: gamePIDs, offsets: offsets, repairs: []) }
-                if !processAlive(window.pid) && !gamePIDs.contains(where: { processAlive($0) }) {
+                                            pids: gamePIDs, offsets: offsets, repairs: [],
+                                            answer: answer) }
+                if gameProcesses(exe: exe, stem: stem, in: processes()) == nil {
+                    // A game that answered is not a failed launch even if it has since
+                    // closed: the answer is what the run was for.
+                    let outcome: Outcome = answer == nil ? .failed : .launched
                     return finish(appID: appID, name: name, start: start, exe: exe,
-                                  outcome: .failed, window: window, windowAt: foundAt,
-                                  pids: gamePIDs, offsets: offsets, repairs: [])
+                                  outcome: outcome, window: window, windowAt: foundAt,
+                                  pids: gamePIDs, offsets: offsets, repairs: [], answer: answer)
                 }
                 try? await Task.sleep(for: .milliseconds(500))
             }
@@ -294,13 +360,14 @@ enum LaunchTest {
 
         return finish(appID: appID, name: name, start: start, exe: exe,
                       outcome: .launched, window: window, windowAt: foundAt,
-                      pids: gamePIDs, offsets: offsets, repairs: [])
+                      pids: gamePIDs, offsets: offsets, repairs: [], answer: answer)
     }
 
     private static func finish(appID: Int, name: String, start: Date, exe: URL?,
                                outcome: Outcome, window: Window?, windowAt: Double?,
                                pids: Set<Int32>, offsets: [String: UInt64],
-                               repairs: [String]) -> Result {
+                               repairs: [String],
+                               answer: Autopilot.Outcome? = nil) -> Result {
         let logs = logText(appID: appID, offsets: offsets)
         let status = exitStatus(appID: appID)
         let crash = logs.text.lowercased().contains("unitycrashhandler")
@@ -309,7 +376,9 @@ enum LaunchTest {
         // A stable window is proof the launch worked, even when the log names a DLL
         // the game only probes for. Keep Photon's answer for the online report.
         if outcome == .launched, issue != .online { issue = .none }
-        let online = onlineEvidence(appID: appID, start: start, text: logs.text)
+        var online = onlineEvidence(appID: appID, start: start, text: logs.text)
+        online.autopilot = answer?.summary
+        online.autopilotCause = answer?.refusal
         let final = outcome
         var detail = issue.title
         if issue == .missingDLL,
@@ -373,8 +442,11 @@ enum LaunchTest {
     // MARK: - Processes and windows
 
     static func windows() -> [Window] {
+        // Every window, not only the on-screen ones: a game started full screen on another
+        // Space, or behind the Steam window, is still the game, and the on-screen-only
+        // list made those games look like they never opened.
         guard let info = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+            [.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
         else { return [] }
         return info.compactMap { window in
             let layer = window[kCGWindowLayer as String] as? Int ?? 1
@@ -389,18 +461,42 @@ enum LaunchTest {
         }
     }
 
+    /// The window's own process, or a parent of it. A Wine game's window belongs to
+    /// wine's parent process rather than the game, so the process tree, not the title,
+    /// is the reliable link.
+    private static func fromGame(_ window: Window, pids: Set<Int32>,
+                                 parents: [Int32: Int32]) -> Bool {
+        var pid = window.pid
+        for _ in 0..<5 {
+            if pids.contains(pid) { return true }
+            guard let parent = parents[pid], parent > 1 else { return false }
+            pid = parent
+        }
+        return false
+    }
+
     private static func freshWindow(before: [Window], pids: Set<Int32>, stem: String) -> Window? {
         let known = Set(before.map(\.number))
+        let parents = Dictionary(processes().map { ($0.pid, $0.parent) },
+                                 uniquingKeysWith: { first, _ in first })
         return windows().first { window in
             guard !known.contains(window.number), window.width >= 320, window.height >= 240 else { return false }
-            if pids.contains(window.pid) { return true }
+            if fromGame(window, pids: pids, parents: parents) { return true }
             // The game's window belongs to a child process that ps did not match.
             // Match the executable against the window's title or owner, never
             // against Wine at large: an unrelated Wine app is not this game.
             guard !stem.isEmpty else { return false }
-            return window.owner.lowercased().contains(stem)
-                || window.name.lowercased().contains(stem)
+            // Compared without punctuation: a title can be "R.E.P.O." where the
+            // executable is REPO.exe, and dots would make the two miss each other.
+            let title = Self.bare(window.owner) + " " + Self.bare(window.name)
+            return title.contains(Self.bare(stem))
         }
+    }
+
+    /// A name with everything but letters and digits taken out, for matching a
+    /// window title against an executable.
+    static func bare(_ name: String) -> String {
+        String(name.lowercased().filter { $0.isLetter || $0.isNumber })
     }
 
     static func waitUntilStopped(exe: URL?, stem: String, timeout: Double) async -> Bool {
@@ -413,12 +509,12 @@ enum LaunchTest {
         return gameProcesses(exe: exe, stem: stem, in: processes()) == nil
     }
 
-    struct ProcessInfo: Sendable { var pid: Int32; var command: String }
+    struct ProcessInfo: Sendable { var pid: Int32; var parent: Int32; var command: String }
 
     static func processes() -> [ProcessInfo] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-axo", "pid=,command="]
+        process.arguments = ["-axo", "pid=,ppid=,command="]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
@@ -428,10 +524,12 @@ enum LaunchTest {
         let text = String(decoding: data, as: UTF8.self)
         return text.split(separator: "\n").compactMap { line in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard let space = trimmed.firstIndex(of: " ") else { return nil }
-            guard let pid = Int32(trimmed[..<space]) else { return nil }
-            let command = trimmed[trimmed.index(after: space)...].trimmingCharacters(in: .whitespaces)
-            return ProcessInfo(pid: pid, command: command)
+            let fields = trimmed.split(separator: " ", maxSplits: 2,
+                                       omittingEmptySubsequences: true)
+            guard fields.count >= 2, let pid = Int32(fields[0]),
+                  let parent = Int32(fields[1]) else { return nil }
+            let command = fields.count > 2 ? String(fields[2]) : ""
+            return ProcessInfo(pid: pid, parent: parent, command: command)
         }
     }
 
@@ -441,6 +539,11 @@ enum LaunchTest {
         let found = list.filter { item in
             let command = item.command.lowercased()
             guard !command.contains("steam_osx"), !command.contains("notproton/run") else { return false }
+            // A shell whose command line happens to name the game — someone running
+            // `pkill -f REPO.exe` — is not the game.
+            for shell in ["/bin/bash", "/bin/sh", "/bin/zsh", "bash ", "sh ", "zsh "] {
+                if command.hasPrefix(shell) { return false }
+            }
             if command.contains(path) { return true }
             // Wine rewrites the game's Windows path to S:\..., so the full path
             // above does not appear in the process command. The executable name

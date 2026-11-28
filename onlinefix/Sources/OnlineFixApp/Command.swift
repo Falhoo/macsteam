@@ -340,9 +340,37 @@ public enum OnlineFixCommand {
                 print(result.message)
             }
         }
+        // The same ladder the app runs: Photon's answer moves the auth type and the
+        // game is asked again. Doing it here too keeps the lab honest about whether a
+        // game can be made to work without a hand on it.
         if var recipe = FixPack.read(in: folder) {
             recipe.launchTest = result
             try? FixPack.writeRecipe(recipe, in: folder)
+            var tried = Set<String>()
+            for attempt in 0..<3 {
+                var learn = FixService.Outcome()
+                learn.launchTest = result
+                guard FixService.learnPhotonAuth(appID: appID, folder: folder, recipe: &recipe,
+                                                 outcome: &learn) else {
+                    try? FixPack.writeRecipe(recipe, in: folder)
+                    break
+                }
+                let mode = recipe.photonAuth ?? "?"
+                guard !tried.contains(mode) else { break }
+                tried.insert(mode)
+                print(learn.notes.joined(separator: " "))
+                try? FixPack.writeRecipe(recipe, in: folder)
+                guard attempt < 2 else { break }
+                _ = await LaunchTest.waitUntilStopped(exe: scan.exe, stem: scan.exe?
+                    .deletingPathExtension().lastPathComponent.lowercased() ?? "", timeout: 10)
+                print("Launching it again to check the connection…")
+                result = await LaunchTest.run(appID: appID, name: display, exe: scan.exe,
+                                             timeout: seconds, settle: settle,
+                                             progress: { print($0) })
+                recipe.launchTest = result
+                try? FixPack.writeRecipe(recipe, in: folder)
+                print(result.message)
+            }
         }
         if !result.evidence.isEmpty {
             print("Evidence:")

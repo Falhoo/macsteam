@@ -542,10 +542,12 @@ extension PhotonAuth {
             // The type itself is wrong: take the other one.
             return usable.first { $0 != .none }
         case .ticketRejected:
-            // The type is accepted, the ticket is not. Steam auth cannot be made to
-            // work for an account without the game, so send the app's own auth.
-            if current == .steam { return usable.first { $0 == .custom } }
-            return nil
+            // The credentials were refused. Whichever auth type is in use, the other one
+            // is the retry: Steam's ticket is refused by an app that wants its own auth,
+            // and a custom login is refused by an app that wants Steam's. The caller
+            // keeps a set of what has been tried, so this cannot ping-pong.
+            return usable.first { $0 == (current == .steam ? .custom : .steam) }
+                ?? usable.first { $0 != .none }
         case .appIDRefused:
             return nil
         case .authRefused:

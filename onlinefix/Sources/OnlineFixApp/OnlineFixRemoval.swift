@@ -206,6 +206,9 @@ enum OnlineFixRemoval {
         "onlinefix64.dll", "onlinefix.dll", "onlinefix.ini", "onlinefix.url",
         "custom.dll", "custom.net", "dlllist.txt", "steamoverlay64.dll",
         "doorstop_config.ini",
+        // The install test's autopilot: the shim, its ask flag, and what it wrote.
+        "macsteamautopilot.dll", "macsteam-autopilot.on", "macsteam-autopilot.log",
+        "macsteam-autopilot.warm",
     ]
 
     /// Folders the fix's loader keeps its own files in.

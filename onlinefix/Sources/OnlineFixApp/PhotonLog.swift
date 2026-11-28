@@ -356,6 +356,10 @@ enum PhotonLog {
         // the type itself, before any ticket was checked. It outranks the token rule:
         // OnlineFix's apps put the words "custom auth" in the same message.
         if said.contains("authenticationtype") { return .authTypeRefused }
+        // Photon's DisconnectCause spells a refused custom login
+        // "CustomAuthenticationFailed". The custom provider is what hands Steam's ticket
+        // over, so that cause is the ticket being refused, not the type.
+        if said.contains("customauthentication") { return .ticketRejected }
         if said.contains("steam") || said.contains("ticket") {
             return .ticketRejected
         }

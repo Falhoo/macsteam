@@ -412,18 +412,30 @@ enum FixService {
     @discardableResult
     static func learnPhotonAuth(appID: Int, folder: URL, recipe: inout FixRecipe,
                                         outcome: inout Outcome) -> Bool {
-        let log = PhotonLog.read(gameFolder: folder, prefix: nil)
-        guard let evidence = log, evidence.isFailure else { return false }
+        // What the game's own client was told outranks what its log was skimmed for:
+        // the autopilot asked, and Photon answered with a cause by name.
+        var refusal: PhotonLog.Evidence.Failure?
+        var said = ""
+        if let cause = outcome.launchTest?.online.autopilotCause {
+            said = cause
+            let classified = PhotonLog.classify(message: cause, returnCode: nil, text: cause)
+            if classified != .none { refusal = classified }
+        }
+        if refusal == nil, let evidence = PhotonLog.read(gameFolder: folder, prefix: nil),
+           evidence.isFailure {
+            refusal = evidence.failure
+            said = evidence.title
+        }
+        guard let failure = refusal, failure != .none else { return false }
         let current = recipe.photonAuth.flatMap(PhotonAuth.Mode.init(rawValue:))
             ?? PhotonAuth.observedMode(in: folder)
-        guard let next = PhotonAuth.nextMode(after: evidence.failure, current: current,
+        guard let next = PhotonAuth.nextMode(after: failure, current: current,
                                              in: folder) else { return false }
         guard let written = try? PhotonAuth.setEnabled(true, in: folder, mode: next),
               !written.isEmpty else { return false }
         recipe.photonAuth = next.rawValue
-        let said = evidence.title.lowercased()
         let was = current?.title ?? "what the game shipped"
-        outcome.notes.append("Photon said \(said), so the auth type is now \(next.title) "
+        outcome.notes.append("Photon said \(said.lowercased()), so the auth type is now \(next.title) "
             + "instead of \(was); launch it again.")
         return true
     }

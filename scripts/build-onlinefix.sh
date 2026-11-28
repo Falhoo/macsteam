@@ -40,6 +40,14 @@ fi
 # doorways (winhttp and winmm), the chain's config and BepInEx's whole core. A package
 # that carries only the plugin and the preloader cannot load, and a doorway the game
 # never imports never runs, so the app ships the complete chain.
+# The autopilot that makes a game try its own online connection during an install
+# test, so the player does not have to drive the menus.
+if [ -d "$SRC/autopilot" ]; then
+    mkdir -p "$RES/autopilot"
+    rsync -a --delete "$SRC/autopilot/" "$RES/autopilot/"
+    echo "installed the online test autopilot"
+fi
+
 if [ -d "$SRC/photon" ]; then
     mkdir -p "$RES/photon"
     rsync -a --delete "$SRC/photon/" "$RES/photon/"
