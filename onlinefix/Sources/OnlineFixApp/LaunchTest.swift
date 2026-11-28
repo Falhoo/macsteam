@@ -268,6 +268,14 @@ enum LaunchTest {
                                                attemptSeen: attemptSeen)
         }
 
+        // A game that opened but never said anything to Photon leaves one question:
+        // can this Mac reach Photon at all? Answering it here saves the player from
+        // being told to "check the auth type" when the machine is offline.
+        if !attemptSeen() {
+            let pings = PhotonProbe.ping()
+            progress(PhotonProbe.summary(pings))
+        }
+
         progress("Reading the game's logs…")
         if settle > 0 {
             let end = Date().addingTimeInterval(settle)
