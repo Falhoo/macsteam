@@ -105,9 +105,9 @@ enum FixService {
         // The log is the only place Photon says what it thinks, and it says nothing
         // until the game actually tries to go online. Ask for that before the window
         // closes, then read it.
-        progress("Starting the game — in its menu, open the online/multiplayer screen and "
-            + "try to connect once, then quit. That attempt is what Photon answers, and "
-            + "its answer is what the installer reads.")
+        progress("Starting the game. macSteam walks its menus to the online screen and "
+            + "tries to connect, then reads what Photon answered — if a menu gets in the "
+            + "way, click through it and press the online button yourself.")
         var result = await LaunchTest.run(appID: appID, name: name, exe: exe,
                                           cancel: { control.isCancelled() },
                                           progress: progress)

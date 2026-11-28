@@ -1308,9 +1308,10 @@
         // nothing until the game tries to go online, so the one thing the player has
         // to do is open the online screen and press connect.
         onlineStatus.textContent = (reply.message || 'OnlineFix installed.')
-            + ' When the game opens, go to its online/multiplayer screen and try to '
-            + 'connect once — that attempt is what tells the installer whether the '
-            + 'auth it wrote is the one this game\'s Photon app takes.';
+            + ' macSteam opens the game and walks its menus to the online screen to try '
+            + 'a connection itself, because that attempt is what tells it whether the auth '
+            + 'it wrote is the one this game\'s Photon app takes. If a menu gets in the way, '
+            + 'press the online button yourself — the installer reads the answer either way.';
         if (onlineNote) onlineNote.hidden = true;
     }
     // A game added while Steam runs only gets its achievement list the next time

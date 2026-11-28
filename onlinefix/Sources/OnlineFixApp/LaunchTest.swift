@@ -253,6 +253,21 @@ enum LaunchTest {
             try? await Task.sleep(for: .milliseconds(500))
         }
 
+        // The log only says what Photon thinks once the game has asked it something,
+        // so the menu is walked for the player before the log is read. A game that
+        // needs no help is left alone: the loop stops the moment an attempt appears.
+        let folder = Store.gameFolder(for: appID, name: name)
+        func attemptSeen() -> Bool {
+            guard let folder, let evidence = PhotonLog.read(gameFolder: folder, prefix: nil)
+            else { return false }
+            return evidence.isFailure || evidence.returnCode != nil
+        }
+        if !attemptSeen() {
+            _ = await MenuDriver.attemptOnline(appID: appID, window: window,
+                                               cancel: cancel, progress: progress,
+                                               attemptSeen: attemptSeen)
+        }
+
         progress("Reading the game's logs…")
         if settle > 0 {
             let end = Date().addingTimeInterval(settle)
