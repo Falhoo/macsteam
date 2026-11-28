@@ -14,17 +14,21 @@ struct MacAppFixTests {
         return url
     }
 
-    private func write(_ text: String, to url: URL) throws {
+    /// `machO: true` writes a Mach-O head in front of the text, so the file reads as
+    /// an executable the way a real game's does.
+    private func write(_ text: String, to url: URL, machO: Bool = false) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
-        try Data(text.utf8).write(to: url)
+        var data = Data(text.utf8)
+        if machO { data = Data([0xcf, 0xfa, 0xed, 0xfe]) + data }
+        try data.write(to: url)
     }
 
     private func bundle(in root: URL, steam: Bool) throws -> URL {
         let game = root.appendingPathComponent("Game", isDirectory: true)
         let app = game.appendingPathComponent("Game.app", isDirectory: true)
         try write(steam ? "SteamAPI_Init" : "hello",
-                  to: app.appendingPathComponent("Contents/MacOS/Game"))
+                  to: app.appendingPathComponent("Contents/MacOS/Game"), machO: true)
         if steam {
             try write("dylib", to: app.appendingPathComponent("Contents/Frameworks/libsteam_api.dylib"))
         }

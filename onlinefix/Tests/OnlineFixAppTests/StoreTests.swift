@@ -14,10 +14,14 @@ struct StoreTests {
         return url.resolvingSymlinksInPath()
     }
 
-    private func write(_ text: String, to url: URL) throws {
+    /// `machO: true` writes a Mach-O head in front of the text, so the file reads as
+    /// an executable the way a real game's does.
+    private func write(_ text: String, to url: URL, machO: Bool = false) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
-        try Data(text.utf8).write(to: url)
+        var data = Data(text.utf8)
+        if machO { data = Data([0xcf, 0xfa, 0xed, 0xfe]) + data }
+        try data.write(to: url)
     }
 
     /// An app manifest as Steam writes one, with only the flags this reads.
@@ -118,7 +122,7 @@ struct StoreTests {
     func aMacBundleIsInstalled() throws {
         let game = try folder("mac")
         defer { try? FileManager.default.removeItem(at: game) }
-        try write("binary", to: game.appendingPathComponent("Game.app/Contents/MacOS/Game"))
+        try write("binary", to: game.appendingPathComponent("Game.app/Contents/MacOS/Game"), machO: true)
 
         #expect(Store.isInstalled(appID: 1, folder: game))
     }

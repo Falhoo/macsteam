@@ -38,6 +38,10 @@ public struct OnlineFixStoreStatus: Codable, Sendable {
     /// the `.exe`, a Mac fix writes into the `.app`. The card follows this instead of
     /// the folder, so it stops offering the Mac build to a game running as Windows.
     public let buildInUse: GameBuildInUse
+    /// The Mac bundle is still in the folder. Steam sometimes leaves it there when it
+    /// installs the Windows build beside it, so the card can say both are present
+    /// instead of pretending only one is.
+    public let macBuildInstalled: Bool
     /// The game's fix ships Steam's overlay stub, so the overlay is on the critical
     /// path at startup. The OnlineFix card's copy disables it; a LuaTools copy does
     /// not, which is what crashes some games (Buckshot Roulette).
@@ -72,8 +76,11 @@ public enum GameBuildInUse: String, Codable, Sendable {
         case (false, true): return .windows
         case (false, false): return .none
         case (true, true):
-            guard let recipe = FixPack.read(in: folder) else { return .mac }
-            return recipe.macBuild == true ? .mac : .windows
+            // Both builds are on disk. Steam left the Windows one there on purpose
+            // (a forced install, or a verify after the switch), and a fix only has
+            // something to do there, so that is the one the card talks about. The
+            // Mac bundle is reported beside it, not instead of it.
+            return .windows
         }
     }
 }

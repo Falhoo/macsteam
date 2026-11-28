@@ -66,6 +66,7 @@ struct FixCompatibilityTests {
         try FileManager.default.createDirectory(
             at: root.appendingPathComponent("Game.app/Contents/MacOS", isDirectory: true),
             withIntermediateDirectories: true)
+        try TestBundle.writeBinary(to: root.appendingPathComponent("Game.app/Contents/MacOS/Game"))
 
         let check = FixCompatibility.check(appID: 1, name: "Game", folder: root)
         #expect(check.verdict == FixCompatibilityVerdict.unsupported.rawValue)

@@ -27,6 +27,7 @@ struct PicoPark2PatchTests {
         try FileManager.default.createDirectory(
             at: app.appendingPathComponent("Contents/MacOS", isDirectory: true),
             withIntermediateDirectories: true)
+        try TestBundle.writeBinary(to: app.appendingPathComponent("Contents/MacOS/Game"))
         let data = app.appendingPathComponent(PicoPark2Patch.dataPath + "/" + idFile)
         try FileManager.default.createDirectory(at: data.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)

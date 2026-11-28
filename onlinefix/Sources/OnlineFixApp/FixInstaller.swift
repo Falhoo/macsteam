@@ -92,25 +92,88 @@ enum FixInstaller {
         return hasAnyWindowsBuild(in: folder)
     }
 
-    /// Whether the folder holds a Windows executable at all, even with a Mac build
-    /// beside it. `hasWindowsBuild` answers "is Windows what Steam starts?", which is
-    /// not the same question: a game that ships both builds has both.
+    /// Whether the folder holds the game's Windows build, even with a Mac build beside
+    /// it. `hasWindowsBuild` answers "is Windows what Steam starts?"; this answers
+    /// "was the Windows version installed?", which is what the store card needs.
     static func hasAnyWindowsBuild(in folder: URL) -> Bool {
+        !windowsExecutables(in: folder).isEmpty
+    }
+
+    /// The game's own `.exe` files, largest first.
+    ///
+    /// A folder can be full of executables that are not the game: Unity's crash
+    /// handler, uninstallers, redistributables, a workshop tool. Counting those made a
+    /// Mac-only game look like it had a Windows build (and the other way round), so
+    /// each one has to be a real PE executable and not one of the known helpers.
+    static func windowsExecutables(in folder: URL) -> [URL] {
         guard let enumerator = Paths.fm.enumerator(
             at: folder,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return false }
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
+        var found: [(URL, Int)] = []
         for case let url as URL in enumerator {
             if enumerator.level > 3 {
                 enumerator.skipDescendants()
                 continue
             }
-            if url.pathExtension.lowercased() == "exe",
-               (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true {
-                return true
-            }
+            guard url.pathExtension.lowercased() == "exe",
+                  let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                  values.isRegularFile == true,
+                  !isHelperExecutable(url.lastPathComponent),
+                  isPEExecutable(url) else { continue }
+            found.append((url, values.fileSize ?? 0))
         }
-        return false
+        return found.sorted { $0.1 > $1.1 }.map(\.0)
+    }
+
+    /// Executables that ship with a game but are not the game.
+    private static func isHelperExecutable(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        let helpers = ["unitycrashhandler", "crashhandler", "unins", "setup", "install",
+                       "vcredist", "vc_redist", "dxsetup", "dxwebsetup", "dotnetfx",
+                       "godotworkshoputility", "notification_helper", "steamerrorreporter"]
+        return helpers.contains { lower.hasPrefix($0) || lower.contains($0) }
+    }
+
+    /// `MZ` and a PE header where the DOS stub points.
+    static func isPEExecutable(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: 0x40), head.count == 0x40,
+              head[0] == 0x4d, head[1] == 0x5a else { return false }
+        let offset = Int(head[0x3c]) | Int(head[0x3d]) << 8
+            | Int(head[0x3e]) << 16 | Int(head[0x3f]) << 24
+        guard offset > 0, offset < 4096 else { return false }
+        guard (try? handle.seek(toOffset: UInt64(offset))) != nil,
+              let marker = try? handle.read(upToCount: 4), marker.count == 4 else { return false }
+        return marker[0] == 0x50 && marker[1] == 0x45
+    }
+
+    /// A macOS app bundle that still has its program in it. Steam leaves an empty
+    /// `Game.app/Contents/MacOS` behind when it installs the Windows build beside it,
+    /// and counting that skeleton made the store card call a Windows folder a Mac one.
+    static func isMacAppBundle(_ url: URL) -> Bool {
+        let macos = url.appendingPathComponent("Contents/MacOS", isDirectory: true)
+        let entries = (try? Paths.fm.contentsOfDirectory(
+            at: macos, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles])) ?? []
+        return entries.contains { entry in
+            guard let values = try? entry.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                  values.isRegularFile == true, (values.fileSize ?? 0) > 0 else { return false }
+            return true
+        }
+    }
+
+    /// Whether a file is a thin or fat Mach-O.
+    static func machO(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: 4), head.count == 4 else { return false }
+        let thin: Set<UInt32> = [0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe]
+        let magic = UInt32(head[0]) << 24 | UInt32(head[1]) << 16
+            | UInt32(head[2]) << 8 | UInt32(head[3])
+        if thin.contains(magic) { return true }
+        return magic == 0xcafebabe || magic == 0xbebafeca   // fat, big or little endian
     }
 
     /// A native macOS bundle at the top of a game folder. Steam runs that instead
@@ -125,8 +188,8 @@ enum FixInstaller {
         for url in entries where url.pathExtension.lowercased() == "app" {
             let isDirectory = ((try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory) ?? false
             guard isDirectory else { continue }
-            let macos = url.appendingPathComponent("Contents/MacOS", isDirectory: true)
-            if fm.fileExists(atPath: macos.path) { return url }
+            if fm.fileExists(atPath: url.appendingPathComponent("Contents/MacOS").path),
+               isMacAppBundle(url) { return url }
         }
         return nil
     }

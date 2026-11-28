@@ -104,6 +104,7 @@ struct FixInstallerTests {
         try FileManager.default.createDirectory(
             at: root.appendingPathComponent("Terraria.app/Contents/MacOS", isDirectory: true),
             withIntermediateDirectories: true)
+        try TestBundle.writeBinary(to: root.appendingPathComponent("Terraria.app/Contents/MacOS/Terraria"))
         #expect(FixInstaller.nativeMacBundle(in: root)?.lastPathComponent == "Terraria.app")
         #expect(!FixInstaller.hasWindowsBuild(in: root))
     }

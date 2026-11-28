@@ -786,6 +786,7 @@
             nativeMac: !!result.nativeMacBuild,
             windows: !!result.windowsBuildInstalled,
             build: result.buildInUse || '',
+            macAlso: !!result.macBuildInstalled,
         });
         if (onlineRoot?.isConnected && signature === onlineSignature) {
             applyOnlineRecommendation();
@@ -889,8 +890,13 @@
                 const ready = document.createElement('div');
                 ready.style.cssText = 'font-size:12px;color:#a4d007;margin-top:8px;'
                     + 'max-width:560px;line-height:1.45';
+                // Steam can leave the Mac bundle on disk after installing the Windows
+                // build. Say both are there, so a `.app` sitting in the folder does not
+                // read like the Mac build is the one that starts.
                 ready.textContent = 'This version of your game is the Windows version, '
-                    + 'OnlineFix WILL work, go ahead.';
+                    + 'OnlineFix WILL work, go ahead.'
+                    + (result.macBuildInstalled
+                        ? ' The Mac build is still in the folder, but the .exe is what starts.' : '');
                 onlineRoot.appendChild(ready);
             }
             // A native macOS build takes no OnlineFix files; a free game needs no

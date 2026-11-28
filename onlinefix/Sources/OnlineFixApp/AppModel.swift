@@ -940,6 +940,7 @@ final class AppModel: ObservableObject {
             compatTool: Steam.notProtonTool(),
             windowsBuildInstalled: buildInUse == .windows,
             buildInUse: buildInUse,
+            macBuildInstalled: nativeMac,
             overlayStub: fixes.first { $0.id == appID }?.files.contains {
                 ($0 as NSString).lastPathComponent == "SteamOverlay64.dll"
             } ?? false,
