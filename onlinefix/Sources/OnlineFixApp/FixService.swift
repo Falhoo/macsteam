@@ -315,6 +315,7 @@ enum FixService {
             photonRoute: finalRoute.kind.rawValue,
             photonAuth: plan.photonAuth?.rawValue,
             picoPark2: plan.picoPark2, wineDLLs: plan.wineDLLs,
+            macBuild: plan.macBuild,
             notes: applied.notes + plan.notes)
         recipe.photonPatched = photonWritten.map {
             FixPlan.relative(URL(fileURLWithPath: $0), in: folder)

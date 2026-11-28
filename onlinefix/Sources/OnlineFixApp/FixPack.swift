@@ -47,6 +47,11 @@ struct FixRecipe: Codable, Sendable, Equatable {
     /// what a single file is supposed to hold.
     var photonFileIDs: [String: [String]]? = nil
     var wineDLLs: [String]
+    /// The fix was written into the game's own macOS bundle rather than set up beside
+    /// a Windows build. The store card and a repair read this to know which build the
+    /// fix is for, instead of guessing from the folder. Optional so packs written by
+    /// older builds still decode.
+    var macBuild: Bool? = nil
     /// The last install test and the evidence it read. Optional so packs written by
     /// older builds still decode.
     var launchTest: LaunchTest.Result? = nil

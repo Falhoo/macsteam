@@ -57,6 +57,28 @@ enum Steam {
         return nil
     }
 
+    /// The compatibility tool a game is pinned to, if any, read from Steam's own
+    /// config. A pinned tool is how Steam runs the Windows build, so it outranks the
+    /// folder: a game that ships both builds keeps the Mac one on disk underneath.
+    static func forcedCompatTool(appID: Int) -> String? {
+        let users = (try? Paths.fm.contentsOfDirectory(
+            at: Paths.steamSupport.appendingPathComponent("userdata", isDirectory: true),
+            includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        for user in users {
+            let file = user.appendingPathComponent("config/localconfig.vdf")
+            guard let text = try? String(contentsOf: file, encoding: .utf8),
+                  let mapping = text.range(of: "\"CompatToolMapping\"") else { continue }
+            let rest = text[mapping.upperBound...]
+            guard let block = rest.range(of: "\"\\(appID)\"") else { continue }
+            let body = rest[block.upperBound...].prefix(400)
+            guard let name = body.range(of: "\"name\""),
+                  let value = body[name.upperBound...].range(of: "\"[^\"]*\"") else { continue }
+            let tool = body[name.upperBound...][value].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            if !tool.isEmpty { return tool }
+        }
+        return nil
+    }
+
     /// The newest NotProton compatibility tool installed for Steam, e.g.
     /// "notproton-26.3". Empty when NotProton is not installed.
     static func notProtonTool() -> String? {

@@ -785,6 +785,7 @@
             probe: onlineProbe ? [!!onlineProbe.available, !!onlineProbe.gdk] : null,
             nativeMac: !!result.nativeMacBuild,
             windows: !!result.windowsBuildInstalled,
+            build: result.buildInUse || '',
         });
         if (onlineRoot?.isConnected && signature === onlineSignature) {
             applyOnlineRecommendation();
@@ -817,12 +818,13 @@
         onlineFree = !!freeGame;
         onlineOverlay = !!result.overlayStub;
         // "Windows version installed" only means something for a game Steam also sells
-        // a Mac build of; for a Windows-only game that is just the game.
+        // a Mac build of; for a Windows-only game that is just the game. Which build is
+        // in use comes from the fix's own record and Steam's compatibility setting, not
+        // from the folder: a game that keeps both builds has lost nothing.
         const macCapable = !!result.nativeMacBuild || pageSaysNativeMac();
-        onlineWindows = !!result.windowsBuildInstalled && macCapable;
-        // Once Steam has swapped in the Windows build the card is a normal fix card
-        // again; the native handling only applies while the folder still has the .app.
-        onlineNative = !!result.nativeMacBuild && !onlineWindows;
+        const build = String(result.buildInUse || '');
+        onlineWindows = build === 'windows' && macCapable;
+        onlineNative = build === 'mac' || (build === '' && !!result.nativeMacBuild && !onlineWindows);
         onlineNativeTool = result.compatTool || '';
         // A Mac build has nothing to install but the identity, so a routed Mac app is
         // installed as far as the card is concerned: Uninstall turns it back off.

@@ -923,6 +923,9 @@ final class AppModel: ObservableObject {
         let macPatchable = folder.flatMap { FixInstaller.nativeMacBundle(in: $0) }
             .map { MacBundlePatch.canPatch($0) } ?? false
         let windowsBuild = folder.map { FixInstaller.hasWindowsBuild(in: $0) } ?? false
+        // A folder that keeps both builds cannot say which one runs; the fix's record
+        // can, so the card follows that and only falls back to the folder.
+        let buildInUse = GameBuildInUse.resolve(appID: appID, folder: folder)
         let installed = fixIsInstalled(appID)
         return OnlineFixStoreStatus(
             inList: alreadyAdded(appID),
@@ -933,9 +936,10 @@ final class AppModel: ObservableObject {
             photonIssue: fixIssue(appID),
             gdkRestricted: FixCompatibility.isGDK(folder: folder),
             nativeMacBuild: nativeMac,
-            macPatchable: macPatchable && !windowsBuild,
+            macPatchable: macPatchable && buildInUse != .windows,
             compatTool: Steam.notProtonTool(),
-            windowsBuildInstalled: windowsBuild,
+            windowsBuildInstalled: buildInUse == .windows,
+            buildInUse: buildInUse,
             overlayStub: fixes.first { $0.id == appID }?.files.contains {
                 ($0 as NSString).lastPathComponent == "SteamOverlay64.dll"
             } ?? false,

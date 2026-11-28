@@ -33,6 +33,11 @@ public struct OnlineFixStoreStatus: Codable, Sendable {
     /// The folder now holds the Windows build (no `.app`, an executable), so the fix
     /// can be installed for real. This is what the card waits for after the switch.
     public let windowsBuildInstalled: Bool
+    /// Which build of the game Steam actually starts. A game can ship both, and the
+    /// folder alone cannot say which one runs: a Windows fix copies its files beside
+    /// the `.exe`, a Mac fix writes into the `.app`. The card follows this instead of
+    /// the folder, so it stops offering the Mac build to a game running as Windows.
+    public let buildInUse: GameBuildInUse
     /// The game's fix ships Steam's overlay stub, so the overlay is on the critical
     /// path at startup. The OnlineFix card's copy disables it; a LuaTools copy does
     /// not, which is what crashes some games (Buckshot Roulette).
@@ -41,6 +46,28 @@ public struct OnlineFixStoreStatus: Codable, Sendable {
     /// to the install button, so it does not disappear with the install message.
     public var lastOnlineCheck: String? = nil
 
+}
+
+/// Which build of a game is the one in use.
+public enum GameBuildInUse: String, Codable, Sendable {
+    case mac
+    case windows
+    case none
+
+    /// Read from what the fix did, then from the folder. A fix's record outranks the
+    /// folder, because the folder keeps the other build beside the one in use.
+    static func resolve(appID: Int, folder: URL?) -> GameBuildInUse {
+        let recipe = folder.flatMap { FixPack.read(in: $0) }
+        if recipe?.macBuild == true { return .mac }
+        if let recipe, !recipe.entries.isEmpty || !recipe.wineDLLs.isEmpty { return .windows }
+        // A pinned compatibility tool is Steam's own answer to "run the Windows build",
+        // and it is what makes the `.exe` the thing that starts.
+        if Steam.forcedCompatTool(appID: appID) != nil { return .windows }
+        guard let folder else { return .none }
+        if FixInstaller.nativeMacBundle(in: folder) != nil { return .mac }
+        if FixInstaller.hasAnyWindowsBuild(in: folder) { return .windows }
+        return .none
+    }
 }
 
 /// How an OnlineFix install started from the Steam store page ended.

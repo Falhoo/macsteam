@@ -998,10 +998,18 @@ enum PhotonPatch {
 
     /// Re-signs a patched bundle the way the games' own patch does: the changed
     /// binary first, then the bundle around it.
+    ///
+    /// What the signature already carried is kept. A game that ships with the hardened
+    /// runtime and `disable-library-validation` loses both if it is signed bare, and
+    /// then dyld refuses the libraries Steam injects into it — the overlay deadlocks
+    /// the game on its first frames and the window stays black.
     static func resign(_ url: URL) throws {
         let isBinary = ["dylib", "so"].contains(url.pathExtension.lowercased())
         var args = ["--force", "--sign", "-"]
         if isBinary { args += ["--identifier", url.deletingPathExtension().lastPathComponent] }
+        var entitlements: URL?
+        if !isBinary { entitlements = try KeptSignature.apply(url, to: &args) }
+        defer { if let entitlements { try? Paths.fm.removeItem(at: entitlements) } }
         args += ["--timestamp=none", url.path]
         let out = Shell.run("/usr/bin/codesign", args)
         guard out.code == 0 else {
@@ -1028,5 +1036,30 @@ enum PhotonPatch {
             }
         }
         return result
+    }
+}
+
+/// The parts of a bundle's existing signature that have to survive being replaced.
+/// Signing again keeps the identity codesign already chose; the runtime flag and the
+/// entitlements are not carried over on their own, so they are read out first.
+enum KeptSignature {
+
+    /// Adds `--options runtime` and `--entitlements <file>` to `args` for whatever the
+    /// bundle already carried, and returns the written entitlements file to delete.
+    static func apply(_ bundle: URL, to args: inout [String]) throws -> URL? {
+        let details = Shell.run("/usr/bin/codesign", ["-d", "--verbose=2", bundle.path])
+        if details.out.contains("flags=") || details.err.contains("flags=") {
+            let text = details.out.isEmpty ? details.err : details.out
+            if text.contains("runtime") { args += ["--options", "runtime"] }
+        }
+        let entitlements = Shell.run("/usr/bin/codesign",
+                                     ["-d", "--entitlements", "-", "--xml", bundle.path])
+        let xml = entitlements.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !xml.isEmpty, xml.hasPrefix("<?xml") else { return nil }
+        let file = Paths.fm.temporaryDirectory
+            .appendingPathComponent("kept-entitlements-\(UUID().uuidString).plist")
+        try Data(xml.utf8).write(to: file)
+        args += ["--entitlements", file.path]
+        return file
     }
 }

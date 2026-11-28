@@ -58,6 +58,8 @@ struct FixPlan: Sendable {
     var wineDLLs: [String] = []
     var keepRealAppID = false
     var picoPark2 = false
+    /// The plan is for the game's own macOS bundle, not for files beside a Windows build.
+    var macBuild = false
     var photonSwap = false
     /// The auth type to write into the game's Photon assembly, when the game's own
     /// Steam ticket cannot be accepted (an account that does not own the game).
@@ -79,6 +81,7 @@ struct FixPlan: Sendable {
         // A Mac build loads none of the fix's files. What works there is the routing
         // and, for a game whose Photon app id can be read, the patch in its own files.
         if let bundle = scan.macBundle {
+            plan.macBuild = true
             plan.keepRealAppID = true
             // An unowned Photon game reaches Photon with a ticket Steam cannot sign,
             // exactly as on a Windows build. The bundle's Photon assembly takes the
@@ -86,8 +89,14 @@ struct FixPlan: Sendable {
             if PhotonLog.ownsApp(appID: appID, folder: scan.folder, prefix: scan.prefix) == false,
                let mode = PhotonAuth.unlicensedMode(in: bundle) {
                 plan.photonAuth = mode
+                // The session and the ticket have to agree. A ticket for an AppID no
+                // licence covers is the one Steam cannot sign, so the game runs as the
+                // app OnlineFix's Photon app checks instead of keeping its own, exactly
+                // as a Windows build of the same game would.
+                plan.keepRealAppID = false
                 plan.notes.append("Steam has no licence for this game, so its Photon assembly "
-                    + "is changed to send custom auth instead of a Steam ticket.")
+                    + "is changed to send custom auth instead of a Steam ticket, and it is "
+                    + "started as Spacewar (480) for the session and the ticket to match.")
             }
             if MacBundlePatch.profile(appID: appID, bundle: bundle) != nil
                 || MacBundlePatch.canPatch(bundle) {

@@ -89,6 +89,13 @@ enum FixInstaller {
     /// and its update this flips and the fix can be installed for real.
     static func hasWindowsBuild(in folder: URL) -> Bool {
         if nativeMacBundle(in: folder) != nil { return false }
+        return hasAnyWindowsBuild(in: folder)
+    }
+
+    /// Whether the folder holds a Windows executable at all, even with a Mac build
+    /// beside it. `hasWindowsBuild` answers "is Windows what Steam starts?", which is
+    /// not the same question: a game that ships both builds has both.
+    static func hasAnyWindowsBuild(in folder: URL) -> Bool {
         guard let enumerator = Paths.fm.enumerator(
             at: folder,
             includingPropertiesForKeys: [.isRegularFileKey],
