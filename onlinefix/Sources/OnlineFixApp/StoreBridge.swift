@@ -57,16 +57,24 @@ public enum GameBuildInUse: String, Codable, Sendable {
     /// Read from what the fix did, then from the folder. A fix's record outranks the
     /// folder, because the folder keeps the other build beside the one in use.
     static func resolve(appID: Int, folder: URL?) -> GameBuildInUse {
-        let recipe = folder.flatMap { FixPack.read(in: $0) }
-        if recipe?.macBuild == true { return .mac }
-        if let recipe, !recipe.entries.isEmpty || !recipe.wineDLLs.isEmpty { return .windows }
         // A pinned compatibility tool is Steam's own answer to "run the Windows build",
-        // and it is what makes the `.exe` the thing that starts.
+        // and it is what makes the `.exe` the thing that starts. It outranks everything.
         if Steam.forcedCompatTool(appID: appID) != nil { return .windows }
         guard let folder else { return .none }
-        if FixInstaller.nativeMacBundle(in: folder) != nil { return .mac }
-        if FixInstaller.hasAnyWindowsBuild(in: folder) { return .windows }
-        return .none
+        let mac = FixInstaller.nativeMacBundle(in: folder) != nil
+        let windows = FixInstaller.hasAnyWindowsBuild(in: folder)
+        // The folder is what Steam launches from, so it speaks first. A fix's record
+        // only breaks the tie, and only while it still describes the folder: a Mac
+        // record left behind after Steam swapped in the Windows build used to keep the
+        // card on the Mac wording forever.
+        switch (mac, windows) {
+        case (true, false): return .mac
+        case (false, true): return .windows
+        case (false, false): return .none
+        case (true, true):
+            guard let recipe = FixPack.read(in: folder) else { return .mac }
+            return recipe.macBuild == true ? .mac : .windows
+        }
     }
 }
 
