@@ -102,7 +102,12 @@ enum FixService {
             outcome.testNote = "The game has no Windows executable to test."
             return outcome
         }
-        progress("Testing the game (up to 2 minutes)…")
+        // The log is the only place Photon says what it thinks, and it says nothing
+        // until the game actually tries to go online. Ask for that before the window
+        // closes, then read it.
+        progress("Starting the game — in its menu, open the online/multiplayer screen and "
+            + "try to connect once, then quit. That attempt is what Photon answers, and "
+            + "its answer is what the installer reads.")
         var result = await LaunchTest.run(appID: appID, name: name, exe: exe,
                                           cancel: { control.isCancelled() },
                                           progress: progress)
@@ -127,21 +132,43 @@ enum FixService {
                 outcome.testNote = repair.notes.joined(separator: " ")
             }
         }
+        // Photon is asked again with each type the game can send, and the answer is
+        // taken from the run before. One button, then: launch, refuse, re-patch,
+        // launch again — instead of the player noticing a failure and pressing Repair.
+        var tried = Set<String>()
         if var recipe = FixPack.read(in: folder) {
-            recipe.launchTest = outcome.launchTest
-            if !repairNotes(outcome).isEmpty {
-                recipe.notes.append("Install test: " + repairNotes(outcome))
-            }
-            // The test started the game, so Photon has already answered for this
-            // install. Take that answer now: the fix is only worth the connection it
-            // gets, and a wrong auth type is the commonest thing that stops one.
-            var learned = Outcome()
-            if learnPhotonAuth(appID: appID, folder: folder, recipe: &recipe,
-                               outcome: &learned) {
+            for attempt in 0..<3 {
+                recipe.launchTest = outcome.launchTest
+                if !repairNotes(outcome).isEmpty {
+                    recipe.notes.append("Install test: " + repairNotes(outcome))
+                }
+                var learned = Outcome()
+                guard learnPhotonAuth(appID: appID, folder: folder, recipe: &recipe,
+                                      outcome: &learned) else {
+                    try? FixPack.writeRecipe(recipe, in: folder)
+                    break
+                }
+                let mode = recipe.photonAuth ?? "?"
+                guard !tried.contains(mode) else {
+                    try? FixPack.writeRecipe(recipe, in: folder)
+                    break
+                }
+                tried.insert(mode)
+                try? FixPack.writeRecipe(recipe, in: folder)
                 outcome.notes.append(contentsOf: learned.notes)
-                outcome.testNote = learned.notes.joined(separator: " ")
+                guard attempt < 2 else { break }
+                // The game has to go away before the next process can be told apart
+                // from the one that is still shutting down.
+                _ = await LaunchTest.waitUntilStopped(
+                    exe: exe, stem: exe.deletingPathExtension().lastPathComponent.lowercased(),
+                    timeout: 10)
+                progress(learned.notes.joined(separator: " ")
+                    + " Launching it again to check the connection…")
+                outcome.launchTest = await LaunchTest.run(appID: appID, name: name, exe: exe,
+                                                          cancel: { control.isCancelled() },
+                                                          progress: progress)
             }
-            try? FixPack.writeRecipe(recipe, in: folder)
+            outcome.testNote = repairNotes(outcome)
         }
         return outcome
     }
@@ -383,7 +410,7 @@ enum FixService {
     /// When it names a refusal, the patch moves to the type that refusal implies, and
     /// the recipe keeps the new one so the next repair starts from it.
     @discardableResult
-    private static func learnPhotonAuth(appID: Int, folder: URL, recipe: inout FixRecipe,
+    static func learnPhotonAuth(appID: Int, folder: URL, recipe: inout FixRecipe,
                                         outcome: inout Outcome) -> Bool {
         let log = PhotonLog.read(gameFolder: folder, prefix: nil)
         guard let evidence = log, evidence.isFailure else { return false }

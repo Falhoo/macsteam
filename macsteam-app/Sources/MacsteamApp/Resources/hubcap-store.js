@@ -1304,7 +1304,13 @@
         await loadOnlineFix();
         onlineStatus.style.color = '#a4d007';
         onlineStatus.hidden = false;
-        onlineStatus.textContent = reply.message || 'OnlineFix installed.';
+        // The install starts the game once to read what Photon says. Photon says
+        // nothing until the game tries to go online, so the one thing the player has
+        // to do is open the online screen and press connect.
+        onlineStatus.textContent = (reply.message || 'OnlineFix installed.')
+            + ' When the game opens, go to its online/multiplayer screen and try to '
+            + 'connect once — that attempt is what tells the installer whether the '
+            + 'auth it wrote is the one this game\'s Photon app takes.';
         if (onlineNote) onlineNote.hidden = true;
     }
     // A game added while Steam runs only gets its achievement list the next time

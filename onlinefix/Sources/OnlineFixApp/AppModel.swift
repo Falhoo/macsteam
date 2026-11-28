@@ -542,6 +542,26 @@ final class AppModel: ObservableObject {
                                           progress: progress)
         if var recipe = FixPack.read(in: folder) {
             recipe.launchTest = result
+            // The same one-button rule as an install: Photon's answer re-patches the
+            // game and it is started again, so Test is enough to settle the auth type.
+            var learned = FixService.Outcome()
+            if FixService.learnPhotonAuth(appID: appID, folder: folder, recipe: &recipe,
+                                          outcome: &learned) {
+                try? FixPack.writeRecipe(recipe, in: folder)
+                guard !control.isCancelled() else { return learned.notes.joined(separator: " ") }
+                _ = await LaunchTest.waitUntilStopped(
+                    exe: scan.exe,
+                    stem: scan.exe?.deletingPathExtension().lastPathComponent.lowercased() ?? "",
+                    timeout: 10)
+                progress(learned.notes.joined(separator: " ") + " Testing it again…")
+                let again = await LaunchTest.run(appID: appID, name: name, exe: scan.exe,
+                                                 cancel: { control.isCancelled() },
+                                                 progress: progress)
+                recipe.launchTest = again
+                try? FixPack.writeRecipe(recipe, in: folder)
+                launchTestRunning = false
+                return (learned.notes + [again.online.note]).joined(separator: " ")
+            }
             try? FixPack.writeRecipe(recipe, in: folder)
         }
         return result.message
