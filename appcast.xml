@@ -5,6 +5,26 @@
     <description>Combined macSteam + NotProton releases. Add each one with scripts/appcast-add.sh.</description>
     <language>en</language>
     <item>
+      <title>Version 0.8.12</title>
+      <pubDate>Sat, 28 Nov 2026 05:39:00 GMT</pubDate>
+      <sparkle:version>0.8.12</sparkle:version>
+      <sparkle:shortVersionString>0.8.12</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<div style="white-space: pre-wrap">The OnlineFix card on a store page now follows the build Steam actually starts, instead of assuming any macOS bundle means the Mac version.
+
+Steam leaves an empty `Game.app/Contents/MacOS` behind when it installs the Windows build beside it. That skeleton used to be read as a Mac build, so a game with Windows files and a shoelace of an .app still showed the Mac wording and its own .exe was ignored.
+
+- A Mac build now has to be a bundle with a real program in it.
+- A Windows build now has to be a real PE executable, with the helpers games ship (crash handler, uninstaller, vcredist) skipped so they cannot pass for the game.
+- With both on disk the card says the Windows version, since that is what starts, and mentions the leftover Mac build beside it.
+
+Nothing here is keyed to particular games. Also in this build: patching a Mac bundle keeps its hardened runtime and entitlements, which dyld needs for the libraries Steam injects; and an unlicensed Mac game starts as 480 so the session and the ticket agree.</div>]]></description>
+      <enclosure url="https://github.com/Falhoo/macsteam/releases/download/v0.8.12/macSteam-0.8.12.dmg"
+                 type="application/octet-stream"
+                 sparkle:edSignature="p/b8XRKh9H9IhMmIMB8ujAHhhIsM7uiKN7kf/N+zdtFX1NZ9RqopU9BzaiTm4o8nov0zqh5aZfRAUhsEKshGCw=="
+                 length="89774225" />
+    </item>
+    <item>
       <title>Version 0.8.11</title>
       <pubDate>Fri, 27 Nov 2026 09:15:59 GMT</pubDate>
       <sparkle:version>0.8.11</sparkle:version>
