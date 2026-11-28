@@ -498,3 +498,61 @@ enum PhotonAuth {
         lock.unlock()
     }
 }
+
+// MARK: - Learning which auth a Photon app wants
+
+extension PhotonAuth {
+
+    /// The mode the assemblies are sending right now, when it can be told.
+    static func observedMode(in gameFolder: URL) -> Mode? {
+        let infos = inspect(gameFolder: gameFolder).filter(\.canPatch)
+        for info in infos {
+            guard let current = info.current else { continue }
+            if current == info.custom { return .custom }
+            if current == info.steam { return .steam }
+        }
+        return nil
+    }
+
+    /// The modes this game's assemblies could send, best first, `none` last.
+    static func modes(in gameFolder: URL) -> [Mode] {
+        let infos = inspect(gameFolder: gameFolder).filter(\.canPatch)
+        guard !infos.isEmpty else { return [] }
+        var modes: [Mode] = []
+        if infos.contains(where: { $0.steam != nil }) { modes.append(.steam) }
+        if infos.contains(where: { $0.custom != nil }) { modes.append(.custom) }
+        if infos.contains(where: \.canStripAuth) { modes.append(.none) }
+        return modes
+    }
+
+    /// Which mode to try after Photon turned one down.
+    ///
+    /// No game tells the fix which auth its Photon app is registered for, and the
+    /// answer is not the same for every app: one refuses the type outright, the next
+    /// accepts the type and refuses the Steam ticket it carries. Both answers are in
+    /// the game's own log, so the patch follows them instead of guessing: a refused
+    /// type moves to the other type, and a refused ticket moves from Steam's to the
+    /// app's own auth, which carries no ticket to refuse.
+    static func nextMode(after failure: PhotonLog.Evidence.Failure, current: Mode?,
+                         in gameFolder: URL) -> Mode? {
+        let all = modes(in: gameFolder)
+        let usable = all.filter { $0 != current }
+        switch failure {
+        case .authTypeRefused:
+            // The type itself is wrong: take the other one.
+            return usable.first { $0 != .none }
+        case .ticketRejected:
+            // The type is accepted, the ticket is not. Steam auth cannot be made to
+            // work for an account without the game, so send the app's own auth.
+            if current == .steam { return usable.first { $0 == .custom } }
+            return nil
+        case .appIDRefused:
+            return nil
+        case .authRefused:
+            // Nothing more specific: only change the type if it has not been tried.
+            return current == nil ? all.first : nil
+        case .none:
+            return nil
+        }
+    }
+}

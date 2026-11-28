@@ -225,6 +225,22 @@ struct FixDiagnosis: Sendable {
             // Any assembly that carries the patchable property, not the first one:
             // the folder can hold several Photon-named assemblies and only one of
             // them be the client the patch knows.
+            // What Photon itself said last time outranks any guess: the type it turned
+            // down and the type it takes are both in the log, so the report says which
+            // one the patch has to send instead of leaving the player with a refusal.
+            if let evidence = PhotonLog.read(gameFolder: scan.folder, prefix: scan.prefix),
+               evidence.isFailure,
+               let current = PhotonAuth.observedMode(in: scan.folder),
+               let next = PhotonAuth.nextMode(after: evidence.failure, current: current,
+                                              in: scan.folder) {
+                diagnosis.add(FixFinding(
+                    code: "OF073", level: .notice,
+                    title: "Photon refused the auth this game sends",
+                    detail: "\(evidence.title). The game currently sends \(current.title), "
+                        + "which this Photon app does not take.",
+                    remedy: "A repair writes \(next.title) instead, which is the type the "
+                        + "same refusal points at; launch the game again afterwards"))
+            }
             if unlicensed, PhotonAuth.inspect(gameFolder: scan.folder).contains(where: {
                 $0.canPatch
             }) {

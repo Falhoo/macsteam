@@ -132,6 +132,15 @@ enum FixService {
             if !repairNotes(outcome).isEmpty {
                 recipe.notes.append("Install test: " + repairNotes(outcome))
             }
+            // The test started the game, so Photon has already answered for this
+            // install. Take that answer now: the fix is only worth the connection it
+            // gets, and a wrong auth type is the commonest thing that stops one.
+            var learned = Outcome()
+            if learnPhotonAuth(appID: appID, folder: folder, recipe: &recipe,
+                               outcome: &learned) {
+                outcome.notes.append(contentsOf: learned.notes)
+                outcome.testNote = learned.notes.joined(separator: " ")
+            }
             try? FixPack.writeRecipe(recipe, in: folder)
         }
         return outcome
@@ -369,8 +378,29 @@ enum FixService {
     /// are not in the pack, so `FixPack.verify` cannot see them; this is where that
     /// half is restored, and it says so when it had work to do.
     /// Puts the Photon auth patch back if a Steam verify replaced the assembly.
-    /// Returns true when it had to write anything.
+    /// Photon's own answer decides the auth type. Every game ships a different app,
+    /// and nothing on disk says which auth that app is registered for; the log does.
+    /// When it names a refusal, the patch moves to the type that refusal implies, and
+    /// the recipe keeps the new one so the next repair starts from it.
     @discardableResult
+    private static func learnPhotonAuth(appID: Int, folder: URL, recipe: inout FixRecipe,
+                                        outcome: inout Outcome) -> Bool {
+        let log = PhotonLog.read(gameFolder: folder, prefix: nil)
+        guard let evidence = log, evidence.isFailure else { return false }
+        let current = recipe.photonAuth.flatMap(PhotonAuth.Mode.init(rawValue:))
+            ?? PhotonAuth.observedMode(in: folder)
+        guard let next = PhotonAuth.nextMode(after: evidence.failure, current: current,
+                                             in: folder) else { return false }
+        guard let written = try? PhotonAuth.setEnabled(true, in: folder, mode: next),
+              !written.isEmpty else { return false }
+        recipe.photonAuth = next.rawValue
+        let said = evidence.title.lowercased()
+        let was = current?.title ?? "what the game shipped"
+        outcome.notes.append("Photon said \(said), so the auth type is now \(next.title) "
+            + "instead of \(was); launch it again.")
+        return true
+    }
+
     private static func repatchPhotonAuth(_ recipe: FixRecipe, folder: URL,
                                           outcome: inout Outcome) -> Bool {
         guard let raw = recipe.photonAuth, let mode = PhotonAuth.Mode(rawValue: raw) else {
@@ -498,6 +528,14 @@ enum FixService {
             recordPhotonPatch(&recipe, folder: folder)
             let macPatched = repatchMacBuild(recipe, folder: folder, outcome: &outcome)
             let authPatched = repatchPhotonAuth(recipe, folder: folder, outcome: &outcome)
+            // Photon's own answer outranks the recipe's idea of which auth the game
+            // wants: a game that was patched with the type its app refuses says so in
+            // its log, and moving to the other type is the difference between the fix
+            // working and the player seeing "CustomAuthenticationFailed".
+            if learnPhotonAuth(appID: appID, folder: folder, recipe: &recipe,
+                               outcome: &outcome) {
+                try? FixPack.write(recipe, in: folder)
+            }
             if !macPatched, !authPatched {
                 outcome.notes.append("Every file the fix put in place is still there.")
             }
