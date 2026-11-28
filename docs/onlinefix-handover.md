@@ -459,3 +459,83 @@ removed; it never reached a Photon room on this account.
 The earlier 0.8.10 executable is backed up under
 `~/Library/Application Support/macsteam/backups/`. Nothing is committed and no release
 was published.
+
+## The autopilot: asking the game to connect for us (29 November 2026)
+
+Clicking a game's menus to find out whether a patch works needs to know where that
+game keeps its button, and every game puts it somewhere else. So the game is asked
+instead, and Photon's answer is written down where the installer can read it.
+
+**Three files, one mechanism.**
+
+- `MacsteamAutopilot.dll` — a native PE DLL, named in the fix's `dlllist.txt` after
+  `MonoBleedingEdge\EmbedRuntime\mono-2.0-bdwgc.dll`. Source: `onlinefix/autopilot/native/shim.c`.
+- The payload inside it — `Macsteam.Autopilot.Run(string folder)`, C#, compiled by
+  `mcs` and embedded in the shim as bytes so a fix carries one file. Source:
+  `onlinefix/autopilot/managed/Autopilot.cs`.
+- `onlinefix/autopilot/build.sh` — rebuilds the DLL. `mcs` and
+  `x86_64-w64-mingw32-gcc` from Homebrew; the built DLL is committed and shipped, so
+  players never need a compiler.
+
+**The trap that cost the most time:** naming a *managed* DLL in `dlllist.txt` does
+nothing. Under Wine `LoadLibrary` on a managed assembly only maps the image; no
+module initializer runs and no entry point is called. `Custom.dll` appears to work
+that way only because it is loaded by Mono through OnlineFix64, not by
+`LoadLibrary`. The shim therefore does the loading itself, through Mono's embedding
+API, from a thread of its own:
+
+```
+mono_get_root_domain()          // not mono_domain_get: that answers for the calling
+                                // thread, and an unmanaged thread has no domain
+mono_thread_attach(domain)      // retried: it fails until the runtime has finished
+mono_image_open_from_data_with_name(bytes, len, copy, ...)
+mono_assembly_load_from_full(image, ...)
+mono_class_from_name(image, "Macsteam", "Autopilot")
+mono_class_get_method_from_name(klass, "Run", 1)
+mono_runtime_invoke(method, NULL, params, &exc)
+```
+
+**`AppDomain.CurrentDomain.BaseDirectory` is null in an assembly loaded from
+memory**, so the game folder is passed in as the method's argument, built by the
+shim from its own `GetModuleFileNameA`.
+
+**What the payload does.** Finds Photon by name — `Photon.Pun.PhotonNetwork` (PUN2),
+`Photon.Realtime.PhotonNetwork`, or any type called `PhotonNetwork` that has
+`IsConnected` — waits on `UnityEngine.Time.realtimeSinceStartup` rather than a fixed
+sleep, sets a nickname, calls `ConnectUsingSettings`, then polls
+`NetworkClientState` and writes one line:
+
+```
+16:58:02 fail CustomAuthenticationFailed region=asia
+```
+
+Only when `macsteam-autopilot.on` is beside the game, which `LaunchTest` writes
+before the launch and deletes after, so a normal launch is untouched. The log is
+emptied at the start of each run and kept afterwards for the report.
+
+**Reading it.** `Autopilot.outcome(in:)` turns the lines into
+`.authenticated(region:)`, `.refused(cause)`, `.timedOut(state)` or `.silent(why)`.
+`PhotonLog.classify` treats `CustomAuthenticationFailed` as `ticketRejected` — the
+custom provider is what hands Steam's ticket over, so that cause is a refused
+ticket, not a refused type — and `FixService.learnPhotonAuth` prefers this answer
+over the game's log. The install test then launches, reads, re-patches and launches
+again by itself.
+
+**Only Mono builds can be driven** (`Autopilot.canDrive`): an IL2CPP or native Mac
+build has no runtime to load an assembly into and keeps the older paths.
+
+**Measured on R.E.P.O. (3241660):** `CustomAuthenticationFailed`, region `asia`,
+with Steam auth *and* again after the ladder switched to custom auth. So its refusal
+is not the auth type, and the next thing to look at is the region (OnlineFix's
+`Custom.dll` also patches `GetLocalRegionInfo`/`RegionSize`; we patch only the auth
+type and the app id).
+
+**Two launch-test traps found on the way:**
+
+- `CGWindowListCopyWindowInfo` with `.optionOnScreenOnly` misses a game window that
+  Steam put on another Space or behind its own window, and the test then says "no
+  window appeared" for a game that is plainly open. Use `.optionAll`.
+- A shell whose command line names the game (`pkill -f REPO.exe`) is not the game,
+  and Unity's crash reporter is a separate process that opens a window of its own.
+  Match processes by the executable and liveness, not by one window's pid.
+
